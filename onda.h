@@ -57,20 +57,20 @@ float4 ps(float4 pos : SV_POSITION) : SV_TARGET {
     float2 dir = dist > 0.5 ? r / dist : float2(0, 0);
     float lontano = length(max(abs(centro), abs(dim - centro)));
     float R = apri * lontano * 1.08;
-    float lam = (44.0 + 46.0 * apri) * dpi;                       // lunghezza d'onda
+    float lam = (62.0 + 60.0 * apri) * dpi;                       // lunghezza d'onda
     float x = dist - R;                                           // < 0: dietro il fronte
-    float pacchetto = exp(-pow((x + 0.9 * lam) / (1.4 * lam), 2.0));
+    float pacchetto = exp(-pow((x + 1.1 * lam) / (1.8 * lam), 2.0));
     float forza = (1.0 - apri) * (1.0 - apri) * smoothstep(0.0, 0.02, apri);
     float fase = 6.2831853 * x / lam;
     float3 cf = float3(0, 0, 0);
     float af = 0;
     if (foto > 0.5) {
         // la foto dello schermo, spostata lungo il raggio come la luce attraverso l'acqua
-        float spost = 15.0 * dpi * sin(fase) * pacchetto * forza;
+        float spost = 26.0 * dpi * sin(fase) * pacchetto * forza;
         cf = schermo.Sample(camp, (p - dir * spost) / dim).rgb;
         // riflessi: le creste un po' piu' chiare, gli avvallamenti un po' piu' scuri
         float luce = cos(fase) * pacchetto * forza;
-        cf = saturate(cf + 0.09 * saturate(luce) - 0.05 * saturate(-luce));
+        cf = saturate(cf + 0.12 * saturate(luce) - 0.07 * saturate(-luce));
         // la foto si vede solo dentro l'increspatura: fuori c'e' lo schermo vero
         af = saturate(pacchetto * forza * 6.0);
     }
@@ -190,7 +190,7 @@ private:
         return !px.empty();
     }
 
-    static constexpr double DURATA_ONDA = 1.05, DURATA_SFUMA = 0.32;
+    static constexpr double DURATA_ONDA = 1.35, DURATA_SFUMA = 0.32;
 
     static double adesso() {
         static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
