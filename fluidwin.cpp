@@ -186,7 +186,10 @@ static const wchar_t* CHIAVE_FLUIDWIN = L"Software\\FluidWin";   // stato origin
 static double gRaggioBase = RAGGIO_ANGOLI;   // px a 96 dpi: angoli delle finestre (quelli di Windhawk, se c'e')
 
 // angoli di una finestra in pixel, ai DPI del suo monitor (le sue foto sono a quei DPI)
-static double raggioDi(HWND h) { const UINT d = IsWindow(h) ? GetDpiForWindow(h) : 0; return gRaggioBase * (d ? d : 96) / 96.0; }
+// scala a cui la finestra si vede (1 al 100%, 1.5 al 150%...; vedi scala.h): le distanze in pixel pensate al 100% si
+// moltiplicano per questa
+static double scalaFinestra(HWND h) { return scala::di(h); }
+static double raggioDi(HWND h) { return gRaggioBase * scalaFinestra(h); }
 
 static void liberaFoto(HWND h) {
     auto it = gFoto.find(h);
@@ -196,6 +199,9 @@ static void liberaFoto(HWND h) {
 static double ora() { LARGE_INTEGER c; QueryPerformanceCounter(&c); return c.QuadPart / gFreq; }
 
 static void riavvia(const char* perche);
+// DPI dello schermo principale (96 = 100%) e quelli che aveva all'avvio
+static UINT dpiPrincipale() { return (UINT)std::lround(vetro::dpiMonitor(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY)) * 96); }
+static UINT gDpiAvvio = 96;
 
 static void logf(const char* fmt, ...) {
     if (!gLog) return;
@@ -759,6 +765,14 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
             // molle: ogni vertice insegue il suo posto sulla finestra vera; vicino al punto afferrato la molla e'
             // rigida (e quel punto resta incollato al mouse), lontano e' morbida e oscilla
             const double diag = std::hypot(w, hh);
+            // Finestre grandi (schermi larghi, 4K): a parita' di molle si deformavano e tremavano molto di piu' (si
+            // trascinano piu' veloci e per piu' pixel). Oltre ~1300 punti di diagonale le molle si fanno piu' rigide e
+            // piu' smorzate, in proporzione: la gelatina resta della stessa "consistenza" a ogni misura
+            const double sc = scalaFinestra(g.hwnd);
+            // (al massimo 3: con molle ancora piu' rigide l'integrazione a 4 passi per fotogramma non sarebbe stabile)
+            const double grande = std::clamp(diag / sc / 1300.0, 1.0, 3.0), duro = grande * grande;
+            const double smorza = std::min(0.80, 0.50 + 0.30 * (grande - 1.0));
+            const double maxDist = 80 * sc / grande;   // deformazione massima (prima 80 px fissi)
             const int passi = 4; const double h2 = dt / passi;
             bool ferma = true;
             for (int r = 0; r < GEL_R; r++) for (int c = 0; c < GEL_C; c++) {
@@ -766,8 +780,8 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
                 const double u = (double)c / (GEL_C - 1), vv = (double)r / (GEL_R - 1);
                 const double ox = v.left + u * w, oy = v.top + vv * hh;
                 const double d = std::hypot((u - g.u0) * w, (vv - g.v0) * hh) / std::max(1.0, diag);
-                const double rig = 300 + 1500 * std::exp(-(d * d) / (0.35 * 0.35));
-                const double sm = 2 * std::sqrt(rig) * 0.50;
+                const double rig = (300 + 1500 * std::exp(-(d * d) / (0.35 * 0.35))) * duro;
+                const double sm = 2 * std::sqrt(rig) * smorza;
                 for (int s = 0; s < passi; s++) {
                     g.vx[k] += (rig * (ox - g.x[k]) - sm * g.vx[k]) * h2; g.x[k] += g.vx[k] * h2;
                     g.vy[k] += (rig * (oy - g.y[k]) - sm * g.vy[k]) * h2; g.y[k] += g.vy[k] * h2;
@@ -775,10 +789,10 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
                 // il punto afferrato e il suo intorno restano esattamente sotto il mouse
                 const double colla = std::exp(-(d * d) / (0.06 * 0.06));
                 g.x[k] += (ox - g.x[k]) * colla; g.y[k] += (oy - g.y[k]) * colla;
-                // mai oltre 80 px dal posto giusto, anche lanciandola velocissima
+                // mai oltre maxDist dal posto giusto, anche lanciandola velocissima
                 const double dx = g.x[k] - ox, dy = g.y[k] - oy, dist = std::hypot(dx, dy);
-                if (dist > 80) { g.x[k] = ox + dx * 80 / dist; g.y[k] = oy + dy * 80 / dist; }
-                if (dist > 0.6 || std::hypot(g.vx[k], g.vy[k]) > 10) ferma = false;
+                if (dist > maxDist) { g.x[k] = ox + dx * maxDist / dist; g.y[k] = oy + dy * maxDist / dist; }
+                if (dist > 0.6 * sc || std::hypot(g.vx[k], g.vy[k]) > 10 * sc) ferma = false;
             }
             if (g.fase == 1 && ((ferma && g.alza <= 0) || t - g.tFase > 2.5)) {
                 for (int k = 0; k < GEL_C * GEL_R; k++) {
@@ -828,7 +842,7 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
             for (int k = 0; k < GEL_C * GEL_R; k++)
                 g.maglia[k] = {(float)g.x[k], (float)g.y[k], (float)(k % GEL_C) / (GEL_C - 1), (float)(k / GEL_C) / (GEL_R - 1)};
             const int OC = GEL_C + 2, OR = GEL_R + 2;
-            const double fw = g.foto.w, fh = g.foto.h, M = 80;
+            const double fw = g.foto.w, fh = g.foto.h, M = 80 * scalaFinestra(g.hwnd);
             g.ombra.resize(OC * OR);
             for (int r = 0; r < OR; r++) for (int c = 0; c < OC; c++) {
                 const int ci = std::clamp(c - 1, 0, GEL_C - 1), ri = std::clamp(r - 1, 0, GEL_R - 1), k = ri * GEL_C + ci;
@@ -1518,7 +1532,7 @@ static void suCattura(HWND figlia) {
     InfoFinestra* i = traccia(h);
     if (!i || !leggiRettangoli(h, *i)) return;
     POINT pt; GetCursorPos(&pt);
-    if (!PtInRect(&i->visibile, pt) || pt.y > i->visibile.top + 120) return;
+    if (!PtInRect(&i->visibile, pt) || pt.y > i->visibile.top + 120 * scalaFinestra(h)) return;
     // pulsante chiudi dell'app: foto per l'animazione di chiusura (parte solo se la finestra si chiude davvero)
     {
         DWORD_PTR colpo = 0;
@@ -2169,11 +2183,15 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 else if (scelta == 3) apriImpostazioni();
             }
             return 0;
-        case WM_DISPLAYCHANGE: aggiornaOrigine(); if (gGenioOk) gGenio.aggiornaSchermo(); return 0;
+        case WM_DISPLAYCHANGE:
+            aggiornaOrigine(); if (gGenioOk) gGenio.aggiornaSchermo();
+            SetTimer(h, 12, 800, nullptr);   // la scala nuova si legge quando Windows ha finito di cambiarla
+            return 0;
         // un programma chiede a FluidWin di chiudersi (per esempio taskkill senza /F): uscita pulita, come da "Esci"
         case WM_CLOSE: logf("chiusura chiesta da fuori"); PostQuitMessage(0); return 0;
         case WM_SETTINGCHANGE:
             if (l && !wcscmp((const wchar_t*)l, L"ImmersiveColorSet") && gDockOk) gDock.aggiornaTemaVetri();   // tema chiaro/scuro
+            SetTimer(h, 12, 800, nullptr);   // (cambiando la scala da Impostazioni arriva anche questo)
             return 0;
         case WM_APRI_LAUNCHER: if (gDockOk) gDock.apriLauncher(); return 0;
         case WM_VOLUME:
@@ -2195,6 +2213,15 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (IsWindow((HWND)w)) { preparaChiusura((HWND)w); PostMessageW((HWND)w, WM_SYSCOMMAND, SC_CLOSE, 0); }
             return 0;
         case WM_TIMER:
+            if (w == 12) {
+                // Scala dello schermo principale cambiata (Impostazioni > Schermo, o un portatile attaccato a un monitor
+                // con un'altra scala): dock, pannelli, launcher e capsule hanno misure calcolate alla scala di prima.
+                // Come per la GPU persa, FluidWin si riavvia e ricrea tutto alla scala nuova
+                KillTimer(h, 12);
+                const UINT d = dpiPrincipale();
+                if (d != gDpiAvvio) { logf("scala cambiata: %u -> %u dpi", gDpiAvvio, d); riavvia("la scala dello schermo e' cambiata"); }
+                return 0;
+            }
             if (w == 7) {
                 controllaAngolo();
                 if (!gChiusure.empty()) pulisciChiusure();
@@ -2359,6 +2386,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     RegisterClassW(&wm);
     gMessaggi = CreateWindowExW(0, wm.lpszClassName, L"FluidWin", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
     SetTimer(gMessaggi, 1, 500, nullptr);
+    gDpiAvvio = dpiPrincipale();
+    logf("schermo principale: %d x %d, scala %u%%", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), gDpiAvvio * 100 / 96);
 
     gIcona = {};
     gIcona.cbSize = sizeof(gIcona); gIcona.hWnd = gMessaggi; gIcona.uID = 1;

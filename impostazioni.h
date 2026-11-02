@@ -71,7 +71,10 @@ public:
         const RECT a = vetro::areaPrincipale(true);
         v.dpi = vetro::dpiMonitor(MonitorFromPoint({a.left, a.top}, MONITOR_DEFAULTTOPRIMARY));
         const float d = v.dpi;
-        const int w = (int)std::lround(460 * d), h = (int)std::lround(altezza() * d);
+        // schermi bassi (1080 px al 150%, 768 px): se in una colonna le voci non entrano, due colonne affiancate
+        colonne = 1;
+        if (altezza() * d > (a.bottom - a.top) - 40 * d && 2 * 460 * d <= (a.right - a.left) - 40 * d) colonne = 2;
+        const int w = (int)std::lround(460 * colonne * d), h = (int)std::lround(altezza() * d);
         v.posiziona((a.left + a.right - w) / 2, (a.top + a.bottom - h) / 2, w, h, HWND_TOP, SWP_SHOWWINDOW);
         if (!fTitolo) {
             fTitolo = v.formato(20 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
@@ -153,7 +156,9 @@ private:
     struct Zona { D2D1_RECT_F r; int id; };
     std::vector<Zona> zone;
 
-    float altezza() const { return 76 + voci.size() * 58.0f + 40 + 64 + 52; }
+    int colonne = 1;
+    int righe() const { return (int)((voci.size() + colonne - 1) / colonne); }
+    float altezza() const { return 76 + righe() * 58.0f + 40 + 64 + 52; }
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
     int zonaIn(float x, float y) const {
@@ -192,8 +197,12 @@ private:
         }
         float y = 68 * d;
         const float rr = std::max(8.0f, raggio::vetro() - 12.0f) * d;
+        const int nr = righe();
+        const float colW = W / colonne;
         for (size_t i = 0; i < voci.size(); i++) {
-            const D2D1_RECT_F r = {16 * d, y, W - 16 * d, y + 54 * d};
+            const int col = (int)i / nr, riga = (int)i % nr;
+            const float ry = y + riga * 58 * d;
+            const D2D1_RECT_F r = {col * colW + 16 * d, ry, (col + 1) * colW - 16 * d, ry + 54 * d};
             zone.push_back({r, (int)i});
             if (sopra == (int)i) {
                 v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.07f) : D2D1::ColorF(0, 0, 0, 0.04f));
@@ -202,8 +211,8 @@ private:
             v.testo(voci[i].nome, fVoce, {r.left + 12 * d, r.top + 7 * d, r.right - 70 * d, r.top + 29 * d}, ink);
             v.testo(voci[i].spiega, fSotto, {r.left + 12 * d, r.top + 28 * d, r.right - 70 * d, r.top + 48 * d}, tenue);
             levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i]);
-            y += 58 * d;
         }
+        y += nr * 58 * d;
         // misura della capsula: tre scelte
         y += 8 * d;
         v.testo(L"MISURA DELLA CAPSULA", fSezione, {28 * d, y, W - 28 * d, y + 22 * d}, tenue);

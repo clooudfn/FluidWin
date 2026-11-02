@@ -1316,6 +1316,7 @@ private:
     bool pDirty = false, pAnimazione = false, pChiusura = false, pMouseDentro = false, trascinaVolume = false;
     double pT0 = 0, pChiusoT = -10, pK = -1;
     float PW = 0, PH = 0, PWMAX = 0, PHMAX = 0;
+    float phDisponibile = 0;             // spazio sopra l'isola all'ultima apertura (vedi altezzaMassimaP)
     RECT rettPannello{};                 // posizione finale sullo schermo
     std::vector<AppSfondo> appSfondo;
     std::vector<Elemento> elementi;      // zone cliccabili del pannello, ricalcolate a ogni disegno
@@ -1416,6 +1417,11 @@ private:
         pannelloTipo = tipo; pChiusura = false; pT0 = adesso(); pK = -1;
         pSopra = pPremuto = -1; evidP.clear(); trascinaVolume = false; pMouseDentro = false;
         PW = PWMAX;
+        // spazio vero sopra l'isola (schermi bassi, scala al 150%: 1080 px sono 720 punti): nessun pannello lo supera
+        {
+            const int y1 = schermo.bottom - H + (int)isola.top - (int)std::round(10 * dpi);
+            phDisponibile = std::max(200 * dpi, (float)(y1 - schermo.top) - 12 * dpi);
+        }
         if (tipo == P_SFONDO) {
             PH = altezzaSfondo();   // con l'elenco di adesso; quello nuovo arriva dal thread e la corregge
         } else if (tipo == P_WIDGET) {
@@ -1426,6 +1432,7 @@ private:
             permessoN = lettoreN.leggi(listaN);
             PH = altezzaNotifiche();
         } else PH = altezzaControllo();
+        PH = std::min(PH, altezzaMassimaP());
         // sopra l'isola, allineato al suo bordo destro
         const int x1 = schermo.left + (int)isola.right, y1 = schermo.bottom - H + (int)isola.top - (int)std::round(10 * dpi);
         rettPannello = {x1 - (int)PW, y1 - (int)PH, x1, y1};
@@ -1659,13 +1666,15 @@ private:
 
     // ---- notifiche e calendario (clic sull'ora) ----
     static constexpr float N_TESTA = 84, N_CAL = 176, N_TITOLO = 40, N_SCHEDA = 70, N_PIEDE = 48;
+    // altezza massima di un pannello adesso: quella della sua superficie e lo spazio sopra l'isola
+    float altezzaMassimaP() const { return std::min(PHMAX, phDisponibile > 0 ? phDisponibile : PHMAX); }
     int schedeVisibili() const {
-        const int spazio = (int)((PHMAX / dpi - N_TESTA - N_CAL - N_TITOLO - N_PIEDE - 10) / N_SCHEDA);
+        const int spazio = (int)((altezzaMassimaP() / dpi - N_TESTA - N_CAL - N_TITOLO - N_PIEDE - 10) / N_SCHEDA);
         return std::max(1, std::min((int)listaN.size(), spazio));
     }
     float altezzaNotifiche() const {
         const float schede = (!permessoN || listaN.empty()) ? 56 : schedeVisibili() * N_SCHEDA + ((int)listaN.size() > schedeVisibili() ? 22 : 0);
-        return std::min(PHMAX, std::round((N_TESTA + N_CAL + N_TITOLO + schede + N_PIEDE) * dpi));
+        return std::min(altezzaMassimaP(), std::round((N_TESTA + N_CAL + N_TITOLO + schede + N_PIEDE) * dpi));
     }
 
     // dopo aver tolto notifiche: elenco nuovo e pannello della nuova altezza (il bordo in basso resta fermo)
@@ -2247,7 +2256,9 @@ private:
     }
 
     float altezzaSfondo() const {
-        const int righe = std::max(1, (int)std::min<size_t>(6, (appSfondo.size() + 3) / 4));
+        // righe di app: quante ce ne sono (massimo 6) e quante ne entrano nello spazio sopra l'isola
+        const int entrano = std::max(1, (int)((altezzaMassimaP() / dpi - 48 - 52) / 86));
+        const int righe = std::max(1, std::min({(int)std::min<size_t>(6, (appSfondo.size() + 3) / 4), entrano}));
         return std::round((48 + righe * 86 + 52) * dpi);
     }
 
@@ -2527,7 +2538,9 @@ private:
     IDXGISwapChain1* scL = nullptr; IDCompositionTarget* targetL = nullptr; IDCompositionVisual* visualL = nullptr;
     IDCompositionEffectGroup* effettoL = nullptr; ID2D1Bitmap1* bersaglioL = nullptr;
     float LW = 0, LH = 0, LEXTRA = 0;      // misure del launcher; sotto, lo spazio fino all'icona da cui esce
+    float LHMAX = 0;                       // altezza della sua superficie (LH si adatta allo schermo a ogni apertura)
     HWND primaDelLauncher = nullptr;       // finestra in primo piano prima dell'apertura
+    bool lRipreso = false;                 // primo piano gia' ripreso una volta dopo l'apertura (vedi WM_ACTIVATE)
     RECT rettLauncher{};                   // il launcher vero e proprio (la finestra arriva piu' in basso, fino all'icona)
     POINT ancora{};                        // icona "App": da qui cresce e qui rientra (coordinate della finestra)
     std::vector<AppL> tutteApp;
@@ -2654,7 +2667,7 @@ private:
     bool launcherDaDisegnare() const { return lAperto && (lDirty || lAnim); }
 
     bool creaLauncher(HINSTANCE inst) {
-        LW = std::ceil(760 * dpi); LH = std::ceil(580 * dpi); LEXTRA = std::ceil(160 * dpi);
+        LW = std::ceil(760 * dpi); LH = LHMAX = std::ceil(580 * dpi); LEXTRA = std::ceil(160 * dpi);
         WNDCLASSW wl{}; wl.lpfnWndProc = procLauncher; wl.hInstance = inst; wl.lpszClassName = L"FluidWin.Launcher";
         wl.hCursor = LoadCursor(nullptr, IDC_ARROW);
         RegisterClassW(&wl);
@@ -2833,10 +2846,12 @@ public:
         if (!nessunaScheda()) nascondiSchede();
         primaDelLauncher = GetForegroundWindow();
         query.clear(); filtra(); lSopra = -1; lScroll = 0;
-        lAperto = true; lChiusura = false; lScala = 0.12; lVel = 0; lAlfa = 0; lT0 = adesso(); lRegione = false;
+        lAperto = true; lChiusura = false; lScala = 0.12; lVel = 0; lAlfa = 0; lT0 = adesso(); lRegione = false; lRipreso = false;
         // sopra il dock, al centro; la finestra scende fino all'icona "App"
         const int x0 = schermo.left + (int)std::round((W - LW) / 2);
         const int y1 = schermo.bottom - H + (int)std::round(yBaseRiposo() - S - PAD - 18 * dpi);
+        // schermi bassi (1366x768 al 125%: ~520 punti sopra il dock): il launcher si accorcia invece di uscire in alto
+        LH = std::clamp((float)(y1 - schermo.top) - 12 * dpi, 300 * dpi, LHMAX);
         rettLauncher = {x0, y1 - (int)LH, x0 + (int)LW, y1};
         float ax = W / 2.0f;
         const auto pos = posizioniRiposo();
@@ -3179,8 +3194,20 @@ private:
                 return 0;
             }
             case WM_ACTIVATE:
-                if (LOWORD(w) == WA_INACTIVE) d->chiudiLauncher();
+                if (LOWORD(w) == WA_INACTIVE) {
+                    // Appena aperto, il primo piano preso agganciandosi all'app di prima a volte torna a lei subito dopo
+                    // lo sgancio (come per la ricerca): non e' un clic altrove, si riprende una volta invece di chiudersi
+                    if (d->lAperto && !d->lChiusura && !d->lRipreso && adesso() - d->lT0 < 0.3 &&
+                        d->primaDelLauncher && GetForegroundWindow() == d->primaDelLauncher) {
+                        d->lRipreso = true;
+                        d->scrivi("launcher: primo piano tornato all'app di prima, lo riprende");
+                        PostMessageW(h, WM_APP + 3, 0, 0);
+                        return 0;
+                    }
+                    d->chiudiLauncher();
+                }
                 return 0;
+            case WM_APP + 3: if (d->lAperto && !d->lChiusura) prendiFuoco(h); return 0;
             case WM_CLOSE: d->chiudiLauncher(); return 0;   // Alt+F4: come Esc (la finestra non si distrugge, si riusa)
         }
         return DefWindowProcW(h, m, w, l);

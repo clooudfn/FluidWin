@@ -17,6 +17,7 @@
 #include <d2d1.h>
 #include <uiautomationclient.h>
 #include "stampa.h"
+#include "scala.h"
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
@@ -441,14 +442,21 @@ private:
     // Tasti disegnati dentro la pagina (Discord e altre app Electron): per Windows sono semplice contenuto, li
     // vede solo l'accessibilita'. Da destra verso sinistra, i primi tre pulsanti contigui nell'angolo in alto.
     // Solo per le finestre Chromium: alla prima domanda Chromium accende l'accessibilita' e risponde dalla seconda.
+    // Scala della finestra (1 al 100%, 1.5 al 150%...): tutte le distanze in pixel delle misure sono pensate al 100% e
+    // si moltiplicano per questa. Senza, al 150% la barra del titolo e i tasti (piu' alti e larghi) uscivano dalle
+    // zone cercate e la capsula finiva nel posto sbagliato
+    static float scalaDi(HWND h) { return scala::di(h); }
+    static int P(float sc, int n) { return (int)std::lround(n * sc); }
+
     bool tastiUia(Capsula& c, const RECT& v, RECT& t) {
         if (!uia || c.tentativiUia >= 4) return false;
         wchar_t cl[64] = L""; GetClassNameW(c.bersaglio, cl, 64);
         if (wcscmp(cl, L"Chrome_WidgetWin_1") || IsHungAppWindow(c.bersaglio)) return false;
         c.tentativiUia++;
-        RECT tt{}; int n = 0, x = v.right - 4, ultimo = x;
-        const int y = v.top + 12;
-        while (n < 3 && x > v.right - 300) {
+        const float sc = scalaDi(c.bersaglio);
+        RECT tt{}; int n = 0, x = v.right - P(sc, 4), ultimo = x;
+        const int y = v.top + P(sc, 12);
+        while (n < 3 && x > v.right - P(sc, 300)) {
             const POINT p = {x, y};
             HWND sotto = WindowFromPoint(p);
             if (!sotto || GetAncestor(sotto, GA_ROOT) != c.bersaglio) return false;   // angolo coperto da un'altra finestra
@@ -457,11 +465,11 @@ private:
             CONTROLTYPEID tipo = 0; RECT r{};
             e->get_CurrentControlType(&tipo); e->get_CurrentBoundingRectangle(&r); e->Release();
             const int w = r.right - r.left, hh = r.bottom - r.top;
-            if (tipo == UIA_ButtonControlTypeId && PtInRect(&r, p) && w >= 16 && w <= 90 && hh >= 16 && hh <= 70 &&
-                (n == 0 || std::abs(hh - (tt.bottom - tt.top)) <= 3)) {
+            if (tipo == UIA_ButtonControlTypeId && PtInRect(&r, p) && w >= P(sc, 16) && w <= P(sc, 90) && hh >= P(sc, 16) && hh <= P(sc, 70) &&
+                (n == 0 || std::abs(hh - (tt.bottom - tt.top)) <= P(sc, 3))) {
                 if (n == 0) tt = r; else UnionRect(&tt, &tt, &r);
                 n++; x = ultimo = r.left - 1;
-            } else if ((n == 0 && x > v.right - 40) || (n > 0 && ultimo - x < 12)) x -= 3;   // margine o spazio fra due tasti
+            } else if ((n == 0 && x > v.right - P(sc, 40)) || (n > 0 && ultimo - x < P(sc, 12))) x -= 3;   // margine o spazio fra due tasti
             else break;
         }
         if (n < 3) return false;
@@ -486,13 +494,14 @@ private:
     // I tasti trovati l'ultima volta (stessa distanza dall'angolo in alto a destra) ci sono ancora? Si guardano il
     // chiudi, il riduci e un punto appena a sinistra (non deve essere un tasto): 3-4 hit test invece di ~70
     bool tastiAncoraLi(const Capsula& c, HWND h, const RECT& v, RECT& t) {
+        const float sc = scalaDi(h);
         const RECT r = {v.right - c.colpiDx - c.colpiW, v.top + c.colpiDy, v.right - c.colpiDx, v.top + c.colpiDy + c.colpiH};
-        if (r.left <= v.left || r.right - r.left < 40) return false;
-        const int y = v.top + 10;
-        const LRESULT destra = colpo(h, r.right - 6, y), sinistra = colpo(h, r.left + 4, y);
+        if (r.left <= v.left || r.right - r.left < P(sc, 40)) return false;
+        const int y = v.top + P(sc, 10);
+        const LRESULT destra = colpo(h, r.right - P(sc, 6), y), sinistra = colpo(h, r.left + P(sc, 4), y);
         if (destra != HTCLOSE || !tastoColpo(sinistra)) return false;
-        if (tastoColpo(colpo(h, r.left - 30, y))) return false;   // c'e' un tasto in piu' a sinistra: misura completa
-        if (!tastoColpo(colpo(h, r.right - 14, r.bottom - 3))) return false;
+        if (tastoColpo(colpo(h, r.left - P(sc, 30), y))) return false;   // c'e' un tasto in piu' a sinistra: misura completa
+        if (!tastoColpo(colpo(h, r.right - P(sc, 14), r.bottom - P(sc, 3)))) return false;
         t = r;
         return true;
     }
@@ -550,11 +559,12 @@ private:
         TITLEBARINFOEX tb{}; tb.cbSize = sizeof(tb);
         DWORD_PTR ok = 0;
         RECT t{};
+        const float sc = scalaDi(h);
         // misura accettabile: dentro la finestra e con le dimensioni di tre tasti
         auto valida = [&](RECT r) {
             IntersectRect(&r, &r, &v);
             const int w = r.right - r.left, hh = r.bottom - r.top;
-            return w >= 40 && hh >= 18 && hh <= 90 && w <= 400;
+            return w >= P(sc, 40) && hh >= P(sc, 18) && hh <= P(sc, 90) && w <= P(sc, 400);
         };
         bool classica = false;
         if (SendMessageTimeoutW(h, WM_GETTITLEBARINFOEX, 0, (LPARAM)&tb, SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &ok) &&
@@ -571,22 +581,24 @@ private:
             // tasti gia' trovati con l'hit test in questo stato: stanno ancora li' (verificato con pochi hit test)
         } else {
             // barra del titolo disegnata dall'app: da destra verso sinistra, dove iniziano e finiscono i tasti
-            const int y = v.top + 10;
+            const int y = v.top + P(sc, 10);
             // (le coordinate possono essere negative: monitor a sinistra o sopra quello principale)
+            // (passi di 3 px a qualsiasi scala: i tasti sono piu' larghi, il numero di hit test cresce col 150% ma
+            // un passo piu' lungo rischierebbe di saltare il margine fra due tasti)
             int destra = 0, sinistra = 0, vuoto = 0;
             bool trovato = false, chiudi = false;
-            for (int x = v.right - 3; x > v.right - 320 && x > v.left; x -= 3) {
+            for (int x = v.right - 3; x > v.right - P(sc, 320) && x > v.left; x -= 3) {
                 const LRESULT r = colpo(h, x, y);
                 if (r < 0) return false;
                 if (r == HTCLOSE || r == HTMAXBUTTON || r == HTMINBUTTON) {
                     if (!trovato) { destra = x; trovato = true; }
                     sinistra = x; vuoto = 0; chiudi |= r == HTCLOSE;
-                } else if (trovato && (vuoto += 3) > 24) break;
+                } else if (trovato && (vuoto += 3) > P(sc, 24)) break;
             }
             if (chiudi) {
                 int basso = y;
-                for (int yy = y; yy < v.top + 80; yy += 2) {
-                    const LRESULT r = colpo(h, destra - 8, yy);
+                for (int yy = y; yy < v.top + P(sc, 80); yy += 2) {
+                    const LRESULT r = colpo(h, destra - P(sc, 8), yy);
                     if (r != HTCLOSE && r != HTMAXBUTTON && r != HTMINBUTTON) break;
                     basso = yy;
                 }
@@ -598,30 +610,29 @@ private:
         }
         // il tasto chiudi vero puo' essere piu' alto di quanto dice l'app (o di quanto si e' misurato): se sotto la
         // capsula resta un pezzo di tasto, col mouse sopra diventa rosso. Si scende finche' l'hit test dice "tasto"
-        for (int yy = t.bottom, k = 0; k < 12; yy++, k++) {
-            const LRESULT r = colpo(h, t.right - 8, yy);
+        for (int yy = t.bottom, k = 0; k < P(sc, 12); yy++, k++) {
+            const LRESULT r = colpo(h, t.right - P(sc, 8), yy);
             if (r != HTCLOSE && r != HTMAXBUTTON && r != HTMINBUTTON) break;
             t.bottom = yy + 1;
         }
         IntersectRect(&t, &t, &v);   // la capsula non esce mai dalla finestra
         const int w = t.right - t.left, hh = t.bottom - t.top;
-        if (w < 40 || hh < 18 || hh > 90 || w > 400) {
+        if (w < P(sc, 40) || hh < P(sc, 18) || hh > P(sc, 90) || w > P(sc, 400)) {
             if (registro) { char b[120]; snprintf(b, 120, "capsula %p: misura scartata %dx%d (finestra %ld,%ld-%ld,%ld)", (void*)h, w, hh, v.left, v.top, v.right, v.bottom); scrivi(b); }
             return false;
         }
         // La capsula ha sempre la stessa misura (non quella dei tasti dell'app, che cambia da app ad app e fra
         // finestra ingrandita e normale): la sua finestra copre i tasti originali e quanto serve in piu' per lei.
         // Le parti non disegnate sono trasparenti anche al mouse
-        const float sc = GetDpiForWindow(h) / 96.0f;
-        c.r = raggioTasto * (sc > 0 ? sc : 1);
+        c.r = raggioTasto * sc;
         const int pw = (int)std::ceil(c.r * 9.3f), ph = (int)std::ceil(c.r * 2.9f);
         c.zoom = IsZoomed(h);
-        const int ra = c.zoom ? 0 : (int)std::ceil(raggioAngoli * (sc > 0 ? sc : 1));
+        const int ra = c.zoom ? 0 : (int)std::ceil(raggioAngoli * sc);
         // centro: quello della barra del titolo vera. Alcune app hanno i tasti piu' bassi della barra (allineati in
         // alto): centrata su di loro la capsula restava in alto. Si scende appena a sinistra dei tasti finche' l'hit
         // test dice "barra del titolo"
         LONG barra = t.bottom;
-        for (int yy = t.bottom; yy < v.top + 90; yy += 2) { if (colpo(h, t.left - 6, yy) != HTCAPTION) break; barra = yy + 2; }
+        for (int yy = t.bottom; yy < v.top + P(sc, 90); yy += 2) { if (colpo(h, t.left - P(sc, 6), yy) != HTCAPTION) break; barra = yy + 2; }
         // barre che all'hit test sono "contenuto" (Esplora file e altre app moderne): il bordo inferiore lo si vede dai
         // pixel, dove il colore della barra cambia (due strisce uguali: niente icone di mezzo)
         // e barre che all'hit test continuano un po' sotto a quella che si vede (Brave: 46 px contro 40): vince il pixel
@@ -635,7 +646,7 @@ private:
         const ULONGLONG adesso = GetTickCount64();
         const bool appenaNata = c.nata && adesso - c.nata < 450;
         const std::wstring app = chiaveApp(h);
-        LONG pixel = appenaNata ? 0 : fondoBarra(h, t.left - 3, t.top, t.bottom, v.top + 90, c.barraPixel[st] == 0);
+        LONG pixel = appenaNata ? 0 : fondoBarra(h, t.left - 3, t.top, t.bottom, v.top + P(sc, 90), c.barraPixel[st] == 0);
         if (appenaNata && !c.verificaAlle) { c.verificaAlle = c.nata + 500; programma((UINT)(c.verificaAlle - adesso + 30)); }
         // finestra trasparente (fine del genio o della gelatina) o coperta: i pixel non si leggono, vale quello trovato
         // l'ultima volta nello stesso stato (senza, la capsula si centrava sull'hit test e poi scattava)
@@ -646,7 +657,7 @@ private:
         else if (pixel >= t.bottom - 1 && pixel < barra) barra = pixel;
         const LONG centro = barra > t.bottom + 3 ? (v.top + barra) / 2 : (t.top + t.bottom) / 2;
         if (registro) { char b[160]; snprintf(b, 160, "capsula %p: cima %ld tasti %ld-%ld barra %ld centro %ld (rel. %ld)", (void*)h, v.top, t.top - v.top, t.bottom - v.top, barra - v.top, centro - v.top, centro - v.top); scrivi(b); }
-        RECT T = {std::min(t.left, t.right - pw - 8 - ra), std::max(v.top, std::min(t.top, centro - ph / 2 - 1)), t.right, 0};
+        RECT T = {std::min(t.left, t.right - pw - P(sc, 8) - ra), std::max(v.top, std::min(t.top, centro - ph / 2 - 1)), t.right, 0};
         c.cy = std::max((float)(centro - T.top), ph / 2.0f + 1);   // a ridosso del bordo alto: un po' piu' in basso
         T.bottom = std::max(t.bottom, T.top + (LONG)std::ceil(c.cy + ph / 2.0f) + 2);
         c.tasti = T;
@@ -935,7 +946,7 @@ private:
         const float passo = r * 3.1f, rc = r * 1.45f;
         const float dx = c.bordoDx, dy = c.bordoSu;
         float xr = W + dx - 6.0f - rc;   // centro della semicirconferenza destra della capsula
-        const float sc = GetDpiForWindow(c.bersaglio) / 96.0f, ra = c.zoom ? 0 : raggioAngoli * (sc > 0 ? sc : 1);
+        const float sc = scalaDi(c.bersaglio), ra = c.zoom ? 0 : raggioAngoli * sc;
         const float ccx = W + dx - ra, ccy = ra - dy, sopra = ccy - c.cy, lim = ra - rc - 3.0f;
         if (sopra > 0 && xr > ccx) xr = std::min(xr, lim > sopra ? ccx + std::sqrt(lim * lim - sopra * sopra) : ccx);
         float destra = xr - r * 0.1f;
@@ -949,7 +960,7 @@ private:
     // finestra (raggio = raggio finestra - distacco) e quello in basso prende il resto dell'altezza
     ID2D1PathGeometry* forma(const Capsula& c, const D2D1_RECT_F& cap) const {
         const float h = cap.bottom - cap.top, rc = h / 2;
-        const float sc = GetDpiForWindow(c.bersaglio) / 96.0f, ra = c.zoom ? 0 : raggioAngoli * (sc > 0 ? sc : 1);
+        const float sc = scalaDi(c.bersaglio), ra = c.zoom ? 0 : raggioAngoli * sc;
         const float g = cap.top + c.bordoSu;
         float ra1 = rc, ra2 = rc;
         if (ra - g > rc + 1) { ra1 = std::min(ra - g, h - 4.0f); ra2 = std::max(4.0f, h - ra1); }
@@ -1094,7 +1105,7 @@ private:
             // con l'angolo della finestra (prima era vivo e "usciva" dall'arrotondamento di Windows)
             rt->Clear(D2D1::ColorF(0, 0, 0, 0));
             if (c.modo != 1) {
-                const float sc = GetDpiForWindow(c.bersaglio) / 96.0f, ra = c.zoom ? 0.0f : raggioAngoli * (sc > 0 ? sc : 1);
+                const float sc = scalaDi(c.bersaglio), ra = c.zoom ? 0.0f : raggioAngoli * sc;
                 const float dx = c.bordoDx, dy = c.bordoSu;
                 rt->PushAxisAlignedClip({c.oL, 0, (float)W, c.oB}, D2D1_ANTIALIAS_MODE_ALIASED);   // solo sopra ai tasti originali
                 // un pixel dentro al bordo della finestra (in alto e a destra): la linea sottile che Windows disegna

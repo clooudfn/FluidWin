@@ -17,6 +17,7 @@
 #endif
 #include <windows.h>
 #include <dwmapi.h>
+#include "scala.h"
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
@@ -348,7 +349,7 @@ private:
             if (!daMostrare(h)) continue;
             Fin& f = finestre[h];
             const RECT v = rettStabile(h, f);
-            const UINT dpi = GetDpiForWindow(h);
+            const UINT dpi = (UINT)std::lround(scala::di(h) * 96);   // scala a cui si vede (vedi scala.h)
             const int R = (int)std::lround(raggio * (dpi ? dpi : 96) / 96.0);
             if (v.right - v.left < 4 * R || v.bottom - v.top < 4 * R) continue;
             viste.push_back(h);
