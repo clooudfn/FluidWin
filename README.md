@@ -18,7 +18,8 @@ When you close it, Windows goes back exactly to how it was.
 
 ## How to try it
 
-1. Go to **[Releases](../../releases)** and download `FluidWin-1.0.0.zip`.
+1. Go to the **[latest release](../../releases/latest)** and download the `FluidWin-x.y.z.zip` file (under
+   **Assets**).
 2. Extract it anywhere and open `FluidWin.exe`.
 
 That's it! There is nothing to install and nothing else to download.
