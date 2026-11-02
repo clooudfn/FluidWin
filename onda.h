@@ -1,8 +1,10 @@
-// Onda di luce multicolore della ricerca: quando si apre, un'onda parte dal riquadro della ricerca e si allarga
-// fino ai bordi dello schermo, che restano accesi con un bagliore colorato che scorre piano finche' la ricerca e'
-// aperta; alla chiusura sfuma. La disegna la GPU (un solo triangolo a tutto schermo, tutto nello shader) in una
-// finestra trasparente ai clic, appena sotto la ricerca. Il disegno e' in un thread suo, a ritmo con lo schermo:
-// resta fluida anche quando FluidWin e' occupato, e il resto di FluidWin non aspetta i suoi fotogrammi.
+// Onda della ricerca: quando si apre, dal riquadro della ricerca parte un'increspatura come quella di una goccia
+// d'acqua, che distorce lo schermo e si allarga fino ai bordi; dove passa, i bordi dello schermo (solo loro) si
+// accendono di un filo di luce colorata che scorre piano finche' la ricerca e' aperta; alla chiusura sfuma.
+// La distorsione usa una foto dello schermo presa un attimo prima che compaia la ricerca: nell'increspatura si vede
+// la foto spostata, fuori dall'increspatura nulla (lo schermo vero). La disegna la GPU (un solo triangolo a tutto
+// schermo, tutto nello shader) in una finestra trasparente ai clic, appena sotto la ricerca. Il disegno e' in un
+// thread suo, a ritmo con lo schermo: resta fluida anche quando FluidWin e' occupato.
 #pragma once
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -16,11 +18,14 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <vector>
 
 namespace onda {
 
 static const char* SHADER = R"(
-cbuffer C : register(b0) { float2 dim; float t; float apri; float2 centro; float spegni; float dpi; };
+cbuffer C : register(b0) { float2 dim; float t; float apri; float2 centro; float spegni; float dpi; float foto; float3 pad; };
+Texture2D schermo : register(t0);
+SamplerState camp : register(s0);
 static const float3 TINTE[5] = { float3(0.24, 0.52, 1.00), float3(0.66, 0.36, 1.00), float3(1.00, 0.34, 0.66),
                                  float3(1.00, 0.60, 0.24), float3(0.30, 0.86, 1.00) };
 float4 vs(uint id : SV_VertexID) : SV_POSITION {
@@ -45,32 +50,44 @@ float4 ps(float4 pos : SV_POSITION) : SV_TARGET {
     float2 q = p - dim * 0.5;
     float ang = atan2(q.y / dim.y, q.x / dim.x) / 6.2831853;
     float h = ang + t * 0.05 + 0.035 * sin(t * 0.8 + ang * 12.566);
-    // onda: un anello che parte dal centro della ricerca e arriva oltre l'angolo piu' lontano
+    // goccia: il fronte parte dal centro della ricerca e arriva oltre l'angolo piu' lontano; dietro di lui qualche
+    // increspatura (onde radiali), sempre piu' lunghe e piu' deboli man mano che si allarga
     float2 r = p - centro;
     float dist = length(r);
+    float2 dir = dist > 0.5 ? r / dist : float2(0, 0);
     float lontano = length(max(abs(centro), abs(dim - centro)));
-    float R = apri * lontano * 1.06;
-    float spess = (36.0 + 150.0 * apri) * dpi;
-    float x = (dist - R) / spess;
-    float anello = exp(-x * x) * (1.0 - smoothstep(0.7, 1.0, apri)) * smoothstep(0.0, 0.06, apri);
-    float dietro = saturate(-x) * exp(-max(-x - 0.4, 0.0) * 1.6) * 0.22 * (1.0 - apri);   // scia tenue dentro l'anello
-    // i bordi si accendono dove l'onda e' gia' passata, e respirano piano
+    float R = apri * lontano * 1.08;
+    float lam = (44.0 + 46.0 * apri) * dpi;                       // lunghezza d'onda
+    float x = dist - R;                                           // < 0: dietro il fronte
+    float pacchetto = exp(-pow((x + 0.9 * lam) / (1.4 * lam), 2.0));
+    float forza = (1.0 - apri) * (1.0 - apri) * smoothstep(0.0, 0.02, apri);
+    float fase = 6.2831853 * x / lam;
+    float3 cf = float3(0, 0, 0);
+    float af = 0;
+    if (foto > 0.5) {
+        // la foto dello schermo, spostata lungo il raggio come la luce attraverso l'acqua
+        float spost = 15.0 * dpi * sin(fase) * pacchetto * forza;
+        cf = schermo.Sample(camp, (p - dir * spost) / dim).rgb;
+        // riflessi: le creste un po' piu' chiare, gli avvallamenti un po' piu' scuri
+        float luce = cos(fase) * pacchetto * forza;
+        cf = saturate(cf + 0.09 * saturate(luce) - 0.05 * saturate(-luce));
+        // la foto si vede solo dentro l'increspatura: fuori c'e' lo schermo vero
+        af = saturate(pacchetto * forza * 6.0);
+    }
+    // i bordi (solo loro) si accendono dove l'onda e' gia' passata, e respirano piano
     float passata = saturate((R - dist) / (220.0 * dpi));
     float respiro = 1.0 + 0.20 * sin(t * 1.6 + ang * 18.85) + 0.12 * sin(t * 2.7 - ang * 31.4);
-    float alone = 0.78 * bordi(p, 46.0 * dpi * respiro) + 0.60 * bordi(p, 8.0 * dpi) + 0.16 * bordi(p, 150.0 * dpi);
-    float bordo = alone * passata;
-    float onda = anello * 0.60 + dietro;
-    float a = saturate(bordo + onda) * spegni;
+    float alone = 0.85 * bordi(p, 18.0 * dpi * respiro) + 0.55 * bordi(p, 4.0 * dpi);
+    float ab = saturate(alone * passata);
+    float3 cb = lerp(tinta(h), float3(1, 1, 1), 0.30 * bordi(p, 2.0 * dpi) * passata);   // filo quasi bianco sul bordo
+    // luce dei bordi sopra la foto (colori premoltiplicati)
+    float a = ab + af * (1.0 - ab);
     if (a <= 0.002) return float4(0, 0, 0, 0);
-    float3 cb = tinta(h);
-    float3 cw = tinta(atan2(r.y, r.x) / 6.2831853 + t * 0.08);
-    float3 c = (cb * bordo + cw * onda) / max(bordo + onda, 0.0001);
-    c = lerp(c, float3(1, 1, 1), 0.30 * bordi(p, 2.5 * dpi) * passata);   // filo quasi bianco sul bordo
-    return float4(c * a, a);
+    return float4(cf * af * (1.0 - ab) + cb * ab, a) * spegni;
 }
 )";
 
-struct Costanti { float dim[2]; float t; float apri; float centro[2]; float spegni; float dpi; };
+struct Costanti { float dim[2]; float t; float apri; float centro[2]; float spegni; float dpi; float foto; float pad[3]; };
 
 class Onda {
 public:
@@ -94,12 +111,16 @@ public:
         return true;
     }
 
-    // si apre: zona = schermo (coordinate schermo), da = punto da cui parte l'onda, sotto = finestra sopra di lei
+    // si apre: zona = schermo (coordinate schermo), da = punto da cui parte l'onda, sotto = finestra sopra di lei.
+    // Va chiamata appena prima di mostrare la ricerca: il thread fotografa subito lo schermo per la distorsione (la
+    // foto costa ~30 ms: nel thread la ricerca non aspetta, e nei primi istanti e' ancora quasi trasparente, quindi
+    // nella foto praticamente non c'e'). La foto resta solo in memoria.
     void apri(const RECT& zona, POINT da, float dpi, HWND sopraDi) {
         if (!inizializza() || rotta) return;
         EnterCriticalSection(&cs);
         z = zona; centro = {(float)(da.x - zona.left), (float)(da.y - zona.top)}; scala = dpi;
         t0 = adesso(); tChiudi = -1; aperta = true; mostrata = false;
+        fotoNuova = true;
         LeaveCriticalSection(&cs);
         sotto = sopraDi;
         SetEvent(sveglia);
@@ -146,6 +167,28 @@ private:
     volatile bool rotta = false;
     volatile LONG richiesta = 0;   // 1 mostra, 2 nascondi
     volatile LONG battitoInViaggio = 0;
+    bool fotoNuova = false;            // il thread deve fotografare lo schermo (apertura nuova)
+
+    // foto della zona dello schermo (BGRA, riga per riga dall'alto)
+    static bool fotografa(const RECT& zona, std::vector<UINT>& px) {
+        px.clear();
+        const int w = zona.right - zona.left, h = zona.bottom - zona.top;
+        if (w <= 0 || h <= 0 || (long long)w * h > 40000000) return false;
+        BITMAPINFO bi{}; bi.bmiHeader.biSize = sizeof(bi.bmiHeader); bi.bmiHeader.biWidth = w; bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1; bi.bmiHeader.biBitCount = 32; bi.bmiHeader.biCompression = BI_RGB;
+        void* bits = nullptr;
+        HDC scr = GetDC(nullptr), mem = CreateCompatibleDC(scr);
+        HBITMAP dib = CreateDIBSection(scr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (dib && bits && mem) {
+            HGDIOBJ vecchio = SelectObject(mem, dib);
+            if (BitBlt(mem, 0, 0, w, h, scr, zona.left, zona.top, SRCCOPY)) { GdiFlush(); px.assign((const UINT*)bits, (const UINT*)bits + (size_t)w * h); }
+            SelectObject(mem, vecchio);
+        }
+        if (dib) DeleteObject(dib);
+        if (mem) DeleteDC(mem);
+        ReleaseDC(nullptr, scr);
+        return !px.empty();
+    }
 
     static constexpr double DURATA_ONDA = 1.05, DURATA_SFUMA = 0.32;
 
@@ -163,12 +206,41 @@ private:
         IDXGISwapChain1* sc = nullptr; ID3D11RenderTargetView* rtv = nullptr;
         IDCompositionDevice* dc = nullptr; IDCompositionTarget* tg = nullptr; IDCompositionVisual* vis = nullptr;
         ID3D11VertexShader* vs = nullptr; ID3D11PixelShader* ps = nullptr; ID3D11Buffer* cb = nullptr; ID3D11BlendState* bl = nullptr;
-        int W = 0, H = 0;
+        ID3D11Texture2D* tex = nullptr; ID3D11ShaderResourceView* srv = nullptr; ID3D11SamplerState* camp = nullptr;
+        int W = 0, H = 0, texW = 0, texH = 0;
+        bool conFoto = false;   // la foto di questa apertura e' sulla GPU
+        std::vector<UINT> px;
         auto rilascia = [&]() {
-            for (IUnknown** u : {(IUnknown**)&rtv, (IUnknown**)&sc, (IUnknown**)&vis, (IUnknown**)&tg, (IUnknown**)&dc, (IUnknown**)&vs,
-                                 (IUnknown**)&ps, (IUnknown**)&cb, (IUnknown**)&bl, (IUnknown**)&ctx, (IUnknown**)&dev})
+            for (IUnknown** u : {(IUnknown**)&srv, (IUnknown**)&tex, (IUnknown**)&camp, (IUnknown**)&rtv, (IUnknown**)&sc, (IUnknown**)&vis,
+                                 (IUnknown**)&tg, (IUnknown**)&dc, (IUnknown**)&vs, (IUnknown**)&ps, (IUnknown**)&cb, (IUnknown**)&bl,
+                                 (IUnknown**)&ctx, (IUnknown**)&dev})
                 if (*u) { (*u)->Release(); *u = nullptr; }
-            W = H = 0;
+            W = H = texW = texH = 0; conFoto = false;
+        };
+        // foto dello schermo sulla GPU (la texture si riusa se la misura e' la stessa)
+        auto caricaFoto = [&](int w, int h) {
+            conFoto = false;
+            if (px.size() != (size_t)w * h || w <= 0 || h <= 0) return;
+            for (UINT& c : px) c |= 0xFF000000u;   // opaca
+            if (!tex || texW != w || texH != h) {
+                if (srv) { srv->Release(); srv = nullptr; }
+                if (tex) { tex->Release(); tex = nullptr; }
+                D3D11_TEXTURE2D_DESC td{}; td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+                td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT;
+                td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+                if (FAILED(dev->CreateTexture2D(&td, nullptr, &tex)) || FAILED(dev->CreateShaderResourceView(tex, nullptr, &srv))) {
+                    if (tex) { tex->Release(); tex = nullptr; }
+                    return;
+                }
+                texW = w; texH = h;
+            }
+            if (!camp) {
+                D3D11_SAMPLER_DESC sm{}; sm.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+                sm.AddressU = sm.AddressV = sm.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP; sm.MaxLOD = D3D11_FLOAT32_MAX;
+                if (FAILED(dev->CreateSamplerState(&sm, &camp))) return;
+            }
+            ctx->UpdateSubresource(tex, 0, nullptr, px.data(), w * 4, 0);
+            conFoto = true;
         };
         auto prepara = [&](int w, int h) -> bool {
             if (dev && w == W && h == H) return true;
@@ -218,7 +290,10 @@ private:
             const bool attiva = aperta;
             const RECT zona = z; const float cx = centro.x, cy = centro.y, d = scala;
             const double inizio = t0, fine = tChiudi;
+            const bool nuova = fotoNuova;
+            fotoNuova = false;
             LeaveCriticalSection(&cs);
+            if (nuova && attiva) fotografa(zona, px);
             if (!attiva) { WaitForSingleObject(sveglia, INFINITE); continue; }
             const int w = zona.right - zona.left, h = zona.bottom - zona.top;
             if (w <= 0 || h <= 0 || !prepara(w, h)) {   // GPU non disponibile: niente onda (la ricerca funziona lo stesso)
@@ -227,11 +302,12 @@ private:
                 chiedi(2);
                 continue;
             }
+            if (nuova) { caricaFoto(w, h); px.clear(); px.shrink_to_fit(); }   // (la copia in memoria non serve piu')
             const double t = adesso();
             const double x = std::clamp((t - inizio) / DURATA_ONDA, 0.0, 1.0);
             const double sp = fine < 0 ? 1.0 : 1.0 - std::clamp((t - fine) / DURATA_SFUMA, 0.0, 1.0);
             Costanti k{{(float)w, (float)h}, (float)(t - inizio), (float)(1 - std::pow(1 - x, 2.4)), {cx, cy},
-                       (float)(sp * sp * (3 - 2 * sp)), d};
+                       (float)(sp * sp * (3 - 2 * sp)), d, conFoto && x < 1 ? 1.0f : 0.0f, {0, 0, 0}};
             D3D11_MAPPED_SUBRESOURCE m;
             if (SUCCEEDED(ctx->Map(cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) { memcpy(m.pData, &k, sizeof(k)); ctx->Unmap(cb, 0); }
             D3D11_VIEWPORT vp{0, 0, (float)w, (float)h, 0, 1};
@@ -243,6 +319,9 @@ private:
             ctx->VSSetShader(vs, nullptr, 0);
             ctx->PSSetShader(ps, nullptr, 0);
             ctx->PSSetConstantBuffers(0, 1, &cb);
+            ID3D11ShaderResourceView* vista = conFoto ? srv : nullptr;
+            ctx->PSSetShaderResources(0, 1, &vista);
+            ctx->PSSetSamplers(0, 1, &camp);
             ctx->Draw(3, 0);
             // finita l'onda il bagliore si muove piano: basta un fotogramma ogni ~16 ms anche sugli schermi veloci
             int intervallo = 1;

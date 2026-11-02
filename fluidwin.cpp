@@ -2005,8 +2005,10 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
                 return 1;
             }
             // Alt+Tab: la ricerca di FluidWin al posto del selettore di Windows (una volta per pressione di Alt). Anche qui
-            // al rilascio di Alt va la maschera: Alt premuto e rilasciato da solo aprirebbe i menu delle app
-            if (!gWinGiu && gLauncherTasto && gTastoRicerca && k->vkCode == VK_TAB && ((k->flags & LLKHF_ALTDOWN) || gAltMaschera)) {
+            // al rilascio di Alt va la maschera: Alt premuto e rilasciato da solo aprirebbe i menu delle app.
+            // Sempre, finche' FluidWin gira (anche con un'app a schermo intero o senza dock): il selettore di Windows
+            // non deve comparire mai. (Con Alt+Maiusc+Tab e Ctrl+Alt+Tab lo stesso: hanno Alt premuto)
+            if (!gWinGiu && gTastoRicerca && k->vkCode == VK_TAB && ((k->flags & LLKHF_ALTDOWN) || gAltMaschera)) {
                 if (giu && !gAltMaschera) PostMessageW(gMessaggi, WM_RICERCA, 0, 0);
                 gAltMaschera = true;
                 return 1;
@@ -2060,10 +2062,20 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
     return CallNextHookEx(nullptr, code, w, l);
 }
 
+// Windows stacca in silenzio un hook di basso livello che una volta risponde troppo tardi (PC sotto sforzo), e da
+// li' in poi Win, Alt+Tab e i tasti del volume tornerebbero a Windows fino al riavvio di FluidWin. Per questo il
+// thread ha priorita' alta e ogni 15 s, se in quel momento non c'e' nessun tasto in mano a FluidWin, rimette l'hook.
 static DWORD WINAPI threadTasti(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     gHookTasti = SetWindowsHookExW(WH_KEYBOARD_LL, suTasto, GetModuleHandleW(nullptr), 0);
+    SetTimer(nullptr, 0, 15000, nullptr);
     MSG m;
-    while (GetMessageW(&m, nullptr, 0, 0) > 0) {}
+    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        if (m.message == WM_TIMER && !gWinGiu && !gAltMaschera && !gF4Preso && !gWinMaschera) {
+            if (gHookTasti) UnhookWindowsHookEx(gHookTasti);
+            gHookTasti = SetWindowsHookExW(WH_KEYBOARD_LL, suTasto, GetModuleHandleW(nullptr), 0);
+        }
+    }
     if (gHookTasti) UnhookWindowsHookEx(gHookTasti);
     return 0;
 }

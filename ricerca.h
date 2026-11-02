@@ -105,13 +105,16 @@ public:
         scalaW = 0.80; spostaY = 16 * d;   // come al primo fotogramma dell'animazione
         v.alfa(0);
         ridimensiona();
-        ShowWindow(v.fin, SW_SHOW);
-        prendiFuoco();
-        // onda di luce dai bordi, appena sotto la ricerca; i suoi fotogrammi danno anche il ritmo al riquadro
+        // onda (goccia d'acqua e luce sui bordi), appena sotto la ricerca; i suoi fotogrammi danno anche il ritmo al
+        // riquadro. Prima di mostrare la ricerca: l'onda fotografa lo schermo com'e' adesso, senza di lei
         if (!conOnda || conOnda()) {
+            const double t1 = adesso();
             onda.avvisa = v.fin; onda.battito = true;
             onda.apri(vetro::areaPrincipale(), {x + larg / 2, y + (int)std::lround(ALTO_BARRA * d / 2)}, d, v.fin);
+            if (registro && adesso() - t1 > 0.008) { char b[80]; snprintf(b, sizeof(b), "ricerca: foto per l'onda %.1f ms", (adesso() - t1) * 1000); registro(b); }
         }
+        ShowWindow(v.fin, SW_SHOW);
+        prendiFuoco();
         SetTimer(v.fin, 1, 15, nullptr);    // animazione del riquadro (se l'onda non c'e', o tra un battito e l'altro)
         SetTimer(v.fin, 2, 530, nullptr);   // cursore lampeggiante
         passoRiquadro();
