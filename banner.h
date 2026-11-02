@@ -1,0 +1,266 @@
+// Banner delle notifiche di FluidWin: quando arriva una notifica, sopra l'isola sale un banner di vetro con icona,
+// app, titolo e testo; resta qualche secondo (fermo finche' c'e' sopra il mouse), clic per aprire l'app, la x per
+// toglierla. Le notifiche si leggono con l'API ufficiale (notifiche.h), ogni secondo e mezzo, in un thread a parte.
+//
+// Per non vedere due banner, quelli di Windows si spengono app per app con la stessa opzione delle Impostazioni
+// ("Mostra banner di notifica", valore ShowBanner in HKCU\...\Notifications\Settings\<app>). Il valore di prima si
+// salva in HKCU\Software\FluidWin\Banner e si rimette com'era quando l'opzione si spegne. Le notifiche restano
+// nel centro notifiche e nel pannello dell'isola: cambia solo chi le mostra a comparsa.
+#pragma once
+#include "vetro.h"
+#include "notifiche.h"
+#include <windowsx.h>
+#include <shobjidl.h>
+#include <shlobj.h>
+#include <vector>
+#include <deque>
+#include <unordered_set>
+#include <unordered_map>
+#include <functional>
+#include <thread>
+#include <mutex>
+#include <atomic>
+#include <roapi.h>
+
+namespace banner {
+
+inline const wchar_t* IMPOST = L"Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\";
+inline const wchar_t* COPIA = L"Software\\FluidWin\\Banner";
+
+// spegne il banner di Windows per questa app, ricordando com'era (una volta sola per app)
+inline void spegniBannerWindows(const std::wstring& aumid) {
+    if (aumid.empty()) return;
+    DWORD x = 0, n = sizeof(x);
+    if (RegGetValueW(HKEY_CURRENT_USER, COPIA, aumid.c_str(), RRF_RT_REG_DWORD, nullptr, &x, &n) == ERROR_SUCCESS) return;   // gia' fatto
+    const std::wstring k = IMPOST + aumid;
+    DWORD prima = 0xFFFFFFFF; n = sizeof(prima);   // 0xFFFFFFFF = il valore non c'era
+    if (RegGetValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", RRF_RT_REG_DWORD, nullptr, &prima, &n) != ERROR_SUCCESS) prima = 0xFFFFFFFF;
+    RegSetKeyValueW(HKEY_CURRENT_USER, COPIA, aumid.c_str(), REG_DWORD, &prima, sizeof(prima));
+    DWORD zero = 0; RegSetKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", REG_DWORD, &zero, sizeof(zero));
+}
+
+// rimette i banner di Windows come erano, per tutte le app toccate
+inline void ripristinaBannerWindows() {
+    HKEY c = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, COPIA, 0, KEY_READ, &c) != ERROR_SUCCESS) return;
+    std::vector<std::pair<std::wstring, DWORD>> lista;
+    for (DWORD i = 0;; i++) {
+        wchar_t nome[512]; DWORD ln = 512, tipo = 0, val = 0, lv = sizeof(val);
+        if (RegEnumValueW(c, i, nome, &ln, nullptr, &tipo, (BYTE*)&val, &lv) != ERROR_SUCCESS) break;
+        if (tipo == REG_DWORD) lista.push_back({nome, val});
+    }
+    RegCloseKey(c);
+    for (const auto& [aumid, prima] : lista) {
+        const std::wstring k = IMPOST + aumid;
+        if (prima == 0xFFFFFFFF) RegDeleteKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner");
+        else RegSetKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", REG_DWORD, &prima, sizeof(prima));
+    }
+    RegDeleteTreeW(HKEY_CURRENT_USER, COPIA);
+}
+
+class Banner {
+public:
+    std::function<RECT()> isola;              // dove sta l'isola (il banner sale da sopra di lei)
+    bool attivo = false;
+
+    ~Banner() { fermaLettura(); }
+
+    void accendi(bool si) {
+        if (si == attivo) return;
+        attivo = si;
+        if (si) {
+            if (!v.fin && !v.crea(L"FluidWin.Banner", vetro::procedura<Banner>, this, false)) { attivo = false; return; }
+            primaLettura = true;
+            avviaLettura();
+            SetTimer(v.fin, 2, 250, nullptr);
+        } else {
+            if (v.fin) { KillTimer(v.fin, 2); nascondi(); }
+            fermaLettura();
+            coda.clear();
+            ripristinaBannerWindows();
+        }
+    }
+
+    bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
+        r = 0;
+        switch (m) {
+            case WM_TIMER:
+                if (w == 1) passo();
+                if (w == 2) controlla();
+                return true;
+            case WM_PAINT: disegna(); return true;
+            case WM_MOUSEACTIVATE: r = MA_NOACTIVATE; return true;
+            case WM_CLOSE: nascondi(); return true;
+            case WM_MOUSEMOVE: {
+                if (!dentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, v.fin, 0}; TrackMouseEvent(&tm); dentro = true; disegna(); }
+                const bool x = sullaX(GET_X_LPARAM(l), GET_Y_LPARAM(l));
+                if (x != sopraX) { sopraX = x; disegna(); }
+                return true;
+            }
+            case WM_MOUSELEAVE: dentro = false; sopraX = false; tFine = GetTickCount64() + 2500; disegna(); return true;
+            case WM_LBUTTONUP:
+                if (stato == 0) return true;
+                if (sullaX(GET_X_LPARAM(l), GET_Y_LPARAM(l))) lettore.rimuovi(attuale.id);
+                else {
+                    if (!attuale.aumid.empty()) ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + attuale.aumid).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                    lettore.rimuovi(attuale.id);
+                }
+                esci();
+                return true;
+        }
+        return false;
+    }
+
+private:
+    vetro::Finestra v;
+    notifiche::Lettore lettore;
+    std::unordered_set<UINT32> viste;
+    std::deque<notifiche::Notifica> coda;
+    notifiche::Notifica attuale;
+    ID2D1Bitmap* icona = nullptr;
+    IDWriteTextFormat *fApp = nullptr, *fTitolo = nullptr, *fTesto = nullptr;
+    bool primaLettura = true, dentro = false, sopraX = false;
+    int stato = 0;   // 0 nascosto, 1 entra, 2 fermo, 3 esce
+    ULONGLONG t0 = 0, tFine = 0;
+    double k = 0;
+    int x = 0, y = 0;
+
+    // La lettura delle notifiche aspetta Windows (decine di millisecondi): la fa un thread a parte, ogni secondo e
+    // mezzo, cosi' il thread principale (che disegna le animazioni) non si ferma mai
+    std::thread lavoro;
+    std::atomic<bool> basta{false};
+    std::mutex mx;
+    std::vector<notifiche::Notifica> letta;
+    bool nuova = false;
+
+    void avviaLettura() {
+        if (lavoro.joinable()) return;
+        basta = false;
+        lavoro = std::thread([this] {
+            RoInitialize(RO_INIT_MULTITHREADED);
+            {
+                notifiche::Lettore l;
+                while (!basta) {
+                    std::vector<notifiche::Notifica> lista;
+                    if (l.leggi(lista)) { std::lock_guard<std::mutex> g(mx); letta = std::move(lista); nuova = true; }
+                    for (int i = 0; i < 15 && !basta; i++) Sleep(100);
+                }
+            }
+            RoUninitialize();
+        });
+    }
+
+    void fermaLettura() {
+        basta = true;
+        if (lavoro.joinable()) lavoro.join();
+        nuova = false;
+    }
+
+    void controlla() {
+        std::vector<notifiche::Notifica> lista;
+        {
+            std::lock_guard<std::mutex> g(mx);
+            if (!nuova) return;
+            lista = std::move(letta); nuova = false;
+        }
+        std::unordered_set<UINT32> ora;
+        for (const auto& n : lista) {
+            ora.insert(n.id);
+            spegniBannerWindows(n.aumid);   // da qui in poi le notifiche di quest'app le mostra FluidWin
+            // alla prima lettura quelle gia' presenti non si mostrano
+            if (!primaLettura && !viste.count(n.id)) coda.push_back(n);
+        }
+        viste = std::move(ora);
+        primaLettura = false;
+        if (stato == 0 && !coda.empty()) entra();
+    }
+
+    void entra() {
+        attuale = coda.front(); coda.pop_front();
+        v.aggiornaTema();
+        const RECT is = isola ? isola() : vetro::areaPrincipale(true);
+        v.dpi = vetro::dpiMonitor(MonitorFromPoint({is.left, is.top}, MONITOR_DEFAULTTOPRIMARY));
+        const float d = v.dpi;
+        const int w = (int)std::lround(360 * d), h = (int)std::lround(84 * d);
+        x = is.right - w; y = is.top - (int)std::lround(12 * d) - h;
+        v.posiziona(x, y + (int)std::lround(16 * d), w, h, HWND_TOPMOST, SWP_SHOWWINDOW);
+        if (!fApp) {
+            fApp = v.formato(11.5f * d, DWRITE_FONT_WEIGHT_MEDIUM);
+            fTitolo = v.formato(13.5f * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
+            fTesto = v.formato(12.5f * d);
+        }
+        if (icona) { icona->Release(); icona = nullptr; }
+        caricaIcona();
+        stato = 1; t0 = GetTickCount64(); tFine = t0 + 5500; k = 0;
+        SetTimer(v.fin, 1, 15, nullptr);
+        disegna();
+    }
+
+    void esci() { if (stato == 1 || stato == 2) { stato = 3; t0 = GetTickCount64(); } }
+
+    void nascondi() { stato = 0; KillTimer(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
+
+    void passo() {
+        const ULONGLONG ora = GetTickCount64();
+        if (stato == 1) { k = std::min(1.0, (ora - t0) / 260.0); if (k >= 1) stato = 2; }
+        else if (stato == 2 && !dentro && ora >= tFine) esci();
+        else if (stato == 3) {
+            k = 1 - std::min(1.0, (ora - t0) / 220.0);
+            if (k <= 0) { nascondi(); if (!coda.empty()) entra(); return; }
+        }
+        const double e = stato == 3 ? vetro::uscita(k) : vetro::molla(k);
+        SetWindowPos(v.fin, HWND_TOPMOST, x, y + (int)std::lround((1 - e) * 16 * v.dpi), 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+        v.alfa(std::min(1.0, k * 1.6));
+    }
+
+    bool sullaX(int px, int py) const { const float d = v.dpi; return px > v.W - 34 * d && py < 34 * d; }
+
+    void caricaIcona() {
+        if (attuale.aumid.empty() || !v.rt) return;
+        IShellItemImageFactory* fab = nullptr;
+        if (FAILED(SHCreateItemFromParsingName((L"shell:AppsFolder\\" + attuale.aumid).c_str(), nullptr, IID_PPV_ARGS(&fab)))) return;
+        HBITMAP hb = nullptr;
+        if (SUCCEEDED(fab->GetImage({64, 64}, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hb)) && hb) {
+            BITMAP bm{}; GetObject(hb, sizeof(bm), &bm);
+            std::vector<UINT> px((size_t)bm.bmWidth * bm.bmHeight);
+            BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), bm.bmWidth, -bm.bmHeight, 1, 32, BI_RGB};
+            HDC scr = GetDC(nullptr); GetDIBits(scr, hb, 0, bm.bmHeight, px.data(), &bi, DIB_RGB_COLORS); ReleaseDC(nullptr, scr);
+            bool alfa = false; for (UINT p : px) if (p >> 24) { alfa = true; break; }
+            for (UINT& p : px) {
+                const UINT a = alfa ? (p >> 24) : 255;
+                p = (a << 24) | ((((p >> 16) & 255) * a / 255) << 16) | ((((p >> 8) & 255) * a / 255) << 8) | ((p & 255) * a / 255);
+            }
+            v.rt->CreateBitmap(D2D1::SizeU(bm.bmWidth, bm.bmHeight), px.data(), bm.bmWidth * 4,
+                               D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &icona);
+            DeleteObject(hb);
+        }
+        fab->Release();
+    }
+
+    void disegna() {
+        if (stato == 0 || !v.inizia()) return;
+        const float d = v.dpi, W = (float)v.W, H = (float)v.H;
+        const D2D1_COLOR_F ink = v.inchiostro(), tenue = v.inchiostro(0.6f);
+        const float il = 38 * d, ix = 16 * d, iy = (H - il) / 2;
+        if (icona) v.rt->DrawBitmap(icona, {ix, iy, ix + il, iy + il});
+        else {
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.15f) : D2D1::ColorF(0, 0, 0, 0.08f));
+            v.rt->FillRoundedRectangle({{ix, iy, ix + il, iy + il}, 9 * d, 9 * d}, v.pen);
+        }
+        const float tx = ix + il + 14 * d, tr = W - 40 * d;
+        v.testo(attuale.app.empty() ? L"Notifica" : attuale.app, fApp, {tx, 12 * d, tr, 28 * d}, tenue);
+        v.testo(attuale.titolo, fTitolo, {tx, 28 * d, tr + 24 * d, 48 * d}, ink);
+        v.testo(attuale.testo, fTesto, {tx, 48 * d, tr + 24 * d, 68 * d}, v.inchiostro(0.8f));
+        if (dentro) {   // la x per toglierla, solo col mouse sopra
+            const float cx = W - 18 * d, cy = 17 * d;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, sopraX ? 0.25f : 0.12f) : D2D1::ColorF(0, 0, 0, sopraX ? 0.14f : 0.07f));
+            v.rt->FillEllipse({{cx, cy}, 10 * d, 10 * d}, v.pen);
+            v.pen->SetColor(ink);
+            v.rt->DrawLine({cx - 3.5f * d, cy - 3.5f * d}, {cx + 3.5f * d, cy + 3.5f * d}, v.pen, 1.5f * d);
+            v.rt->DrawLine({cx + 3.5f * d, cy - 3.5f * d}, {cx - 3.5f * d, cy + 3.5f * d}, v.pen, 1.5f * d);
+        }
+        v.finisci();
+    }
+};
+
+}  // namespace banner

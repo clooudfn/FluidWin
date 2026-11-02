@@ -1,0 +1,13 @@
+# Si pubblica solo cio' che e' elencato qui sotto: tutto il resto (exe di prova, esperimenti, catture dello schermo,
+# copie di sicurezza, note di lavoro) resta solo sul PC.
+*
+!.gitignore
+!.gitattributes
+!*.h
+!fluidwin.cpp
+!icona.rc
+!icona.ico
+!icona.svg
+!compila.ps1
+!README.md
+!LICENSE
