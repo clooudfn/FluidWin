@@ -765,14 +765,11 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
             // molle: ogni vertice insegue il suo posto sulla finestra vera; vicino al punto afferrato la molla e'
             // rigida (e quel punto resta incollato al mouse), lontano e' morbida e oscilla
             const double diag = std::hypot(w, hh);
-            // Finestre grandi (schermi larghi, 4K): a parita' di molle si deformavano e tremavano molto di piu' (si
-            // trascinano piu' veloci e per piu' pixel). Oltre ~1300 punti di diagonale le molle si fanno piu' rigide e
-            // piu' smorzate, in proporzione: la gelatina resta della stessa "consistenza" a ogni misura
+            // (molle uguali a ogni misura di finestra: renderle piu' rigide per le finestre grandi, per gli schermi
+            // larghi, cambiava la gelatina di quasi tutte le finestre sugli schermi da 1440p e l'utente non la voleva
+            // cosi'. Si adattano solo alla scala: al 100% e' identica a prima)
             const double sc = scalaFinestra(g.hwnd);
-            // (al massimo 3: con molle ancora piu' rigide l'integrazione a 4 passi per fotogramma non sarebbe stabile)
-            const double grande = std::clamp(diag / sc / 1300.0, 1.0, 3.0), duro = grande * grande;
-            const double smorza = std::min(0.80, 0.50 + 0.30 * (grande - 1.0));
-            const double maxDist = 80 * sc / grande;   // deformazione massima (prima 80 px fissi)
+            const double maxDist = 80 * sc;   // deformazione massima (80 punti)
             const int passi = 4; const double h2 = dt / passi;
             bool ferma = true;
             for (int r = 0; r < GEL_R; r++) for (int c = 0; c < GEL_C; c++) {
@@ -780,8 +777,8 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
                 const double u = (double)c / (GEL_C - 1), vv = (double)r / (GEL_R - 1);
                 const double ox = v.left + u * w, oy = v.top + vv * hh;
                 const double d = std::hypot((u - g.u0) * w, (vv - g.v0) * hh) / std::max(1.0, diag);
-                const double rig = (300 + 1500 * std::exp(-(d * d) / (0.35 * 0.35))) * duro;
-                const double sm = 2 * std::sqrt(rig) * smorza;
+                const double rig = 300 + 1500 * std::exp(-(d * d) / (0.35 * 0.35));
+                const double sm = 2 * std::sqrt(rig) * 0.50;
                 for (int s = 0; s < passi; s++) {
                     g.vx[k] += (rig * (ox - g.x[k]) - sm * g.vx[k]) * h2; g.x[k] += g.vx[k] * h2;
                     g.vy[k] += (rig * (oy - g.y[k]) - sm * g.vy[k]) * h2; g.y[k] += g.vy[k] * h2;
