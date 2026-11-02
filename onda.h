@@ -1,5 +1,5 @@
-// Onda della ricerca: quando si apre, dal riquadro della ricerca parte un'increspatura come quella di una goccia
-// d'acqua, che distorce lo schermo e si allarga fino ai bordi; dove passa, i bordi dello schermo (solo loro) si
+// Onda della ricerca: quando si apre, dal riquadro della ricerca parte un'onda d'acqua larga e morbida, che distorce
+// lo schermo e si allarga delicatamente fino ai bordi; dove passa, i bordi dello schermo (solo loro) si
 // accendono di un filo di luce colorata che scorre piano finche' la ricerca e' aperta; alla chiusura sfuma.
 // La distorsione usa una foto dello schermo presa un attimo prima che compaia la ricerca: nell'increspatura si vede
 // la foto spostata, fuori dall'increspatura nulla (lo schermo vero). La disegna la GPU (un solo triangolo a tutto
@@ -50,32 +50,33 @@ float4 ps(float4 pos : SV_POSITION) : SV_TARGET {
     float2 q = p - dim * 0.5;
     float ang = atan2(q.y / dim.y, q.x / dim.x) / 6.2831853;
     float h = ang + t * 0.05 + 0.035 * sin(t * 0.8 + ang * 12.566);
-    // goccia: il fronte parte dal centro della ricerca e arriva oltre l'angolo piu' lontano; dietro di lui qualche
-    // increspatura (onde radiali), sempre piu' lunghe e piu' deboli man mano che si allarga
+    // Onda: ogni punto comincia a oscillare quando l'onda lo raggiunge (distanza / velocita') e poi si calma da solo:
+    // spostamento = ampiezza * sin(frequenza * t) * e^(-smorzamento * t), con t il tempo da quando e' arrivata.
+    // E' la logica dell'effetto "ripple" di SwiftUI (WWDC24): lunghezza d'onda = 2*pi*velocita'/frequenza, quasi
+    // 700 punti, quindi un'unica onda larga e morbida che attraversa lo schermo (non anelli fitti: un'onda d'urto).
+    // Allontanandosi dal centro si attenua un poco, cosi' arriva delicata ai bordi
     float2 r = p - centro;
     float dist = length(r);
     float2 dir = dist > 0.5 ? r / dist : float2(0, 0);
     float lontano = length(max(abs(centro), abs(dim - centro)));
-    float R = apri * lontano * 1.08;
-    float lam = (62.0 + 60.0 * apri) * dpi;                       // lunghezza d'onda
-    float x = dist - R;                                           // < 0: dietro il fronte
-    float pacchetto = exp(-pow((x + 1.1 * lam) / (1.8 * lam), 2.0));
-    float forza = (1.0 - apri) * (1.0 - apri) * smoothstep(0.0, 0.02, apri);
-    float fase = 6.2831853 * x / lam;
+    const float VEL = 1700.0, FREQ = 15.0, SMORZA = 7.0, AMPIEZZA = 18.0;   // punti al secondo, rad/s, 1/s, punti
+    float R = t * VEL * dpi;                                      // fronte dell'onda
+    float tl = max(t - dist / (VEL * dpi), 0.0);                  // tempo da quando l'onda e' arrivata qui
+    float inviluppo = tl > 0.0 ? exp(-SMORZA * tl) : 0.0;
+    float verso = 1.0 - 0.45 * saturate(dist / lontano);          // piu' leggera verso i bordi
+    float quanto = sin(FREQ * tl) * inviluppo * verso;            // -1..1
     float3 cf = float3(0, 0, 0);
     float af = 0;
     if (foto > 0.5) {
         // la foto dello schermo, spostata lungo il raggio come la luce attraverso l'acqua
-        float spost = 26.0 * dpi * sin(fase) * pacchetto * forza;
-        cf = schermo.Sample(camp, (p - dir * spost) / dim).rgb;
-        // riflessi: le creste un po' piu' chiare, gli avvallamenti un po' piu' scuri
-        float luce = cos(fase) * pacchetto * forza;
-        cf = saturate(cf + 0.12 * saturate(luce) - 0.07 * saturate(-luce));
-        // la foto si vede solo dentro l'increspatura: fuori c'e' lo schermo vero
-        af = saturate(pacchetto * forza * 6.0);
+        cf = schermo.Sample(camp, (p + dir * (AMPIEZZA * dpi * quanto)) / dim).rgb;
+        // riflessi: dove l'acqua si alza piu' chiaro, dove si abbassa piu' scuro (con delicatezza)
+        cf = saturate(cf + 0.16 * quanto);
+        // la foto si vede solo dove l'onda e' viva: fuori (prima che arrivi e dopo che si e' calmata) lo schermo vero
+        af = saturate((inviluppo - 0.02) * 4.0) * smoothstep(0.0, 0.03, t);
     }
     // i bordi (solo loro) si accendono dove l'onda e' gia' passata, e respirano piano
-    float passata = saturate((R - dist) / (220.0 * dpi));
+    float passata = saturate((R - dist) / (260.0 * dpi));
     float respiro = 1.0 + 0.20 * sin(t * 1.6 + ang * 18.85) + 0.12 * sin(t * 2.7 - ang * 31.4);
     float alone = 0.85 * bordi(p, 18.0 * dpi * respiro) + 0.55 * bordi(p, 4.0 * dpi);
     float ab = saturate(alone * passata);
@@ -190,7 +191,7 @@ private:
         return !px.empty();
     }
 
-    static constexpr double DURATA_ONDA = 1.35, DURATA_SFUMA = 0.32;
+    static constexpr double DURATA_SFUMA = 0.32;
 
     static double adesso() {
         static LARGE_INTEGER f = [] { LARGE_INTEGER x; QueryPerformanceFrequency(&x); return x; }();
@@ -304,7 +305,11 @@ private:
             }
             if (nuova) { caricaFoto(w, h); px.clear(); px.shrink_to_fit(); }   // (la copia in memoria non serve piu')
             const double t = adesso();
-            const double x = std::clamp((t - inizio) / DURATA_ONDA, 0.0, 1.0);
+            // l'onda dura finche' non ha raggiunto l'angolo piu' lontano e li' si e' calmata (vedi lo shader: 1700
+            // punti al secondo, smorzamento 7/s)
+            const double lontano = std::hypot(std::max((double)cx, w - (double)cx), std::max((double)cy, h - (double)cy));
+            const double durataOnda = lontano / (1700.0 * d) + 0.65;
+            const double x = std::clamp((t - inizio) / durataOnda, 0.0, 1.0);
             const double sp = fine < 0 ? 1.0 : 1.0 - std::clamp((t - fine) / DURATA_SFUMA, 0.0, 1.0);
             Costanti k{{(float)w, (float)h}, (float)(t - inizio), (float)(1 - std::pow(1 - x, 2.4)), {cx, cy},
                        (float)(sp * sp * (3 - 2 * sp)), d, conFoto && x < 1 ? 1.0f : 0.0f, {0, 0, 0}};
