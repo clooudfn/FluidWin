@@ -1,60 +1,61 @@
 # FluidWin
 
-**Windows, ridisegnato da capo. Da una persona sola, per passione.**
+**Windows, redesigned from scratch. By one person, for the love of it.**
 
-FluidWin è un mio piccolo progetto personale: un giorno mi sono chiesto come sarebbe Windows se fosse più morbido,
-più vivo, più bello da usare. E ho cominciato a ridisegnarlo, un pezzo alla volta.
+FluidWin is my small personal project. One day I wondered what Windows would feel like if it were softer, more
+alive and more pleasant to use. So I started redesigning it, one piece at a time.
 
-Il risultato è un'app che si appoggia sopra Windows 11 e lo cambia nell'aspetto e nelle sensazioni:
+The result is an app that sits on top of Windows 11 and changes how it looks and feels:
 
-- 🧊 un **dock** al posto della barra delle applicazioni;
-- 🪄 finestre che si **riducono nel dock** con l'effetto genio e ne riescono;
-- 🫧 finestre che **si aprono e si chiudono** con un piccolo rimbalzo, e diventano "di gelatina" quando le trascini;
-- 🌈 una **ricerca** (Alt+Tab) che accende i bordi dello schermo con un'onda di colori;
-- 🔲 una **panoramica** di tutte le finestre (Win+Tab);
-- 🪟 pannelli di vetro per volume, notifiche, meteo e impostazioni.
+- a **dock** instead of the taskbar;
+- windows that **minimize into the dock** with a genie effect, and come back out of it;
+- windows that **open and close** with a little bounce, and turn "jelly-like" while you drag them;
+- a **search** (Alt+Tab) that lights up the edges of the screen with a wave of color;
+- an **overview** of all your open windows (Win+Tab);
+- glass panels for volume, notifications, weather and settings.
 
-Quando lo chiudi, Windows torna esattamente com'era.
+When you close it, Windows goes back exactly to how it was.
 
-## Come provarlo
+## How to try it
 
-1. Vai su **[Releases](../../releases)** e scarica `FluidWin-1.0.0.zip`.
-2. Estrailo dove vuoi e apri `FluidWin.exe`.
+1. Go to **[Releases](../../releases)** and download `FluidWin-1.0.0.zip`.
+2. Extract it anywhere and open `FluidWin.exe`.
 
-Fine. Non c'è niente da installare e niente altro da scaricare.
+That's it! There is nothing to install and nothing else to download.
 
-> Windows potrebbe dirti "Windows ha protetto il PC": succede con le app nuove senza firma digitale. Clicca
-> **Ulteriori informazioni → Esegui comunque**.
+> Windows may say "Windows protected your PC": this happens with new apps that have no digital signature. Click
+> **More info -> Run anyway**.
 
-Serve **Windows 11**.
+You need **Windows 11**.
 
-## Come si chiude
+## How to close it
 
-Clic destro sull'icona di FluidWin vicino all'orologio → **Esci**. Da lì trovi anche le **Impostazioni**, per
-accendere o spegnere ogni effetto.
+Right-click the FluidWin icon next to the clock -> **Esci** (Exit). From the same menu you can open the **settings**
+and turn each effect on or off.
 
-Per toglierlo del tutto, chiudilo e cancella la cartella.
+To remove it completely, close it and delete its folder.
 
-## Due parole su come è nato
+## A few words on how it was made
 
-FluidWin è in parte **vibe-coded**: buona parte del codice l'ha scritta un'intelligenza artificiale (Claude),
-**sempre sotto la mia supervisione**. Io decidevo cosa fare e come doveva essere, provavo ogni cosa sul mio PC,
-segnalavo ogni difetto e approvavo ogni modifica, finché il risultato non era quello che avevo in mente.
+FluidWin is partly **vibe-coded**: much of the code was written by an AI (Claude), **always under my supervision**.
+I decided what to build and how it should look and feel, tested everything on my own PC, reported every flaw and
+approved every change, until the result matched what I had in mind.
 
-## Da sapere
+## Good to know
 
-- È la **prima versione**: l'ho provata a fondo sul mio PC, ma non su tutti i PC del mondo. Se qualcosa non va,
-  raccontamelo nelle [Issues](../../issues).
-- È tutta **in italiano**.
-- Non chiede permessi di amministratore e non tocca i file di Windows.
-- Va su internet solo per il meteo ([Open-Meteo](https://open-meteo.com)) e le notizie ([ANSA](https://www.ansa.it)).
+- This is the **first version**. I tested it thoroughly on my PC, but not on every PC in the world. If something
+  doesn't work, tell me in the [Issues](../../issues).
+- The interface is in **Italian** for now.
+- It doesn't ask for administrator rights and doesn't touch Windows files.
+- It only goes online for the weather ([Open-Meteo](https://open-meteo.com)) and the news
+  ([ANSA](https://www.ansa.it)).
 
-## Per chi vuole guardare il codice
+## For those who want to look at the code
 
-È tutto qui, in C++. Per compilarlo serve [MSYS2](https://www.msys2.org) con `mingw-w64-ucrt-x86_64-gcc`, poi
-basta lanciare `compila.ps1`.
+It's all here, in C++. To build it you need [MSYS2](https://www.msys2.org) with `mingw-w64-ucrt-x86_64-gcc`, then
+just run `compila.ps1`.
 
-## Licenza
+## License
 
-[MIT](LICENSE): puoi usarlo, cambiarlo e condividerlo liberamente. © 2026 Clooudy.
-FluidWin è un progetto indipendente, non affiliato a Microsoft.
+[MIT](LICENSE): you can use it, change it and share it freely. (c) 2026 Clooudy.
+FluidWin is an independent project, not affiliated with Microsoft.
