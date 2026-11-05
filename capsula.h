@@ -838,12 +838,10 @@ private:
     static bool sondaDentro(Sonda& s, IUIAutomation* uia) {
         const HWND h = s.h; const RECT v = s.v; const float sc = s.sc;
         RECT t{};
-        // tasti originali gia' tolti (finestra classica): la posizione l'ha messa prepara, si cerca solo la barra
+        // tasti originali gia' tolti (finestra classica): la posizione l'ha messa prepara, non c'e' niente da chiedere
         if (s.senzaTasti) {
             t = s.t;
-            LONG barra = t.bottom;
-            for (int yy = t.bottom; yy < v.top + P(sc, 90); yy += 2) { if (colpo(h, t.left - P(sc, 6), yy) != HTCAPTION) break; barra = yy + 2; }
-            s.barra = barra;
+            s.barra = t.bottom;
             return true;
         }
         TITLEBARINFOEX tb{}; tb.cbSize = sizeof(tb);
@@ -891,7 +889,7 @@ private:
             // (le coordinate possono essere negative: monitor a sinistra o sopra quello principale)
             // (passi di 3 px a qualsiasi scala: i tasti sono piu' larghi, il numero di hit test cresce col 150% ma
             // un passo piu' lungo rischierebbe di saltare il margine fra due tasti)
-            int destra = 0, sinistra = 0, vuoto = 0;
+            int destra = 0, vuoto = 0;
             bool trovato = false, chiudi = false;
             int lx[3] = {INT_MAX, INT_MAX, INT_MAX}, rx[3] = {INT_MIN, INT_MIN, INT_MIN};   // estremi di ogni tasto
             for (int x = v.right - 3; x > v.right - P(sc, 320) && x > v.left; x -= 3) {
@@ -899,28 +897,39 @@ private:
                 if (r < 0) return false;
                 if (r == HTCLOSE || r == HTMAXBUTTON || r == HTMINBUTTON) {
                     if (!trovato) { destra = x; trovato = true; }
-                    sinistra = x; vuoto = 0; chiudi |= r == HTCLOSE;
+                    vuoto = 0; chiudi |= r == HTCLOSE;
                     const int i = r == HTMINBUTTON ? 0 : r == HTMAXBUTTON ? 1 : 2;
                     lx[i] = std::min(lx[i], x); rx[i] = std::max(rx[i], x);
                 } else if (trovato && (vuoto += 3) > P(sc, 24)) break;
             }
             if (chiudi) {
+                // Bordi esatti, al pixel: la ricerca va a passi di 3 px (e di 2 in verticale), e tra un punto "tasto" e uno
+                // "non tasto" restavano 1-2 px di tasto originale scoperti. Si affinano con un hit test per pixel incerto
+                auto codice = [](LRESULT r) { return r == HTMINBUTTON ? 0 : r == HTMAXBUTTON ? 1 : r == HTCLOSE ? 2 : -1; };
+                for (int i = 0; i < 3; i++) {
+                    if (lx[i] > rx[i]) continue;
+                    while (lx[i] - 1 > v.left && codice(colpo(h, lx[i] - 1, y)) == i) lx[i]--;
+                    while (rx[i] + 1 < v.right && codice(colpo(h, rx[i] + 1, y)) == i) rx[i]++;
+                }
                 int basso = y;
                 for (int yy = y; yy < v.top + P(sc, 80); yy += 2) {
                     const LRESULT r = colpo(h, destra - P(sc, 8), yy);
                     if (r != HTCLOSE && r != HTMAXBUTTON && r != HTMINBUTTON) break;
                     basso = yy;
                 }
-                t = {sinistra - 1, v.top + 1, destra + 3, basso + 2};   // il passo era di 2 px: l'ultimo tratto e' ancora tasto
+                while (basso + 1 < v.top + P(sc, 80) && codice(colpo(h, destra - P(sc, 8), basso + 1)) >= 0) basso++;
+                int alto = y;   // e in alto, dove la barra dei tasti comincia
+                while (alto - 1 >= v.top && codice(colpo(h, destra - P(sc, 8), alto - 1)) >= 0) alto--;
+                int sx = INT_MAX, dx = INT_MIN;
+                for (int i = 0; i < 3; i++) if (lx[i] <= rx[i]) { sx = std::min(sx, lx[i]); dx = std::max(dx, rx[i]); }
+                t = {sx, alto, dx + 1, basso + 1};
                 // si ricorda dove stanno rispetto all'angolo in alto a destra: la prossima volta basta verificarlo
                 s.viaColpi = true; s.colpiZoom = s.zoom;
                 s.colpiDx = v.right - t.right; s.colpiDy = t.top - v.top; s.colpiW = t.right - t.left; s.colpiH = t.bottom - t.top;
-                // ogni tasto: dal primo all'ultimo punto visto (passi di 3 px: il confine sta a meta' fra i due)
                 for (int i = 0; i < 3; i++) {
                     s.memC[i] = lx[i] <= rx[i];
                     if (!s.memC[i]) continue;
-                    const LONG l = std::max<LONG>(t.left, lx[i] - 1), r = std::min<LONG>(t.right, rx[i] + 2);
-                    s.memL[i] = v.right - l; s.memR[i] = v.right - r;
+                    s.memL[i] = v.right - lx[i]; s.memR[i] = v.right - (rx[i] + 1);
                 }
                 daRicordo();
             } else if (!tastiUia(s, uia, v, t)) return false;
@@ -939,12 +948,7 @@ private:
             snprintf(s.scarto, sizeof(s.scarto), "capsula %p: misura scartata %dx%d (finestra %ld,%ld-%ld,%ld)", (void*)h, w, hh, v.left, v.top, v.right, v.bottom);
             return false;
         }
-        // centro: quello della barra del titolo vera. Alcune app hanno i tasti piu' bassi della barra (allineati in
-        // alto): centrata su di loro la capsula restava in alto. Si scende appena a sinistra dei tasti finche' l'hit
-        // test dice "barra del titolo"
-        LONG barra = t.bottom;
-        for (int yy = t.bottom; yy < v.top + P(sc, 90); yy += 2) { if (colpo(h, t.left - P(sc, 6), yy) != HTCAPTION) break; barra = yy + 2; }
-        s.t = t; s.barra = barra;
+        s.t = t; s.barra = t.bottom;
         return true;
     }
 
@@ -965,7 +969,6 @@ private:
         HWND h = c.bersaglio;
         const RECT v = s.v, t = s.t;
         const float sc = s.sc;
-        LONG barra = s.barra;
         // Tre tasti separati, ognuno esattamente sopra il suo tasto originale (niente pillola): la finestra della
         // capsula copre solo i tasti originali, il fondo li nasconde e sopra c'e' un cerchio centrato su ognuno.
         // Il cerchio ha sempre la stessa misura, ma non esce mai dal suo tasto (tasti stretti o barre basse)
@@ -979,33 +982,20 @@ private:
         }
         c.r = std::max(6.0f * sc, std::min({raggioTasto * sc, largMin / 2 - 4 * sc, (t.bottom - t.top) / 2.0f - 1}));
         const int ph = (int)std::ceil(c.r * 2.9f);
-        // barre che all'hit test sono "contenuto" (Esplora file e altre app moderne): il bordo inferiore lo si vede dai
-        // pixel, dove il colore della barra cambia (due strisce uguali: niente icone di mezzo)
-        // e barre che all'hit test continuano un po' sotto a quella che si vede (Brave: 46 px contro 40): vince il pixel
-        // (se l'altezza della barra in questo stato e' gia' nota, niente PrintWindow: con una sovrapposizione nuova
-        // sopra, per esempio quella di Windows mentre si trascina una finestra, ne servirebbe uno ogni volta)
+        // Ogni tasto nuovo sta esattamente dove sta quello vero, anche in verticale: il centro e' quello dei tasti
+        // originali, non della barra del titolo. (Prima si centrava sulla barra, letta dai pixel: per una finestra appena
+        // aperta i pixel non si possono leggere, e la prima volta valeva l'altezza dell'hit test, su Brave 46 px contro
+        // i 40 che si vedono; mezzo secondo dopo la verifica coi pixel la spostava: "prima storti, poi scattano")
         const int st = IsZoomed(h) ? 1 : 0;
-        // Finestra appena aperta: Windows la sta ancora facendo comparire (animazione di apertura, contenuto non ancora
-        // disegnato) e i pixel letti adesso sono sbagliati (barra di 35-86 px invece di 31 in 17 prime misure su 41).
-        // Nei primi 450 ms niente pixel: vale l'altezza gia' vista per la stessa app, se no l'hit test; a 500 ms una
-        // verifica con i pixel veri (sposta la capsula solo se serve)
-        const ULONGLONG adesso = GetTickCount64();
-        const bool appenaNata = c.nata && adesso - c.nata < 450;
-        const std::wstring app = chiaveApp(h);
-        LONG pixel = appenaNata ? 0 : fondoBarra(h, t.left - 3, t.top, t.bottom, v.top + P(sc, 90), c.barraPixel[st] == 0);
-        if (appenaNata && !c.verificaAlle) { c.verificaAlle = c.nata + 500; programma((UINT)(c.verificaAlle - adesso + 30)); }
-        // finestra trasparente (fine del genio o della gelatina) o coperta: i pixel non si leggono, vale quello trovato
-        // l'ultima volta nello stesso stato (senza, la capsula si centrava sull'hit test e poi scattava)
-        if (pixel > 0) { c.barraPixel[st] = pixel - v.top; if (!app.empty()) barraApp[st][app] = c.barraPixel[st]; }
-        else if (c.barraPixel[st] > 0) pixel = v.top + c.barraPixel[st];
-        else if (auto ba = barraApp[st].find(app); !app.empty() && ba != barraApp[st].end()) pixel = v.top + ba->second;
-        if (barra <= t.bottom + 3) barra = std::max(barra, pixel);
-        else if (pixel >= t.bottom - 1 && pixel < barra) barra = pixel;
-        const LONG centro = barra > t.bottom + 3 ? (v.top + barra) / 2 : (t.top + t.bottom) / 2;
-        if (registro) { char b[160]; snprintf(b, 160, "capsula %p: cima %ld tasti %ld-%ld barra %ld centro %ld (rel. %ld)", (void*)h, v.top, t.top - v.top, t.bottom - v.top, barra - v.top, centro - v.top, centro - v.top); scrivi(b); }
+        const LONG centro = (t.top + t.bottom) / 2;
+        // finestra appena aperta: l'app puo' non aver ancora sistemato la sua barra; a 500 ms un controllo (sposta i
+        // tasti solo se serve)
+        if (c.nata && GetTickCount64() - c.nata < 450 && !c.verificaAlle) { c.verificaAlle = c.nata + 500; programma((UINT)(c.nata + 530 - GetTickCount64())); }
+        if (registro) { char b[140]; snprintf(b, 140, "capsula %p: cima %ld tasti %ld-%ld (%ld..%ld dal bordo destro) centro %ld", (void*)h, v.top, t.top - v.top, t.bottom - v.top, v.right - t.right, v.right - t.left, centro - v.top); scrivi(b); }
+        // la finestra della capsula e' il rettangolo dei tasti originali (se e' piu' basso del cerchio, appena piu' alta)
         RECT T = {t.left, std::max(v.top, std::min(t.top, centro - ph / 2 - 1)), t.right, 0};
-        c.cy = std::max((float)(centro - T.top), ph / 2.0f + 1);   // a ridosso del bordo alto: un po' piu' in basso
-        T.bottom = std::max(t.bottom, T.top + (LONG)std::ceil(c.cy + ph / 2.0f) + 2);
+        c.cy = (float)(t.top + t.bottom) / 2.0f - T.top;
+        T.bottom = std::max(t.bottom, T.top + (LONG)std::ceil(c.cy + ph / 2.0f) + 1);
         c.tasti = T;
         c.oL = (float)(t.left - T.left); c.oB = (float)(t.bottom - T.top);
         // il rettangolo visibile di DWM salta di qualche pixel quando la finestra diventa trasparente (gelatina,
