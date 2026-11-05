@@ -18,6 +18,7 @@
 #include <windows.h>
 #include <dwmapi.h>
 #include "scala.h"
+#include "vetro.h"
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
@@ -105,6 +106,9 @@ private:
         std::vector<RECT> firma;   // posizione dell'angolo e delle finestre dietro all'ultimo aggiornamento
         bool visibile = false, esteso = false;
         RECT posato{};
+        // comparsa in dissolvenza (120 ms) invece di uno scatto da 8 a 16 px: inizio (0 = finita) e cosa ridisegnare
+        ULONGLONG compare = 0;
+        int k = 0, x0 = 0, y0 = 0, P = 0; bool est = false; double forza = 1;
     };
     struct Fin {
         Angolo a[4];
@@ -371,6 +375,19 @@ private:
                 const POINT p = {destra ? v.right - 1 : v.left, sotto ? v.bottom - 1 : v.top};
                 const std::vector<HWND> strati = dietro(h, p);
                 if (strati.empty()) { nascondi(a); continue; }
+                // Nel dubbio niente angolo (resta quello vero di Windows, da 8 px): meglio che un quadrato nero. Le
+                // miniature vengono nere per le finestre protette (video con protezione, app escluse dalle catture) e
+                // per gli sfondi animati (disegnati in una WorkerW)
+                {
+                    bool sicuro = true;
+                    for (HWND s : strati) {
+                        DWORD aff = WDA_NONE;
+                        if (GetWindowDisplayAffinity(s, &aff) && aff != WDA_NONE) sicuro = false;
+                        wchar_t c[32] = L""; GetClassNameW(s, c, 32);
+                        if (!wcscmp(c, L"WorkerW")) sicuro = false;
+                    }
+                    if (!sicuro) { nascondi(a); continue; }
+                }
                 // allargato fuori dalla finestra solo se anche li' dietro c'e' la stessa cosa (altrimenti si
                 // mostrerebbe la finestra sbagliata) e se si resta sullo schermo
                 const POINT pe = {destra ? v.right - 1 + E : v.left - E, sotto ? v.bottom - 1 + E : v.top - E};
@@ -383,9 +400,15 @@ private:
                 // finestre dietro cambiate: miniature nuove create PRIMA di togliere le vecchie (niente buchi)
                 if (strati != a.strati || a.mini.empty() || est != a.esteso) {
                     std::vector<HTHUMBNAIL> nuove;
+                    bool fallita = false;
                     for (size_t s = 0; s < st.size(); s++) for (int l = (int)strati.size() - 1; l >= 0; l--) {
                         HTHUMBNAIL th = nullptr;
-                        nuove.push_back(SUCCEEDED(DwmRegisterThumbnail(a.fin, strati[l], &th)) ? th : nullptr);
+                        if (FAILED(DwmRegisterThumbnail(a.fin, strati[l], &th))) { th = nullptr; fallita = true; }
+                        nuove.push_back(th);
+                    }
+                    if (fallita) {   // anche una sola miniatura mancante farebbe un buco: niente angolo (si riprova dopo)
+                        for (HTHUMBNAIL th : nuove) if (th) DwmUnregisterThumbnail(th);
+                        nascondi(a); continue;
                     }
                     for (HTHUMBNAIL th : a.mini) if (th) DwmUnregisterThumbnail(th);
                     a.mini = nuove; a.strati = strati; a.firma.clear(); a.esteso = est;
@@ -409,9 +432,12 @@ private:
                 }
                 const RECT pos = {x0, y0, x0 + P, y0 + P};
                 const bool mossa = !EqualRect(&pos, &a.posato);
-                if (spostata || mossa || cambiaAttiva || !a.visibile) {
+                const bool compare = !a.visibile;
+                a.k = k; a.x0 = x0; a.y0 = y0; a.P = P; a.est = est; a.forza = attiva ? 1.0 : 0.6;
+                if (compare) { a.compare = vetro::ms(); SetLayeredWindowAttributes(a.fin, 0, 0, LWA_ALPHA); }   // da trasparente
+                if (spostata || mossa || cambiaAttiva || compare) {
                     a.posato = pos;
-                    disegnaOmbra(a, k, x0, y0, P, est, attiva ? 1.0 : 0.6);
+                    disegnaOmbra(a, k, x0, y0, P, est, a.forza * (a.compare ? 0.0 : 1.0));
                 }
                 // ordine: ombra sopra le miniature, entrambe subito sopra la finestra (e la sua capsula)
                 if (mossa || !a.visibile || GetWindow(a.ombra, GW_HWNDPREV) != base || GetWindow(a.fin, GW_HWNDPREV) != a.ombra) {
@@ -420,6 +446,7 @@ private:
                     SetWindowPos(a.ombra, dopo, x0, y0, P, P, SWP_NOACTIVATE | SWP_SHOWWINDOW);
                     a.visibile = true;
                 }
+                if (a.compare) vetro::battito(tempi, 2);
             }
         }
         // finestre sparite, ridotte, ingrandite o non piu' adatte
@@ -430,8 +457,28 @@ private:
         }
     }
 
+    // un passo delle dissolvenze di comparsa (al ritmo dello schermo); finite tutte, il battito si ferma
+    void passoComparse() {
+        bool ancora = false;
+        const ULONGLONG ora = vetro::ms();
+        for (auto& [h, f] : finestre) for (auto& a : f.a) {
+            if (!a.compare) continue;
+            if (!a.visibile) { a.compare = 0; continue; }
+            const double k = std::clamp((ora - a.compare) / 120.0, 0.0, 1.0), al = vetro::uscita(k);
+            SetLayeredWindowAttributes(a.fin, 0, (BYTE)std::lround(al * 255), LWA_ALPHA);
+            disegnaOmbra(a, a.k, a.x0, a.y0, a.P, a.est, a.forza * al);
+            if (k >= 1) a.compare = 0; else ancora = true;
+        }
+        if (!ancora) vetro::fermaBattito(tempi, 2);
+    }
+
     static LRESULT CALLBACK procTempi(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (m == WM_TIMER && w == 1) { if (Motore* d = gIstanza()) d->aggiorna(); return 0; }
+        if (m == vetro::Battito::io().msg && m) {
+            vetro::Battito::io().ricevuto(h, (UINT)w);
+            if (Motore* d = gIstanza()) d->passoComparse();
+            return 0;
+        }
         return DefWindowProcW(h, m, w, l);
     }
 };

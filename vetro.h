@@ -10,6 +10,7 @@
 #include <d2d1.h>
 #include <dwrite.h>
 #include <string>
+#include <vector>
 #include <cmath>
 #include <algorithm>
 #include "raggio.h"
@@ -188,10 +189,91 @@ private:
     }
 };
 
+// ---- battito: animazioni al ritmo dello schermo ----
+// I timer di Windows (SetTimer da 15 ms) arrivano ~64 volte al secondo e irregolari: accanto al dock e al genio, che
+// vanno alla frequenza del monitor, le finestre di vetro sembravano a scatti. Qui un solo thread con un timer ad alta
+// risoluzione, alla frequenza dello schermo, manda alle finestre iscritte un messaggio per fotogramma; la procedura
+// comune lo gira all'oggetto come un WM_TIMER con lo stesso id. Mai piu' di un messaggio in attesa per finestra.
+class Battito {
+public:
+    static Battito& io() { static Battito* b = new Battito; return *b; }
+    const UINT msg = RegisterWindowMessageW(L"FluidWin.Battito");
+
+    void iscrivi(HWND h, UINT id) {
+        EnterCriticalSection(&cs);
+        bool c = false; for (auto& x : el) if (x.h == h && x.id == id) c = true;
+        if (!c) el.push_back({h, id, 0});
+        LeaveCriticalSection(&cs);
+        SetEvent(sveglia);
+    }
+    void togli(HWND h, UINT id) {
+        EnterCriticalSection(&cs);
+        for (size_t i = 0; i < el.size(); i++) if (el[i].h == h && el[i].id == id) { el.erase(el.begin() + i); break; }
+        LeaveCriticalSection(&cs);
+    }
+    void ricevuto(HWND h, UINT id) {
+        EnterCriticalSection(&cs);
+        for (auto& x : el) if (x.h == h && x.id == id) x.inViaggio = 0;
+        LeaveCriticalSection(&cs);
+    }
+
+private:
+    struct Iscritto { HWND h; UINT id; LONG inViaggio; };
+    std::vector<Iscritto> el;
+    CRITICAL_SECTION cs{};
+    HANDLE sveglia = nullptr, timer = nullptr;
+
+    Battito() {
+        InitializeCriticalSection(&cs);
+        sveglia = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        timer = CreateWaitableTimerExW(nullptr, nullptr, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(nullptr, FALSE, nullptr);   // Windows vecchio: timer normale
+        CloseHandle(CreateThread(nullptr, 0, giro, this, 0, nullptr));
+    }
+    static DWORD WINAPI giro(LPVOID p) {
+        Battito* b = (Battito*)p;
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+        for (;;) {
+            EnterCriticalSection(&b->cs);
+            const bool vuoto = b->el.empty();
+            for (size_t i = 0; i < b->el.size();) {
+                Iscritto& x = b->el[i];
+                if (!IsWindow(x.h)) { b->el.erase(b->el.begin() + i); continue; }
+                if (!x.inViaggio && PostMessageW(x.h, b->msg, x.id, 0)) x.inViaggio = 1;
+                i++;
+            }
+            LeaveCriticalSection(&b->cs);
+            if (vuoto) { WaitForSingleObject(b->sveglia, INFINITE); continue; }
+            // un fotogramma dello schermo (frequenza letta ogni volta: puo' cambiare)
+            double periodo = 1.0 / 60;
+            DWM_TIMING_INFO ti{}; ti.cbSize = sizeof(ti);
+            if (SUCCEEDED(DwmGetCompositionTimingInfo(nullptr, &ti)) && ti.rateRefresh.uiNumerator && ti.rateRefresh.uiDenominator)
+                periodo = std::clamp((double)ti.rateRefresh.uiDenominator / ti.rateRefresh.uiNumerator, 1.0 / 360, 1.0 / 30);
+            LARGE_INTEGER dt; dt.QuadPart = -(LONGLONG)(periodo * 1e7);   // unita' da 100 ns, negativo = relativo
+            if (b->timer && SetWaitableTimer(b->timer, &dt, 0, nullptr, nullptr, FALSE)) WaitForSingleObject(b->timer, 100);
+            else Sleep(8);
+        }
+    }
+};
+// millisecondi precisi per le animazioni (GetTickCount64 va a scatti di ~15,6 ms: a 180-240 Hz il movimento saltellava)
+inline ULONGLONG ms() {
+    static const double f = [] { LARGE_INTEGER q; QueryPerformanceFrequency(&q); return (double)q.QuadPart / 1000.0; }();
+    LARGE_INTEGER c; QueryPerformanceCounter(&c); return (ULONGLONG)(c.QuadPart / f);
+}
+// al posto di SetTimer(fin, id, 15) e KillTimer(fin, id) per le animazioni
+inline void battito(HWND h, UINT id) { if (h) Battito::io().iscrivi(h, id); }
+inline void fermaBattito(HWND h, UINT id) { if (h) Battito::io().togli(h, id); }
+
 // procedura comune: WM_NCCALCSIZE (niente bordi), WM_ERASEBKGND; il resto lo gestisce l'oggetto
 template <class T> LRESULT CALLBACK procedura(HWND h, UINT m, WPARAM w, LPARAM l) {
     if (m == WM_NCCREATE) SetWindowLongPtrW(h, GWLP_USERDATA, (LONG_PTR)((CREATESTRUCTW*)l)->lpCreateParams);
     T* io = (T*)GetWindowLongPtrW(h, GWLP_USERDATA);
+    // battito (vedi Battito): per l'oggetto e' un WM_TIMER con lo stesso id
+    if (m == Battito::io().msg && m) {
+        Battito::io().ricevuto(h, (UINT)w);
+        LRESULT r = 0; if (io) io->messaggio(h, WM_TIMER, w, 0, r);
+        return 0;
+    }
     switch (m) {
         case WM_NCCALCSIZE: if (w) return 0; break;
         case WM_ERASEBKGND: return 1;

@@ -83,21 +83,21 @@ public:
             fSezione = v.formato(11.5f * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
             fCentro = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER);
         }
-        aperta = true; sopra = -1; t0 = GetTickCount64(); k = 0;
+        aperta = true; sopra = -1; t0 = vetro::ms(); k = 0;
         v.alfa(0);
-        SetTimer(v.fin, 1, 15, nullptr);
+        vetro::battito(v.fin, 1);
         SetForegroundWindow(v.fin);
         disegna();
     }
 
-    void chiudi() { if (v.fin) { KillTimer(v.fin, 1); ShowWindow(v.fin, SW_HIDE); } aperta = false; }
+    void chiudi() { if (v.fin) { vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); } aperta = false; }
 
     bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
         r = 0;
         switch (m) {
             case WM_TIMER:
                 if (w == 1) {
-                    k = std::min(1.0, (GetTickCount64() - t0) / 180.0);
+                    k = std::min(1.0, (vetro::ms() - t0) / 180.0);
                     v.alfa(vetro::uscita(k));
                     bool ancora = k < 1;
                     for (size_t i = 0; i < voci.size(); i++) {
@@ -106,7 +106,7 @@ public:
                         else if (i < anim.size()) anim[i] = obj;
                     }
                     disegna();
-                    if (!ancora) KillTimer(v.fin, 1);
+                    if (!ancora) vetro::fermaBattito(v.fin, 1);
                 }
                 return true;
             case WM_PAINT: disegna(); return true;
@@ -173,7 +173,7 @@ private:
         else if (id < (int)voci.size()) { bool& b = valori().*(voci[id].campo); b = !b; }
         salva();
         if (cambiato) cambiato();
-        SetTimer(v.fin, 1, 15, nullptr);
+        vetro::battito(v.fin, 1);
         disegna();
     }
 

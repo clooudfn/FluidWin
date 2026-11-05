@@ -1410,8 +1410,18 @@ private:
             if (!davanti && altraAperta) { mescola(slot); return; }   // era dietro: torna davanti girando da sinistra
             chiudiPannello(); return;                                   // era davanti: si chiude
         }
-        // il clic sul pulsante ha appena chiuso lo stesso pannello (perdendo il fuoco): resta chiuso, come un interruttore
-        if (pannelloChiuso == tipo && adesso() - pChiusoT < 0.3) return;
+        // si sta chiudendo: torna indietro dal punto in cui e' (prima ripartiva da zero, e per 0,3 s dopo la chiusura i
+        // clic si ignoravano). Stessa curva dell'apertura, ripresa dalla stessa altezza
+        if (pannelloTipo == tipo && pChiusura) {
+            const bool cresce = tipo != P_NOTIFICHE;
+            const double k = std::clamp(pK < 0 ? 0.0 : pK, 0.0, 1.0);
+            const double x = 1 - std::pow(1 - k, 1.0 / (cresce ? 4 : 3));
+            pT0 = adesso() - x * (cresce ? 0.25 : 0.19);
+            pChiusura = false; pAnimazione = true; pDirty = true;
+            SetForegroundWindow(pannello);
+            ordinaSchede(); usa(slot);
+            return;
+        }
         if (tipo == P_SFONDO) leggiAppSfondo();
         if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
         pannelloTipo = tipo; pChiusura = false; pT0 = adesso(); pK = -1;
@@ -1511,7 +1521,10 @@ private:
 
     void chiudiPannello() {
         if (pannelloTipo == P_NESSUNO || pChiusura) return;
-        pChiusura = true; pT0 = adesso(); pDirty = true; chiudiAlle = -1;
+        // chiuso mentre si apriva: la chiusura parte dall'altezza a cui e' arrivato, non da tutto aperto
+        const bool cresce = pannelloTipo != P_NOTIFICHE;
+        const double k = std::clamp(pK < 0 ? 0.0 : pK, 0.0, 1.0);
+        pChiusura = true; pT0 = adesso() - std::sqrt(1 - k) * (cresce ? 0.17 : 0.13); pDirty = true; chiudiAlle = -1;
         if (trascinaVolume || trascinaLum) { trascinaVolume = trascinaLum = false; ReleaseCapture(); }
         // si chiude quella davanti e l'altra resta: torna davanti al suo posto (senza giro)
         const int s = slotCorrente;
@@ -2501,7 +2514,15 @@ private:
             case WM_KEYDOWN: if (w == VK_ESCAPE) d->chiudiTutte(); return 0;
             case WM_CLOSE: d->chiudiTutte(); return 0;   // Alt+F4: come Esc (la finestra non si distrugge, si riusa)
             // il fuoco va altrove (non all'altra carta): si chiudono tutte e due, una dopo l'altra
-            case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && !d->schedaFinestra((HWND)l)) d->chiudiTutte(); return 0;
+            case WM_ACTIVATE:
+                if (LOWORD(w) == WA_INACTIVE && !d->schedaFinestra((HWND)l)) {
+                    // il fuoco va via perche' si e' cliccata l'isola: decide quel clic (apre, chiude o cambia pannello).
+                    // Chiudendo qui, il clic subito dopo riaprirebbe quello appena chiuso
+                    POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo();
+                    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && PtInRect(&is, pt)) return 0;
+                    d->chiudiTutte();
+                }
+                return 0;
         }
         return DefWindowProcW(h, m, w, l);
     }

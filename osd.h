@@ -17,7 +17,7 @@ public:
     void mostra(float livello, bool muto) {
         if (!v.fin) return;
         livelloObj = livello; this->muto = muto;
-        const ULONGLONG ora = GetTickCount64();
+        const ULONGLONG ora = vetro::ms();
         if (stato == 0) {   // da nascosto: entra
             v.aggiornaTema();
             const RECT a = vetro::areaPrincipale();
@@ -28,13 +28,13 @@ public:
             if (!fmt) fmt = v.formato(13.5f * v.dpi, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_TRAILING);
             livelloVis = livello;
             t0 = ora; stato = 1;
-            SetTimer(v.fin, 1, 15, nullptr);
+            vetro::battito(v.fin, 1);
         } else if (stato == 3) { stato = 1; t0 = ora - (ULONGLONG)(k * 180); }   // stava uscendo: torna
         tFine = ora + 1400;
         disegna();
     }
 
-    void chiudi() { if (v.fin) KillTimer(v.fin, 1); if (fmt) fmt->Release(); fmt = nullptr; v.chiudi(); }
+    void chiudi() { if (v.fin) vetro::fermaBattito(v.fin, 1); if (fmt) fmt->Release(); fmt = nullptr; v.chiudi(); }
 
     bool messaggio(HWND, UINT m, WPARAM w, LPARAM, LRESULT& r) {
         if (m == WM_TIMER && w == 1) { passo(); r = 0; return true; }
@@ -54,12 +54,12 @@ private:
     int x = 0, y = 0;
 
     void passo() {
-        const ULONGLONG ora = GetTickCount64();
+        const ULONGLONG ora = vetro::ms();
         if (stato == 1) { k = std::min(1.0, (ora - t0) / 180.0); if (k >= 1) stato = 2; }
         else if (stato == 2 && ora >= tFine) { stato = 3; t0 = ora; }
         else if (stato == 3) {
             k = 1 - std::min(1.0, (ora - t0) / 220.0);
-            if (k <= 0) { stato = 0; KillTimer(v.fin, 1); ShowWindow(v.fin, SW_HIDE); return; }
+            if (k <= 0) { stato = 0; vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); return; }
         }
         livelloVis += (livelloObj - livelloVis) * 0.35f;   // la barra scorre fino al valore nuovo
         const double e = vetro::uscita(k);

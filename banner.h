@@ -97,7 +97,7 @@ public:
                 if (x != sopraX) { sopraX = x; disegna(); }
                 return true;
             }
-            case WM_MOUSELEAVE: dentro = false; sopraX = false; tFine = GetTickCount64() + 2500; disegna(); return true;
+            case WM_MOUSELEAVE: dentro = false; sopraX = false; tFine = vetro::ms() + 2500; disegna(); return true;
             case WM_LBUTTONUP:
                 if (stato == 0) return true;
                 if (sullaX(GET_X_LPARAM(l), GET_Y_LPARAM(l))) lettore.rimuovi(attuale.id);
@@ -191,17 +191,17 @@ private:
         }
         if (icona) { icona->Release(); icona = nullptr; }
         caricaIcona();
-        stato = 1; t0 = GetTickCount64(); tFine = t0 + 5500; k = 0;
-        SetTimer(v.fin, 1, 15, nullptr);
+        stato = 1; t0 = vetro::ms(); tFine = t0 + 5500; k = 0;
+        vetro::battito(v.fin, 1);
         disegna();
     }
 
-    void esci() { if (stato == 1 || stato == 2) { stato = 3; t0 = GetTickCount64(); } }
+    void esci() { if (stato == 1 || stato == 2) { stato = 3; t0 = vetro::ms(); } }
 
-    void nascondi() { stato = 0; KillTimer(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
+    void nascondi() { stato = 0; vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
 
     void passo() {
-        const ULONGLONG ora = GetTickCount64();
+        const ULONGLONG ora = vetro::ms();
         if (stato == 1) { k = std::min(1.0, (ora - t0) / 260.0); if (k >= 1) stato = 2; }
         else if (stato == 2 && !dentro && ora >= tFine) esci();
         else if (stato == 3) {

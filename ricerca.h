@@ -115,7 +115,7 @@ public:
         }
         ShowWindow(v.fin, SW_SHOW);
         prendiFuoco();
-        SetTimer(v.fin, 1, 15, nullptr);    // animazione del riquadro (se l'onda non c'e', o tra un battito e l'altro)
+        vetro::battito(v.fin, 1);    // animazione del riquadro (se l'onda non c'e', o tra un battito e l'altro)
         SetTimer(v.fin, 2, 530, nullptr);   // cursore lampeggiante
         passoRiquadro();
     }
@@ -126,7 +126,7 @@ public:
         KillTimer(v.fin, 2);
         onda.chiudi();
         // il riquadro sfuma salendo un poco e restringendosi (sotto nessun clic: e' gia' chiusa)
-        SetTimer(v.fin, 1, 15, nullptr);
+        vetro::battito(v.fin, 1);
         if (restituisciFuoco && primaDi && IsWindow(primaDi) && IsWindowVisible(primaDi)) SetForegroundWindow(primaDi);
         passoRiquadro();
     }
@@ -237,7 +237,7 @@ private:
         v.alfa(a);
         disegna();
         if (!finita) return;
-        KillTimer(v.fin, 1);
+        vetro::fermaBattito(v.fin, 1);
         onda.battito = false;
         if (chiudendo) { chiudendo = false; ShowWindow(v.fin, SW_HIDE); scalaW = 1; spostaY = 0; }
     }
