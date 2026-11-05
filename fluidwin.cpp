@@ -419,6 +419,12 @@ static void ripristinaTutte() {
             BOOL no = FALSE; DwmSetWindowAttribute(h, DWMWA_TRANSITIONS_FORCEDISABLED, &no, sizeof(no));
             RemovePropW(h, PROP_TRANSIZ);
         }
+        // finestre classiche a cui FluidWin ha tolto i tasti originali (WS_SYSMENU): tornano com'erano
+        if (GetPropW(h, L"FluidWin.SenzaTasti")) {
+            SetWindowLongPtrW(h, GWL_STYLE, GetWindowLongPtrW(h, GWL_STYLE) | WS_SYSMENU);
+            SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+            RemovePropW(h, L"FluidWin.SenzaTasti");
+        }
         return TRUE;
     }, 0);
 }

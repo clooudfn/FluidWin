@@ -20,6 +20,7 @@
 #include "scala.h"
 #include "suggerimento.h"
 #include <cmath>
+#include <climits>
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
@@ -31,6 +32,10 @@
 #include <thread>
 
 namespace capsula {
+
+// proprieta' messa sulle finestre classiche a cui FluidWin ha tolto i tasti originali (WS_SYSMENU): all'uscita, a un
+// crash o dal guardiano (ripristinaTutte in fluidwin.cpp) le finestre che ce l'hanno riprendono i loro tasti
+static const wchar_t* const PROP_SENZA_TASTI = L"FluidWin.SenzaTasti";
 
 // Lettura dello schermo in un thread a parte. Un BitBlt dallo schermo aspetta il compositore (~6 ms anche per pochi
 // pixel): il controllo del colore ogni 50 ms lo faceva sul thread principale (il 16% del suo tempo, a scatti). Ora
@@ -143,7 +148,7 @@ public:
     void rimisuraTutte() { for (auto& [h, c] : capsule) { nascondi(c, "nuova misura"); c.provata = false; } programma(); }
 
     // capsula spenta dalle impostazioni: restano i tasti originali delle app
-    void spegni(bool si) { spenta = si; if (si) for (auto& [h, c] : capsule) nascondi(c, "spenta"); else programma(); }
+    void spegni(bool si) { spenta = si; if (si) { rimettiTutti(); for (auto& [h, c] : capsule) nascondi(c, "spenta"); } else programma(); }
     bool accesa() const { return !spenta; }
 
     bool inizializza(HINSTANCE inst) {
@@ -405,6 +410,17 @@ private:
         bool volo = false;              // sta seguendo l'animazione di ingrandimento/ripristino, da 'da' a tasti
         POINT da{};
         ULONGLONG voloT0 = 0;
+        // I tasti originali uno per uno (riduci, ingrandisci, chiudi): bordo sinistro e destro come distanza dal bordo
+        // destro della parte visibile, se ci sono e se sono disattivati (un dialogo ha solo "chiudi", una finestra che
+        // non si ridimensiona ha "ingrandisci" spento). Ogni tasto nuovo sta esattamente sopra il suo
+        float nL[3] = {0, 0, 0}, nR[3] = {0, 0, 0}; bool nC[3] = {true, true, true}, nSpento[3] = {false, false, false};
+        // ricordo per le misure veloci (hit test, accessibilita'): stesse distanze, in pixel
+        int memL[3] = {0, 0, 0}, memR[3] = {0, 0, 0}; bool memC[3] = {false, false, false};
+        // Finestre classiche (tasti disegnati da Windows): i tasti originali tolti mentre FluidWin e' attivo (WS_SYSMENU).
+        // Da allora Windows non dice piu' dove stavano: vale la posizione ricordata, da normale [0] e ingrandita [1]
+        bool senzaTasti = false, nonTogliere = false;
+        int tentativiTogli = 0;
+        struct Geo { bool ok = false; LONG top = 0, bottom = 0; LONG l[3] = {0, 0, 0}, r[3] = {0, 0, 0}; bool c[3] = {false, false, false}, spento[3] = {false, false, false}; } geo[2];
     };
     static const int DURATA_VOLO = 220;   // ms: circa quanto dura l'animazione di Windows
 
@@ -442,6 +458,7 @@ private:
         c.tasti.right = c.tasti.left + w; c.tasti.bottom = c.tasti.top + hh;
         c.bordoDx = m.bordoDx; c.bordoSu = m.bordoSu; c.r = m.r; c.cy = m.cy; c.oL = m.oL; c.oB = m.oB; c.zoom = m.zoom;
         c.colonna = m.colonna; c.fondo = m.fondo; c.coloreVero = m.coloreVero;
+        for (int i = 0; i < 3; i++) { c.nL[i] = m.nL[i]; c.nR[i] = m.nR[i]; c.nC[i] = m.nC[i]; c.nSpento[i] = m.nSpento[i]; }
     }
 
     // dove sta la pillola rispetto all'angolo in alto a destra della parte visibile della finestra (dx dal bordo destro,
@@ -449,7 +466,10 @@ private:
     void scartoPillola(const Capsula& c, float& dx, float& dy, float& capR, float& capT) const {
         const float W = (float)(c.tasti.right - c.tasti.left), Hh = (float)(c.tasti.bottom - c.tasti.top);
         float cx[3], r; geometria(c, W, Hh, cx, r);
-        capR = cx[2] + r * 1.55f; capT = c.cy - r * 1.45f;
+        // (senza pillola: il bordo destro del tasto piu' a destra e la cima dei cerchi)
+        float dest = -1e9f; for (int i = 0; i < 3; i++) if (c.nC[i]) dest = std::max(dest, cx[i]);
+        if (dest < -1e8f) dest = cx[2];
+        capR = dest + r; capT = c.cy - r;
         dx = c.bordoDx + (W - capR); dy = c.bordoSu + capT;
     }
     ID2D1Factory* f2d = nullptr;
@@ -477,6 +497,11 @@ private:
         int colpiDx = 0, colpiDy = 0, colpiW = 0, colpiH = 0, uiaDx = 0, uiaDy = 0, uiaW = 0, uiaH = 0, tentativiUia = 0;
         // risultato
         bool ok = false; RECT t{}; LONG barra = 0; int colpi = 0; double ms = 0; char scarto[140] = "";
+        // i tasti uno per uno (coordinate schermo): ci sono, sono disattivati; classica = disegnati da Windows
+        RECT b[3]{}; bool bc[3] = {false, false, false}, bSpento[3] = {false, false, false}; bool classica = false;
+        // tasti originali gia' tolti: niente da cercare, b/bc/t arrivano dalla posizione ricordata
+        bool senzaTasti = false;
+        int memL[3] = {0, 0, 0}, memR[3] = {0, 0, 0}; bool memC[3] = {false, false, false};
         // la striscia in alto a destra della finestra letta dallo schermo dalla sonda: i pixel della barra si prendono
         // da qui invece di un BitBlt sul thread principale (aspetta il compositore, ~6 ms)
         std::vector<UINT> banda; RECT bandaR{}; bool bandaOk = false;
@@ -486,11 +511,13 @@ private:
         s.viaUia = c.viaUia; s.uiaZoom = c.uiaZoom; s.viaColpi = c.viaColpi; s.colpiZoom = c.colpiZoom;
         s.colpiDx = c.colpiDx; s.colpiDy = c.colpiDy; s.colpiW = c.colpiW; s.colpiH = c.colpiH;
         s.uiaDx = c.uiaDx; s.uiaDy = c.uiaDy; s.uiaW = c.uiaW; s.uiaH = c.uiaH; s.tentativiUia = c.tentativiUia;
+        for (int i = 0; i < 3; i++) { s.memL[i] = c.memL[i]; s.memR[i] = c.memR[i]; s.memC[i] = c.memC[i]; }
     }
     static void rendiRicordi(Capsula& c, const Sonda& s) {
         c.viaUia = s.viaUia; c.uiaZoom = s.uiaZoom; c.viaColpi = s.viaColpi; c.colpiZoom = s.colpiZoom;
         c.colpiDx = s.colpiDx; c.colpiDy = s.colpiDy; c.colpiW = s.colpiW; c.colpiH = s.colpiH;
         c.uiaDx = s.uiaDx; c.uiaDy = s.uiaDy; c.uiaW = s.uiaW; c.uiaH = s.uiaH; c.tentativiUia = s.tentativiUia;
+        for (int i = 0; i < 3; i++) { c.memL[i] = s.memL[i]; c.memR[i] = s.memR[i]; c.memC[i] = s.memC[i]; }
     }
 
     // UI Automation: CLSID_CUIAutomation / IID_IUIAutomation (scritti qui: non tutte le librerie di MinGW li hanno)
@@ -547,6 +574,68 @@ private:
         return true;
     }
 
+    // ---- tasti originali tolti (finestre classiche) ----
+    // Scelta dell'utente: mentre FluidWin e' attivo i tasti originali non devono esserci in nessun caso. Nelle finestre
+    // i cui tasti li disegna Windows si tolgono davvero, senza entrare nell'app: senza WS_SYSMENU Windows non li
+    // disegna piu' (con loro spariscono l'icona in alto a sinistra e il menu di Alt+Spazio; spostare, il doppio clic
+    // per ingrandire e Snap restano). Nelle app che li disegnano da sole (Chromium, app dello Store) restano coperti
+    // dai tasti nuovi. Si rimettono all'uscita, a un crash o dal guardiano (proprieta' PROP_SENZA_TASTI), con la
+    // capsula spenta e col contrasto elevato
+    int conTastiTolti = 0;   // finestre a cui sono stati tolti (per non scorrerle tutte quando non ce n'e' nessuna)
+
+    bool togliibile(const Capsula& c) const {
+        HWND h = c.bersaglio;
+        if (c.nonTogliere || c.senzaTasti || spenta || contrastoElevato() || !IsWindowVisible(h)) return false;
+        const LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE);
+        if (!(st & WS_SYSMENU) || (st & WS_CAPTION) != WS_CAPTION) return false;
+        // app che disegnano la barra da sole ma rispondono coi tasti di Windows (Chromium ingrandito): no
+        wchar_t k[64] = L""; GetClassNameW(h, k, 64);
+        for (const wchar_t* x : {L"Chrome_WidgetWin_0", L"Chrome_WidgetWin_1", L"ApplicationFrameWindow", L"Windows.UI.Core.CoreWindow", L"MozillaWindowClass"})
+            if (!wcscmp(k, x)) return false;
+        return true;
+    }
+
+    // SetWindowLongPtr su una finestra di un altro programma aspetta che l'app risponda: in un thread del pool
+    static DWORD WINAPI cambiaStile(LPVOID p) {
+        const HWND h = (HWND)((ULONG_PTR)p & ~(ULONG_PTR)1);
+        const bool togli = ((ULONG_PTR)p & 1) != 0;
+        const LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE);
+        const LONG_PTR nuovo = togli ? (st & ~(LONG_PTR)WS_SYSMENU) : (st | WS_SYSMENU);
+        if (nuovo != st && IsWindow(h)) {
+            SetWindowLongPtrW(h, GWL_STYLE, nuovo);
+            SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+        return 0;
+    }
+
+    void togliTasti(Capsula& misurata) {
+        // (la misura puo' essere su una copia, per esempio quella del controllo a finestra ferma: vale la capsula vera)
+        auto it = capsule.find(misurata.bersaglio);
+        Capsula& c = it != capsule.end() ? it->second : misurata;
+        if (&c != &misurata) { c.geo[0] = misurata.geo[0]; c.geo[1] = misurata.geo[1]; }
+        if (!togliibile(c)) return;
+        HWND h = c.bersaglio;
+        SetPropW(h, PROP_SENZA_TASTI, (HANDLE)1);   // prima: se FluidWin si chiudesse male, il guardiano li rimette
+        c.senzaTasti = true; misurata.senzaTasti = true; conTastiTolti++;
+        pool::lancia(cambiaStile, (LPVOID)((ULONG_PTR)h | 1), THREAD_PRIORITY_NORMAL, true);
+        if (registro) { char b[80]; snprintf(b, 80, "capsula %p: tasti originali tolti", (void*)h); scrivi(b); }
+    }
+
+    void rimettiTasti(Capsula& c) {
+        if (!c.senzaTasti) return;
+        c.senzaTasti = false; c.provata = false;
+        HWND h = c.bersaglio;
+        RemovePropW(h, PROP_SENZA_TASTI);
+        if (IsWindow(h)) pool::lancia(cambiaStile, (LPVOID)h, THREAD_PRIORITY_NORMAL, true);
+        if (registro) { char b[80]; snprintf(b, 80, "capsula %p: tasti originali rimessi", (void*)h); scrivi(b); }
+    }
+
+    void rimettiTutti() {
+        if (!conTastiTolti) return;
+        for (auto& [h, c] : capsule) rimettiTasti(c);
+        conTastiTolti = 0;
+    }
+
     // la misura della sonda di c, se e' finita e del tipo giusto (altrimenti nullptr; una del tipo sbagliato si butta)
     std::shared_ptr<Sonda> sondaFinita(Capsula& c, bool verifica) {
         if (!c.sonda || !c.sonda->fatta.load(std::memory_order_acquire)) return nullptr;
@@ -574,6 +663,7 @@ private:
             if (tipo == UIA_ButtonControlTypeId && PtInRect(&r, p) && w >= P(sc, 16) && w <= P(sc, 90) && hh >= P(sc, 16) && hh <= P(sc, 70) &&
                 (n == 0 || std::abs(hh - (tt.bottom - tt.top)) <= P(sc, 3))) {
                 if (n == 0) tt = r; else UnionRect(&tt, &tt, &r);
+                s.b[2 - n] = r;   // da destra: chiudi, ingrandisci, riduci
                 n++; x = ultimo = r.left - 1;
             } else if ((n == 0 && x > v.right - P(sc, 40)) || (n > 0 && ultimo - x < P(sc, 12))) x -= 3;   // margine o spazio fra due tasti
             else break;
@@ -582,6 +672,7 @@ private:
         t = tt; s.viaUia = true; s.tentativiUia = 0;
         s.uiaZoom = s.zoom;
         s.uiaDx = v.right - tt.right; s.uiaDy = tt.top - v.top; s.uiaW = tt.right - tt.left; s.uiaH = tt.bottom - tt.top;
+        for (int i = 0; i < 3; i++) { s.bc[i] = true; s.memC[i] = true; s.memL[i] = v.right - s.b[i].left; s.memR[i] = v.right - s.b[i].right; }
         return true;
     }
 
@@ -678,6 +769,35 @@ private:
         }
         s.h = h; s.v = v; s.fr = fr; s.sc = scalaDi(h); s.zoom = IsZoomed(h) != FALSE;
         prendiRicordi(s, c);
+        if (c.senzaTasti) {
+            // l'app si e' rimessa i tasti da sola (o toglierli non e' riuscito): si misurano di nuovo e si ritolgono,
+            // ma dopo due tentativi falliti si lascia stare (app con piu' privilegi: Windows non lascia cambiarla)
+            if (GetWindowLongPtrW(h, GWL_STYLE) & WS_SYSMENU) {
+                c.senzaTasti = false;
+                if (++c.tentativiTogli >= 2) { c.nonTogliere = true; RemovePropW(h, PROP_SENZA_TASTI); }
+                return;
+            }
+            // posizione ricordata in questo stato; se la finestra non c'e' mai stata, ricavata dall'altro: le larghezze
+            // sono le stesse, l'altezza cambia del bordo di Windows (da ingrandita la barra perde il bordo in alto:
+            // misurati 30 px contro 22 al 100%, cioe' SM_CYFRAME + SM_CXPADDEDBORDER), e da normale si parte 1 px sotto
+            const int st = s.zoom ? 1 : 0;
+            Capsula::Geo g = c.geo[st];
+            if (!g.ok && c.geo[1 - st].ok) {
+                g = c.geo[1 - st];
+                const UINT dpi = (UINT)std::lround(s.sc * 96);
+                const LONG bordo = GetSystemMetricsForDpi(SM_CYFRAME, dpi) + GetSystemMetricsForDpi(SM_CXPADDEDBORDER, dpi);
+                const LONG alto = g.bottom - g.top;
+                if (s.zoom) { g.top = 0; g.bottom = alto - bordo; } else { g.top = 1; g.bottom = 1 + alto + bordo; }
+            }
+            if (!g.ok) { c.senzaTasti = false; return; }   // (non dovrebbe succedere: la si toglie solo dopo una misura)
+            s.senzaTasti = true; s.classica = true;
+            s.t = RECT{v.right, v.top + g.top, v.left, v.top + g.bottom};
+            for (int i = 0; i < 3; i++) {
+                s.bc[i] = g.c[i]; s.bSpento[i] = g.spento[i];
+                s.b[i] = {v.right - g.l[i], v.top + g.top, v.right - g.r[i], v.top + g.bottom};
+                if (g.c[i]) { s.t.left = std::min(s.t.left, s.b[i].left); s.t.right = std::max(s.t.right, s.b[i].right); }
+            }
+        }
     }
 
     // Seconda parte (qualsiasi thread, di solito la sonda): tutto quello che si chiede all'app. Dove sono i tre tasti,
@@ -717,14 +837,26 @@ private:
     const Sonda* bandaUsa = nullptr;
     static bool sondaDentro(Sonda& s, IUIAutomation* uia) {
         const HWND h = s.h; const RECT v = s.v; const float sc = s.sc;
+        RECT t{};
+        // tasti originali gia' tolti (finestra classica): la posizione l'ha messa prepara, si cerca solo la barra
+        if (s.senzaTasti) {
+            t = s.t;
+            LONG barra = t.bottom;
+            for (int yy = t.bottom; yy < v.top + P(sc, 90); yy += 2) { if (colpo(h, t.left - P(sc, 6), yy) != HTCAPTION) break; barra = yy + 2; }
+            s.barra = barra;
+            return true;
+        }
         TITLEBARINFOEX tb{}; tb.cbSize = sizeof(tb);
         DWORD_PTR ok = 0;
-        RECT t{};
-        // misura accettabile: dentro la finestra e con le dimensioni di tre tasti
+        // misura accettabile: dentro la finestra e con le dimensioni dei tasti
         auto valida = [&](RECT r) {
             IntersectRect(&r, &r, &v);
             const int w = r.right - r.left, hh = r.bottom - r.top;
             return w >= P(sc, 40) && hh >= P(sc, 18) && hh <= P(sc, 90) && w <= P(sc, 400);
+        };
+        // i tasti uno per uno dalla distanza ricordata dal bordo destro, alti quanto t
+        auto daRicordo = [&]() {
+            for (int i = 0; i < 3; i++) { s.bc[i] = s.memC[i]; s.b[i] = {v.right - s.memL[i], t.top, v.right - s.memR[i], t.bottom}; }
         };
         bool classica = false;
         if (SendMessageTimeoutW(h, WM_GETTITLEBARINFOEX, 0, (LPARAM)&tb, SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &ok) &&
@@ -733,12 +865,26 @@ private:
             for (int i : {2, 3}) if (tb.rgrect[i].right > tb.rgrect[i].left && !(tb.rgstate[i] & STATE_SYSTEM_INVISIBLE)) UnionRect(&t, &t, &tb.rgrect[i]);
             // Chromium ingrandito risponde con i tasti di DWM, che non disegna: se non tornano si prova l'hit test
             classica = valida(t);
+            if (classica) {
+                const int quale[3] = {2, 3, 5};   // riduci, ingrandisci, chiudi
+                for (int i = 0; i < 3; i++) {
+                    const RECT& r = tb.rgrect[quale[i]];
+                    s.bc[i] = r.right > r.left && !(tb.rgstate[quale[i]] & STATE_SYSTEM_INVISIBLE);
+                    s.bSpento[i] = s.bc[i] && (tb.rgstate[quale[i]] & STATE_SYSTEM_UNAVAILABLE);
+                    if (s.bc[i]) s.b[i] = r;
+                }
+                // disegnati davvero da Windows? l'hit test al centro del chiudi deve dire "chiudi"
+                const LRESULT r = colpo(h, (s.b[2].left + s.b[2].right) / 2, (s.b[2].top + s.b[2].bottom) / 2);
+                s.classica = r == HTCLOSE;
+            }
         }
         if (classica) {
         } else if (s.viaUia && s.uiaZoom == s.zoom) {
             t = {v.right - s.uiaDx - s.uiaW, v.top + s.uiaDy, v.right - s.uiaDx, v.top + s.uiaDy + s.uiaH};
+            daRicordo();
         } else if (s.viaColpi && s.colpiZoom == s.zoom && tastiAncoraLi(s, h, v, t)) {
             // tasti gia' trovati con l'hit test in questo stato: stanno ancora li' (verificato con pochi hit test)
+            daRicordo();
         } else {
             // barra del titolo disegnata dall'app: da destra verso sinistra, dove iniziano e finiscono i tasti
             const int y = v.top + P(sc, 10);
@@ -747,12 +893,15 @@ private:
             // un passo piu' lungo rischierebbe di saltare il margine fra due tasti)
             int destra = 0, sinistra = 0, vuoto = 0;
             bool trovato = false, chiudi = false;
+            int lx[3] = {INT_MAX, INT_MAX, INT_MAX}, rx[3] = {INT_MIN, INT_MIN, INT_MIN};   // estremi di ogni tasto
             for (int x = v.right - 3; x > v.right - P(sc, 320) && x > v.left; x -= 3) {
                 const LRESULT r = colpo(h, x, y);
                 if (r < 0) return false;
                 if (r == HTCLOSE || r == HTMAXBUTTON || r == HTMINBUTTON) {
                     if (!trovato) { destra = x; trovato = true; }
                     sinistra = x; vuoto = 0; chiudi |= r == HTCLOSE;
+                    const int i = r == HTMINBUTTON ? 0 : r == HTMAXBUTTON ? 1 : 2;
+                    lx[i] = std::min(lx[i], x); rx[i] = std::max(rx[i], x);
                 } else if (trovato && (vuoto += 3) > P(sc, 24)) break;
             }
             if (chiudi) {
@@ -766,6 +915,14 @@ private:
                 // si ricorda dove stanno rispetto all'angolo in alto a destra: la prossima volta basta verificarlo
                 s.viaColpi = true; s.colpiZoom = s.zoom;
                 s.colpiDx = v.right - t.right; s.colpiDy = t.top - v.top; s.colpiW = t.right - t.left; s.colpiH = t.bottom - t.top;
+                // ogni tasto: dal primo all'ultimo punto visto (passi di 3 px: il confine sta a meta' fra i due)
+                for (int i = 0; i < 3; i++) {
+                    s.memC[i] = lx[i] <= rx[i];
+                    if (!s.memC[i]) continue;
+                    const LONG l = std::max<LONG>(t.left, lx[i] - 1), r = std::min<LONG>(t.right, rx[i] + 2);
+                    s.memL[i] = v.right - l; s.memR[i] = v.right - r;
+                }
+                daRicordo();
             } else if (!tastiUia(s, uia, v, t)) return false;
         }
         // il tasto chiudi vero puo' essere piu' alto di quanto dice l'app (o di quanto si e' misurato): se sotto la
@@ -776,8 +933,9 @@ private:
             t.bottom = yy + 1;
         }
         IntersectRect(&t, &t, &v);   // la capsula non esce mai dalla finestra
+        for (int i = 0; i < 3; i++) { s.b[i].top = t.top; s.b[i].bottom = t.bottom; }
         const int w = t.right - t.left, hh = t.bottom - t.top;
-        if (w < P(sc, 40) || hh < P(sc, 18) || hh > P(sc, 90) || w > P(sc, 400)) {
+        if (w < P(sc, 40) || hh < P(sc, 18) || hh > P(sc, 90) || w > P(sc, 400) || !(s.bc[0] || s.bc[1] || s.bc[2])) {
             snprintf(s.scarto, sizeof(s.scarto), "capsula %p: misura scartata %dx%d (finestra %ld,%ld-%ld,%ld)", (void*)h, w, hh, v.left, v.top, v.right, v.bottom);
             return false;
         }
@@ -808,13 +966,19 @@ private:
         const RECT v = s.v, t = s.t;
         const float sc = s.sc;
         LONG barra = s.barra;
-        // La capsula ha sempre la stessa misura (non quella dei tasti dell'app, che cambia da app ad app e fra
-        // finestra ingrandita e normale): la sua finestra copre i tasti originali e quanto serve in piu' per lei.
-        // Le parti non disegnate sono trasparenti anche al mouse
-        c.r = raggioTasto * sc;
-        const int pw = (int)std::ceil(c.r * 9.3f), ph = (int)std::ceil(c.r * 2.9f);
+        // Tre tasti separati, ognuno esattamente sopra il suo tasto originale (niente pillola): la finestra della
+        // capsula copre solo i tasti originali, il fondo li nasconde e sopra c'e' un cerchio centrato su ognuno.
+        // Il cerchio ha sempre la stessa misura, ma non esce mai dal suo tasto (tasti stretti o barre basse)
         c.zoom = IsZoomed(h);
-        const int ra = c.zoom ? 0 : (int)std::ceil(raggioAngoli * sc);
+        float largMin = 1e9f;
+        for (int i = 0; i < 3; i++) {
+            c.nC[i] = s.bc[i]; c.nSpento[i] = s.bSpento[i];
+            if (!s.bc[i]) continue;
+            c.nL[i] = (float)(v.right - s.b[i].left); c.nR[i] = (float)(v.right - s.b[i].right);
+            largMin = std::min(largMin, (float)(s.b[i].right - s.b[i].left));
+        }
+        c.r = std::max(6.0f * sc, std::min({raggioTasto * sc, largMin / 2 - 4 * sc, (t.bottom - t.top) / 2.0f - 1}));
+        const int ph = (int)std::ceil(c.r * 2.9f);
         // barre che all'hit test sono "contenuto" (Esplora file e altre app moderne): il bordo inferiore lo si vede dai
         // pixel, dove il colore della barra cambia (due strisce uguali: niente icone di mezzo)
         // e barre che all'hit test continuano un po' sotto a quella che si vede (Brave: 46 px contro 40): vince il pixel
@@ -839,7 +1003,7 @@ private:
         else if (pixel >= t.bottom - 1 && pixel < barra) barra = pixel;
         const LONG centro = barra > t.bottom + 3 ? (v.top + barra) / 2 : (t.top + t.bottom) / 2;
         if (registro) { char b[160]; snprintf(b, 160, "capsula %p: cima %ld tasti %ld-%ld barra %ld centro %ld (rel. %ld)", (void*)h, v.top, t.top - v.top, t.bottom - v.top, barra - v.top, centro - v.top, centro - v.top); scrivi(b); }
-        RECT T = {std::min(t.left, t.right - pw - P(sc, 8) - ra), std::max(v.top, std::min(t.top, centro - ph / 2 - 1)), t.right, 0};
+        RECT T = {t.left, std::max(v.top, std::min(t.top, centro - ph / 2 - 1)), t.right, 0};
         c.cy = std::max((float)(centro - T.top), ph / 2.0f + 1);   // a ridosso del bordo alto: un po' piu' in basso
         T.bottom = std::max(t.bottom, T.top + (LONG)std::ceil(c.cy + ph / 2.0f) + 2);
         c.tasti = T;
@@ -848,6 +1012,13 @@ private:
         // genio): la forma della capsula si calcola da quello letto adesso, cosi' resta ferma
         c.bordoDx = (float)(v.right - T.right); c.bordoSu = (float)(T.top - v.top);
         GetWindowRect(h, &c.ultimoVisibile);
+        // finestra classica misurata coi suoi tasti veri: si ricorda dove stanno in questo stato, poi si tolgono
+        if (s.classica && !s.senzaTasti) {
+            Capsula::Geo& g = c.geo[st];
+            g.ok = true; g.top = t.top - v.top; g.bottom = t.bottom - v.top;
+            for (int i = 0; i < 3; i++) { g.c[i] = s.bc[i]; g.spento[i] = s.bSpento[i]; g.l[i] = v.right - s.b[i].left; g.r[i] = v.right - s.b[i].right; }
+            if (togliibile(c)) togliTasti(c);
+        }
         // finestra appena ingrandita o ridimensionata: durante l'animazione di Windows il colore letto puo' essere
         // sbagliato (nero). Si tiene quello che aveva e lo si rilegge nei controlli successivi, a finestra ferma
         c.campioni = 0;
@@ -1037,6 +1208,7 @@ private:
 
     void aggiornaTutte() {
         KillTimer(tempi, 1);
+        if (spenta || contrastoElevato()) rimettiTutti();   // senza tasti nuovi tornano quelli originali
         previsto = 0;
         HWND fg = GetForegroundWindow();
         // dall'alto verso il basso: cosi' si sa anche dove mettere ogni capsula nell'ordine di sovrapposizione
@@ -1160,59 +1332,24 @@ private:
         }
     }
 
-    // tre cerchi: centri e raggio (coordinate della capsula), allineati a destra come i tasti originali
-    // La capsula finisce 6 px prima del bordo della finestra; con angoli molto tondi si sposta a sinistra quanto
-    // basta perche' la sua estremita' destra resti dentro la curva dell'angolo (concentrica, 3 px di distacco)
+    // tre cerchi: centri (coordinate della capsula) e raggio. Ogni cerchio sta al centro del suo tasto originale
+    // (distanze dal bordo destro della parte visibile, che resta fermo anche quando la finestra cambia misura)
     void geometria(const Capsula& c, float W, float, float cx[3], float& r) const {
         r = c.r;
-        const float passo = r * 3.1f, rc = r * 1.45f;
-        const float dx = c.bordoDx, dy = c.bordoSu;
-        float xr = W + dx - 6.0f - rc;   // centro della semicirconferenza destra della capsula
-        const float sc = scalaDi(c.bersaglio), ra = c.zoom ? 0 : raggioAngoli * sc;
-        const float ccx = W + dx - ra, ccy = ra - dy, sopra = ccy - c.cy, lim = ra - rc - 3.0f;
-        if (sopra > 0 && xr > ccx) xr = std::min(xr, lim > sopra ? ccx + std::sqrt(lim * lim - sopra * sopra) : ccx);
-        float destra = xr - r * 0.1f;
-        // angolo della capsula concentrico con quello della finestra: stesso distacco in alto e a destra
-        const float g = c.cy - rc + dy;
-        if (ra - g > rc + 1) destra = std::min(W + dx - g, W - 1.0f) - r * 1.55f;
-        for (int i = 0; i < 3; i++) cx[i] = destra - (2 - i) * passo;
+        for (int i = 0; i < 3; i++) cx[i] = W + c.bordoDx - (c.nL[i] + c.nR[i]) / 2;
     }
 
-    // contorno della capsula: a sinistra mezzo cerchio, a destra l'angolo in alto segue la curva dell'angolo della
-    // finestra (raggio = raggio finestra - distacco) e quello in basso prende il resto dell'altezza
-    ID2D1PathGeometry* forma(const Capsula& c, const D2D1_RECT_F& cap) const {
-        const float h = cap.bottom - cap.top, rc = h / 2;
-        const float sc = scalaDi(c.bersaglio), ra = c.zoom ? 0 : raggioAngoli * sc;
-        const float g = cap.top + c.bordoSu;
-        float ra1 = rc, ra2 = rc;
-        if (ra - g > rc + 1) { ra1 = std::min(ra - g, h - 4.0f); ra2 = std::max(4.0f, h - ra1); }
-        ID2D1PathGeometry* p = nullptr; ID2D1GeometrySink* s = nullptr;
-        if (FAILED(f2d->CreatePathGeometry(&p)) || FAILED(p->Open(&s))) { if (p) p->Release(); return nullptr; }
-        const D2D1_SIZE_F sr = {rc, rc}, s1 = {ra1, ra1}, s2 = {ra2, ra2};
-        s->BeginFigure({cap.left + rc, cap.top}, D2D1_FIGURE_BEGIN_FILLED);
-        s->AddLine({cap.right - ra1, cap.top});
-        s->AddArc({{cap.right, cap.top + ra1}, s1, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
-        s->AddLine({cap.right, cap.bottom - ra2});
-        s->AddArc({{cap.right - ra2, cap.bottom}, s2, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
-        s->AddLine({cap.left + rc, cap.bottom});
-        s->AddArc({{cap.left + rc, cap.top}, sr, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
-        s->EndFigure(D2D1_FIGURE_END_CLOSED);
-        s->Close(); s->Release();
-        return p;
-    }
-
-    // Tasto sotto il punto. L'area cliccabile e' piu' grande del cerchio disegnato (22 px di diametro, piccolo per un
-    // bersaglio in alto a destra dove si va di fretta): tutta l'altezza della capsula e meta' dello spazio verso i
-    // tasti vicini (ai lati, fino a un passo intero)
+    // Tasto sotto il punto: l'area cliccabile e' tutto il tasto originale che copre (altezza e larghezza), non solo il
+    // cerchio. Un tasto disattivato (ingrandisci di una finestra che non si ridimensiona) non risponde
     int tastoIn(const Capsula& c, int x, int y) const {
         const float W = (float)(c.tasti.right - c.tasti.left), Hh = (float)(c.tasti.bottom - c.tasti.top);
-        float cx[3], r; geometria(c, W, Hh, cx, r);
         if (y < 0 || y >= Hh) return -1;
-        const float passo = cx[1] - cx[0], meta = passo / 2;
-        if (x < cx[0] - std::max(meta, r + 4) || x > cx[2] + std::max(meta, r + 4)) return -1;
-        int migliore = -1; float dmin = 1e9f;
-        for (int i = 0; i < 3; i++) { const float d = std::abs(x - cx[i]); if (d < dmin) { dmin = d; migliore = i; } }
-        return migliore;
+        for (int i = 0; i < 3; i++) {
+            if (!c.nC[i] || c.nSpento[i]) continue;
+            const float l = W + c.bordoDx - c.nL[i], rr = W + c.bordoDx - c.nR[i];
+            if (x >= l && x < rr) return i;
+        }
+        return -1;
     }
 
     // suggerimento del tasto i (sotto di lui) o, sul tasto ingrandisci della finestra in primo piano, Snap Layouts di
@@ -1379,30 +1516,19 @@ private:
             if (c.modo != 2) {   // (modo 2: solo il fondo, da dipingere nelle foto dell'ingrandimento)
             float cx[3], r; geometria(c, (float)W, (float)Hh, cx, r);
             const float cy = c.cy;
-            // capsula di vetro attorno ai tre tasti, su un fondo del colore della barra (dove esce dai tasti originali)
-            const D2D1_RECT_F cap = {cx[0] - r - r * 0.55f, cy - r - r * 0.45f, cx[2] + r + r * 0.55f, cy + r + r * 0.45f};
-            if (ID2D1PathGeometry* fo = forma(c, cap)) {
-                rt->FillGeometry(fo, fondoB);
-                b->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(1, 1, 1, 0.60f));
-                rt->FillGeometry(fo, b);
-                fo->Release();
-            }
-            // il bordo mezzo pixel dentro, per una linea netta
-            if (ID2D1PathGeometry* fb = forma(c, {cap.left + 0.5f, cap.top + 0.5f, cap.right - 0.5f, cap.bottom - 0.5f})) {
-                b->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f) : D2D1::ColorF(0, 0, 0, 0.09f));
-                rt->DrawGeometry(fb, b, 1.0f);
-                fb->Release();
-            }
+            // (niente pillola: tre cerchi separati, ognuno sopra il suo tasto originale; il fondo li ha gia' coperti)
             // finestra non in primo piano: simboli piu' tenui, come su macOS
             const float forza = c.attiva || c.sopra >= 0 ? 1.0f : 0.45f;
             const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.88f * forza) : D2D1::ColorF(0.1f, 0.1f, 0.12f, 0.80f * forza);
             for (int i = 0; i < 3; i++) {
+                if (!c.nC[i]) continue;   // la finestra non ha questo tasto (un dialogo ha solo "chiudi")
                 const bool s = i == c.sopra, pr = i == c.premuto;
+                const D2D1_COLOR_F inkI = c.nSpento[i] ? D2D1::ColorF(ink.r, ink.g, ink.b, ink.a * 0.4f) : ink;   // disattivato: tenue
                 const D2D1_ELLIPSE e = {{cx[i], cy}, r, r};
                 if (i == 2 && (s || pr)) b->SetColor(pr ? D2D1::ColorF(0.85f, 0.25f, 0.22f, 1) : D2D1::ColorF(1.0f, 0.37f, 0.34f, 1));
                 else b->SetColor(scuro ? D2D1::ColorF(1, 1, 1, s ? (pr ? 0.30f : 0.22f) : 0.10f * forza) : D2D1::ColorF(0, 0, 0, s ? (pr ? 0.16f : 0.10f) : 0.05f * forza));
                 rt->FillEllipse(e, b);
-                b->SetColor(i == 2 && (s || pr) ? D2D1::ColorF(1, 1, 1, 1) : ink);
+                b->SetColor(i == 2 && (s || pr) ? D2D1::ColorF(1, 1, 1, 1) : inkI);
                 const float g = r * 0.42f, sp = std::max(1.2f, r * 0.13f);
                 if (i == 0) rt->DrawLine({cx[i] - g, cy}, {cx[i] + g, cy}, b, sp);
                 else if (i == 1) {
