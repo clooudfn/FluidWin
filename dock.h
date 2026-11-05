@@ -2549,6 +2549,9 @@ private:
     bool lAperto = false, lChiusura = false, lDirty = false, lAnim = false, lRegione = false, lMouseDentro = false;
     double lScala = 0.15, lVel = 0, lAlfa = 0, lT0 = 0, lChiusoT = -10, lLetto = -1e9;
     double lScroll = 0, lScrollObj = 0;
+    // barra di scorrimento: si trascina (la si prende dove si vuole), un clic sul binario salta di una pagina
+    bool lTrascinoBarra = false, lSopraBarra = false;
+    float lPresaY = 0; double lPresaScroll = 0;
     int lSel = 0, lSopra = -1;
     bool lSopraEnergia = false;
     IContextMenu2* menuShell2 = nullptr; IContextMenu3* menuShell3 = nullptr;   // durante il menu di Windows di un'app
@@ -2757,17 +2760,34 @@ private:
     }
 
     // con la ricerca: prima i nomi che iniziano con il testo, poi quelli che lo contengono
+    // Ricerca: prima i nomi che iniziano col testo (o una parola che inizia col testo), poi le iniziali delle parole
+    // ("vsc" -> Visual Studio Code), poi i nomi che lo contengono, infine quelli che ne contengono le lettere in
+    // ordine ("clcl" -> Calcolatrice)
+    static bool iniziali(const std::wstring& nome, const std::wstring& q) {
+        size_t k = 0;
+        for (size_t i = 0; i < nome.size() && k < q.size(); i++)
+            if ((i == 0 || nome[i - 1] == L' ' || nome[i - 1] == L'-') && nome[i] == q[k]) k++;
+        return k == q.size();
+    }
+    static bool sottosequenza(const std::wstring& nome, const std::wstring& q) {
+        size_t k = 0;
+        for (size_t i = 0; i < nome.size() && k < q.size(); i++) if (nome[i] == q[k]) k++;
+        return k == q.size();
+    }
     void filtra() {
         filtrate.clear();
         const std::wstring q = minuscolo(query);
-        std::vector<int> dopo;
+        std::vector<int> livelli[3];   // iniziali, contiene, lettere in ordine
         for (int i = 0; i < (int)tutteApp.size(); i++) {
             if (q.empty()) { filtrate.push_back(i); continue; }
-            const size_t p = tutteApp[i].minuscolo.find(q);
-            if (p == 0 || (p != std::wstring::npos && tutteApp[i].minuscolo[p - 1] == L' ')) filtrate.push_back(i);
-            else if (p != std::wstring::npos) dopo.push_back(i);
+            const std::wstring& n = tutteApp[i].minuscolo;
+            const size_t p = n.find(q);
+            if (p == 0 || (p != std::wstring::npos && n[p - 1] == L' ')) filtrate.push_back(i);
+            else if (q.size() >= 2 && iniziali(n, q)) livelli[0].push_back(i);
+            else if (p != std::wstring::npos) livelli[1].push_back(i);
+            else if (q.size() >= 3 && sottosequenza(n, q)) livelli[2].push_back(i);
         }
-        filtrate.insert(filtrate.end(), dopo.begin(), dopo.end());
+        for (auto& l : livelli) filtrate.insert(filtrate.end(), l.begin(), l.end());
         lSel = 0; lScrollObj = 0; lDirty = true;
     }
 
@@ -2775,6 +2795,15 @@ private:
     float lColonne() const { return 6; }
     float lCellaW() const { return (LW - 48 * dpi) / lColonne(); }
     float lCellaH() const { return 104 * dpi; }
+    // zona della barra di scorrimento che si puo' prendere col mouse (larga 16 punti: la barra disegnata e' sottile) e
+    // il suo cursore adesso
+    D2D1_RECT_F lRettBarra() const { return {LW - 18 * dpi, lGrigliaTop(), LW, lGrigliaBottom()}; }
+    D2D1_RECT_F lCursoreBarra() const {
+        const double mx = lScrollMax();
+        const float alt = lGrigliaBottom() - lGrigliaTop(), tot = alt + (float)mx;
+        const float h = std::max(30 * dpi, alt * alt / tot), y = lGrigliaTop() + (mx > 0 ? (alt - h) * (float)(lScroll / mx) : 0);
+        return {LW - 18 * dpi, y, LW, y + h};
+    }
     float lGrigliaTop() const { return 84 * dpi; }
     float lGrigliaBottom() const { return LH - 14 * dpi; }
     double lScrollMax() const {
@@ -2840,7 +2869,15 @@ public:
     void apriLauncher() {
         if (!attivo || nascostoSchermoIntero) return;
         if (lAperto && !lChiusura) { chiudiLauncher(); return; }
-        if (adesso() - lChiusoT < 0.25) return;   // lo stesso clic che lo ha appena chiuso (perdendo il fuoco)
+        // si sta chiudendo: torna indietro da dove e' arrivato (stessa molla, stessa velocita'), senza ripartire da capo.
+        // Prima c'era anche un blocco di 250 ms dopo la chiusura in cui i clic si ignoravano: non serve piu', il clic
+        // sull'icona App non chiude piu' il launcher perdendo il fuoco (vedi WM_ACTIVATE)
+        if (lAperto && lChiusura) {
+            lChiusura = false; lDirty = true; lRipreso = true;
+            prendiFuoco(launcher);
+            scrivi("launcher: riaperto mentre si chiudeva");
+            return;
+        }
         if (tutteApp.empty()) leggiTutteApp(true);
         else if (adesso() - lLetto > 600) leggiTutteApp();
         if (!nessunaScheda()) nascondiSchede();
@@ -3127,13 +3164,13 @@ private:
         }
         if (filtrate.empty()) { pennello->SetColor({ink.r, ink.g, ink.b, 0.5f}); scrivi(L"Nessuna app trovata", fmtNome, {0, lGrigliaTop() + 40 * dpi, LW, lGrigliaTop() + 70 * dpi}); }
         dc->PopAxisAlignedClip();
-        // barra di scorrimento sottile, solo se serve
-        const double mx = lScrollMax();
-        if (mx > 0) {
-            const float alt = lGrigliaBottom() - lGrigliaTop(), tot = alt + (float)mx;
-            const float h = std::max(30 * dpi, alt * alt / tot), y = lGrigliaTop() + (alt - h) * (float)(lScroll / mx);
-            pennello->SetColor({ink.r, ink.g, ink.b, 0.25f});
-            dc->FillRoundedRectangle({{LW - 9 * dpi, y, LW - 6 * dpi, y + h}, 1.5f * dpi, 1.5f * dpi}, pennello);
+        // barra di scorrimento sottile, solo se serve; col mouse sopra (o trascinandola) si allarga, come su macOS
+        if (lScrollMax() > 0) {
+            const D2D1_RECT_F b = lCursoreBarra();
+            const bool larga = lSopraBarra || lTrascinoBarra;
+            const float w = (larga ? 7.0f : 3.0f) * dpi, x1 = LW - 6 * dpi;
+            pennello->SetColor({ink.r, ink.g, ink.b, larga ? 0.42f : 0.25f});
+            dc->FillRoundedRectangle({{x1 - w, b.top, x1, b.bottom}, w / 2, w / 2}, pennello);
         }
         controllaGpu(dc->EndDraw());
         dc->SetTarget(bersaglio);
@@ -3146,8 +3183,37 @@ private:
         if (!d) return DefWindowProcW(h, m, w, l);
         const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
         switch (m) {
+            case WM_LBUTTONDOWN: {
+                // barra di scorrimento: preso il cursore lo si trascina; un clic sul binario salta di una pagina
+                const D2D1_RECT_F b = d->lRettBarra();
+                if (d->lScrollMax() > 0 && x >= b.left && x < b.right && y >= b.top && y < b.bottom) {
+                    const D2D1_RECT_F c = d->lCursoreBarra();
+                    if (y < c.top || y >= c.bottom) {
+                        const double pagina = (b.bottom - b.top) * 0.9;
+                        d->lScrollObj = std::clamp(d->lScrollObj + (y < c.top ? -pagina : pagina), 0.0, d->lScrollMax());
+                    } else {
+                        d->lTrascinoBarra = true; d->lPresaY = y; d->lPresaScroll = d->lScroll;
+                        SetCapture(h);
+                    }
+                    d->lDirty = true;
+                }
+                return 0;
+            }
             case WM_MOUSEMOVE: {
                 if (!d->lMouseDentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, h, 0}; TrackMouseEvent(&tm); d->lMouseDentro = true; }
+                if (d->lTrascinoBarra) {
+                    // la barra segue il mouse 1:1 (niente inseguimento: lScroll = lScrollObj)
+                    const double alt = d->lGrigliaBottom() - d->lGrigliaTop(), c = d->lCursoreBarra().bottom - d->lCursoreBarra().top;
+                    const double corsa = std::max(1.0, alt - c);
+                    d->lScrollObj = d->lScroll = std::clamp(d->lPresaScroll + (y - d->lPresaY) * d->lScrollMax() / corsa, 0.0, d->lScrollMax());
+                    d->lDirty = true;
+                    return 0;
+                }
+                {
+                    const D2D1_RECT_F b = d->lRettBarra();
+                    const bool sb = d->lScrollMax() > 0 && x >= b.left && x < b.right && y >= b.top && y < b.bottom;
+                    if (sb != d->lSopraBarra) { d->lSopraBarra = sb; d->lDirty = true; }
+                }
                 const int s = d->lCellaIn(x, y);
                 if (s != d->lSopra) { d->lSopra = s; d->lDirty = true; }
                 const D2D1_RECT_F re = d->rettEnergia();
@@ -3155,8 +3221,10 @@ private:
                 if (e != d->lSopraEnergia) { d->lSopraEnergia = e; d->lDirty = true; }
                 return 0;
             }
-            case WM_MOUSELEAVE: d->lMouseDentro = false; d->lSopra = -1; d->lSopraEnergia = false; d->lDirty = true; return 0;
+            case WM_MOUSELEAVE: d->lMouseDentro = false; d->lSopra = -1; d->lSopraEnergia = false; d->lSopraBarra = false; d->lDirty = true; return 0;
             case WM_LBUTTONUP: {
+                if (d->lTrascinoBarra) { d->lTrascinoBarra = false; ReleaseCapture(); d->lDirty = true; return 0; }
+                { const D2D1_RECT_F b = d->lRettBarra(); if (d->lScrollMax() > 0 && x >= b.left && x < b.right && y >= b.top && y < b.bottom) return 0; }
                 if (y > d->LH) { d->chiudiLauncher(); return 0; }   // clic sotto (durante l'animazione): chiude
                 if (d->lSopraEnergia) { POINT p{(LONG)x, (LONG)y}; ClientToScreen(h, &p); d->menuEnergia(p); return 0; }
                 const int i = d->lCellaIn(x, y);
@@ -3178,13 +3246,35 @@ private:
                 d->lDirty = true; return 0;
             case WM_CHAR:
                 if (w == 27) d->chiudiLauncher();
-                else if (w == 13) d->avviaApp(!d->query.empty() || d->lSopra == d->lSel ? d->lSel : -1);   // Invio: la scelta visibile
+                // Invio: con una ricerca la prima trovata (o quella scelta con le frecce); senza, quella scelta
+                else if (w == 13) d->avviaApp(!d->query.empty() || d->lSopra == d->lSel ? d->lSel : -1);
                 else if (w == 8) { if (!d->query.empty()) { d->query.pop_back(); d->filtra(); } }
+                else if (w == 127 || (w == 8 && (GetKeyState(VK_CONTROL) & 0x8000))) {   // Ctrl+Backspace: via l'ultima parola
+                    while (!d->query.empty() && d->query.back() == L' ') d->query.pop_back();
+                    while (!d->query.empty() && d->query.back() != L' ') d->query.pop_back();
+                    d->filtra();
+                }
+                else if (w == 22) {   // Ctrl+V: incolla (solo la prima riga)
+                    if (OpenClipboard(h)) {
+                        if (HANDLE g = GetClipboardData(CF_UNICODETEXT)) {
+                            if (const wchar_t* t = (const wchar_t*)GlobalLock(g)) {
+                                for (const wchar_t* c = t; *c && *c != L'\r' && *c != L'\n' && d->query.size() < 100; c++) if (*c >= 32) d->query += *c;
+                                GlobalUnlock(g);
+                            }
+                        }
+                        CloseClipboard();
+                        d->filtra();
+                    }
+                }
                 else if (w >= 32) { d->query += (wchar_t)w; d->filtra(); }
                 return 0;
             case WM_KEYDOWN: {
                 int s = d->lSel;
+                // pagine: tante righe quante se ne vedono
+                const int righePagina = std::max(1, (int)((d->lGrigliaBottom() - d->lGrigliaTop()) / d->lCellaH()));
                 if (w == VK_LEFT) s--; else if (w == VK_RIGHT) s++; else if (w == VK_UP) s -= 6; else if (w == VK_DOWN) s += 6;
+                else if (w == VK_PRIOR) s -= 6 * righePagina; else if (w == VK_NEXT) s += 6 * righePagina;
+                else if (w == VK_HOME) s = 0; else if (w == VK_END) s = (int)d->filtrate.size() - 1;
                 else break;
                 // senza ricerca la prima freccia mostra solo la scelta attuale; la scelta si vede come il passaggio del mouse
                 if (d->query.empty() && d->lSopra != d->lSel) s = d->lSel;
@@ -3204,6 +3294,9 @@ private:
                         PostMessageW(h, WM_APP + 3, 0, 0);
                         return 0;
                     }
+                    // il fuoco va al dock perche' si e' cliccata l'icona App: la chiusura la fa quel clic (apriLauncher
+                    // fa da interruttore). Chiudendo qui, il clic subito dopo lo riaprirebbe
+                    if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && d->mouseSuIconaApp()) return 0;
                     d->chiudiLauncher();
                 }
                 return 0;
@@ -3214,6 +3307,12 @@ private:
     }
 
     // ---- mouse ----
+    // il mouse e' sull'icona App del dock?
+    bool mouseSuIconaApp() const {
+        POINT pt; GetCursorPos(&pt);
+        const int i = iconaInPunto((float)(pt.x - schermo.left), (float)(pt.y - (schermo.bottom - H)));
+        return i >= 0 && voci[i].avvio == AVVIO_LAUNCHER;
+    }
     int iconaInPunto(float x, float y) const {
         for (size_t i = 0; i < voci.size(); i++) {
             if (voci[i].uscente) continue;

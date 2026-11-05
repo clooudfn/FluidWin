@@ -78,7 +78,8 @@ static const Molla  MOLLA_RESTO      {0.46, 0.62, 0.0};
 static const int    LARGHEZZA_BARRA  = 72;     // px: dimensione della finestra quando "entra" nella barra
 static const double SFUMA_OMBRA      = 0.080;  // s: mentre il pulsante e' premuto l'ombra vera sfuma sotto la copia
 static const double ANNULLA_DOPO     = 0.150;  // s: pulsante rilasciato senza riduzione = clic annullato
-static const double RAMPA_FINESTRA   = 0.075;  // s: la finestra vera (e la sua ombra) ricompare sotto la miniatura
+static const double RAMPA_FINESTRA   = 0.150;  // s: la finestra vera (e la sua ombra) ricompare sotto la miniatura
+static const double SFUMA_FOTO       = 0.120;  // s: la foto del genio sfuma (comincia a meta' della rampa)
 static const double ALZA_OMBRA       = 0.20;   // s: l'ombra della gelatina passa da posata a sollevata (e indietro)
 static const double DISSOLVENZA_MINI = 0.050;  // s: la miniatura sfuma sulla finestra vera
 static const double ATTESA_STILE     = 0.150;  // s: poi si toglie lo stile layered
@@ -262,7 +263,16 @@ static void segnaCambioStile(HWND h) {
 
 // Ingrandimento e ripristino li anima FluidWin (con la capsula attaccata): sulle finestre delle app le animazioni
 // native restano spente finche' FluidWin e' attivo, non in pausa e con le animazioni accese
-static bool zoomAnimato() { return !gPausa && gGenioOk && impostazioni::valori().genio; }
+// "Effetti di animazione" di Windows (Accessibilita' > Effetti visivi): spenti, FluidWin non muove le finestre (genio,
+// gelatina, crescita, chiusura, ingrandimento, onda); restano le dissolvenze dei suoi pannelli. Riletto a ogni
+// WM_SETTINGCHANGE
+static bool gMovimento = true;
+static void leggiMovimento() {
+    BOOL si = TRUE;
+    if (!SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &si, 0)) si = TRUE;
+    gMovimento = si != FALSE;
+}
+static bool zoomAnimato() { return !gPausa && gGenioOk && gMovimento && impostazioni::valori().genio; }
 
 static void spegniTransizioniNative(HWND h) {
     if (GetPropW(h, PROP_TRANSIZ)) return;
@@ -682,7 +692,7 @@ static HWND gTrascinoApp = nullptr;
 static void suInizioSpostamento(HWND h) {
     gInSpostamento = h;
     POINT pt; GetCursorPos(&pt);
-    if (!impostazioni::valori().gelatina && !gelatinaDi(h)) return;   // gelatina spenta nelle impostazioni
+    if ((!impostazioni::valori().gelatina || !gMovimento) && !gelatinaDi(h)) return;   // gelatina spenta nelle impostazioni
     if (IsZoomed(h) && !gelatinaDi(h)) { gDaIngrandita = h; gSganciata = 0; return; }
     if (Gelatina* g = gelatinaDi(h)) {
         // ripresa mentre oscillava o stava ricomparendo: si riafferra dal nuovo punto, con la stessa foto
@@ -958,7 +968,7 @@ static DWORD WINAPI nascondiNata(LPVOID p) {
 }
 
 static void suCreata(HWND h) {
-    if (gPausa || !gGenioOk || !impostazioni::valori().apertura || !finestraApp(h)) return;
+    if (gPausa || !gGenioOk || !gMovimento || !impostazioni::valori().apertura || !finestraApp(h)) return;
     if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) return;   // scheda staccata trascinando (browser): niente animazione
     // (layered di suo: alla creazione non si tocca, ci si pensa alla comparsa)
     if (gInAttesa.count(h) || GetPropW(h, PROP_NASCOSTA) || (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED)) return;
@@ -1025,7 +1035,7 @@ static void suNuovaFinestra(HWND h) {
         if (inAttesa && IsWindow(h) && !animDi(h) && !gelatinaDi(h) && !aperturaDi(h)) rendiVisibileFinestra(h);
     };
     const auto& imp = impostazioni::valori();
-    if (gPausa || !gGenioOk || GetAncestor(h, GA_ROOT) != h || !finestraApp(h) || IsIconic(h)) return rinuncia();
+    if (gPausa || !gGenioOk || !gMovimento || GetAncestor(h, GA_ROOT) != h || !finestraApp(h) || IsIconic(h)) return rinuncia();
     if (animDi(h) || gelatinaDi(h) || aperturaDi(h) || (!inAttesa && GetPropW(h, PROP_NASCOSTA))) return;
     BOOL velata = FALSE; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &velata, sizeof(velata));
     if (velata) {
@@ -1095,7 +1105,9 @@ static void passoAperture(double t) {
             }
             liberaFoto(h);   // ancora nera: l'app non ha disegnato
         }
-        if (e > 0.8) {   // l'app non disegna ancora (o non risponde): si mostra com'e', senza animazione
+        // l'app non disegna ancora (o non risponde): si mostra com'e', senza animazione. Dal dock si aspetta di piu'
+        // (il genio dall'icona vale l'attesa); aperta in altri modi al massimo 0,35 s di finestra invisibile
+        if (e > (ap.dalDock ? 0.8 : 0.35)) {
             logf("apertura %p: foto non riuscita, niente animazione", h);
             stampa::abbandona(ap.lavoro);
             lasciaVedere(h);
@@ -1135,7 +1147,7 @@ static const double DURATA_CHIUSURA = 0.30;
 static bool chiusureAttive() { for (const auto& c : gChiusure) if (c.t0 >= 0) return true; return false; }
 
 static bool preparaChiusura(HWND h) {
-    if (gPausa || !gGenioOk || !impostazioni::valori().chiusura || !h || IsIconic(h) || !finestraApp(h) || schermoInteroAttivo()) return false;
+    if (gPausa || !gGenioOk || !gMovimento || !impostazioni::valori().chiusura || !h || IsIconic(h) || !finestraApp(h) || schermoInteroAttivo()) return false;
     for (auto& c : gChiusure) if (c.h == h) { c.tIntento = ora(); return true; }
     InfoFinestra* i = traccia(h);
     if (!i || !leggiRettangoli(h, *i)) return false;
@@ -1248,6 +1260,9 @@ static void rileggiFotoZoom(Anim& a, double t) {
     a.rilettura = stampa::avvia(a.hwnd, wr.right - wr.left, wr.bottom - wr.top);
 }
 
+// a che punto del volo e' il genio del ripristino (0 partenza, 1 arrivo)
+static double x0Genio(const Anim& a, double t) { return std::clamp((t - a.t0) / DURATA_GENIO_RIPRISTINA, 0.0, 1.0); }
+
 static void passo(double t) {
     std::vector<genio::Elemento> elementi;
     elementiCoperture(elementi);   // sotto a tutto il resto: sono solo lo sfondo dietro finestre appena nate
@@ -1298,6 +1313,23 @@ static void passo(double t) {
                 if (gLog && ++a.fotogrammiGenio <= 4) logf("crescita: fotogramma per t=%.3f scala=%.2f", t, s);
                 if (x >= 1.0) { a.fase = 1; a.tFase = t; if (gCapsulaOk) gCapsula.mostraPer(a.hwnd); if (gAngoliOk) gAngoli.mostraPer(a.hwnd); }
             } else if (a.fase == 0) {
+                // La foto del genio e' quella fatta alla riduzione (anche minuti prima): appena la finestra e' ripristinata
+                // (ancora trasparente) se ne fa una nuova in sottofondo e la si mette al suo posto a meta' volo. Cosi'
+                // all'arrivo il contenuto e' quello di adesso e la finestra vera prende il posto della foto senza salti
+                // (una foto nuova ogni ~80 ms finche' vola: il contenuto si muove anche durante il volo)
+                if (!a.rilettura && a.riletture < 6 && t - a.t0 > 0.04 + 0.08 * a.riletture && x0Genio(a, t) < 0.9 && !IsIconic(a.hwnd)) {
+                    RECT wr; if (GetWindowRect(a.hwnd, &wr)) { a.riletture++; a.wrRilettura = wr; a.rilettura = stampa::avvia(a.hwnd, wr.right - wr.left, wr.bottom - wr.top); }
+                } else if (a.rilettura && stampa::pronta(a.rilettura)) {
+                    std::vector<UINT> px; RECT wr{}; GetWindowRect(a.hwnd, &wr);
+                    const bool presa = stampa::prendi(a.rilettura, px) && EqualRect(&wr, &a.wrRilettura);
+                    a.rilettura = nullptr;
+                    InfoFinestra* fi = presa ? traccia(a.hwnd) : nullptr;
+                    genio::Immagine nuova;
+                    if (fi && fi->valida && gGenio.carica(a.hwnd, fi->visibile, wr, px.data(), nuova)) {
+                        foto->second.libera(); foto->second = nuova;
+                        if (gLog && a.riletture == 1) logf("genio ripristino: foto rifatta a %.0f ms", (t - a.t0) * 1000);
+                    }
+                }
                 // al ripristino parte subito veloce e frena all'arrivo: cosi' risponde al clic senza attese
                 const double x = std::clamp((t - a.t0) / DURATA_GENIO_RIPRISTINA, 0.0, 1.0);
                 const double p = std::pow(1.0 - x, 3);
@@ -1305,18 +1337,17 @@ static void passo(double t) {
                 elementi.push_back({&foto->second, a.da, a.a, p, 1.0 - morbido((p - 0.92) / 0.08)});
                 if (gLog && ++a.fotogrammiGenio <= 6) logf("genio ripristino: fotogramma per t=%.3f p=%.3f", t, p);
                 if (x >= 1.0) { a.fase = 1; a.tFase = t; if (gCapsulaOk) gCapsula.mostraPer(a.hwnd); if (gAngoliOk) gAngoli.mostraPer(a.hwnd); }
-            } else if (a.fase == 1) {
-                // la finestra vera, con la sua ombra, ricompare sotto la foto
+            } else if (a.fase == 1 || a.fase == 2) {
+                // la finestra vera, con la sua ombra, ricompare sotto la foto in 150 ms (ombra morbida, non uno scatto);
+                // a meta' la foto comincia a sfumare (in 120 ms): niente attesa in piu' con la foto ferma sullo schermo
                 a.pGenio = 0;
-                const double k = morbido((t - a.tFase) / RAMPA_FINESTRA);
-                elementi.push_back({&foto->second, a.da, a.a, 0.0, 1.0});
-                alfaFinestra(a.hwnd, (BYTE)std::lround(k * 255));
-                if (k >= 1.0) { a.fase = 2; a.tFase = t; }
-            } else if (a.fase == 2) {
-                // la foto sfuma sulla finestra vera, che intanto puo' essersi aggiornata
-                const double k = morbido((t - a.tFase) / (DISSOLVENZA_MINI * 2));
-                elementi.push_back({&foto->second, a.da, a.a, 0.0, 1.0 - k});
-                if (k >= 1.0) { a.fase = 3; a.tFase = t; }
+                const double e = t - a.tFase;
+                const double k = morbido(e / RAMPA_FINESTRA);
+                const double kf = morbido((e - RAMPA_FINESTRA / 2) / SFUMA_FOTO);
+                if (a.fase == 1) alfaFinestra(a.hwnd, (BYTE)std::lround(k * 255));
+                if (k >= 1.0) a.fase = 2;   // (finestra vera piena)
+                elementi.push_back({&foto->second, a.da, a.a, 0.0, 1.0 - kf});
+                if (kf >= 1.0) { a.fase = 3; a.tFase = t; }
             } else if (t - a.tFase >= ATTESA_STILE) {
                 finita = true;
             }
@@ -1355,9 +1386,12 @@ static void passo(double t) {
             const double pv = MOLLA_ANGOLO.valore(dt), pl = MOLLA_RESTO.valore(dt);
             auto mix = [](LONG x, LONG y, double p) { return (LONG)std::lround(x + (y - x) * p); };
             a.attuale = {mix(a.da.left, a.a.left, pl), mix(a.da.top, a.a.top, pv), mix(a.da.right, a.a.right, pv), mix(a.da.bottom, a.a.bottom, pl)};
-            const bool ferma = (EqualRect(&a.attuale, &a.a) && std::max(MOLLA_ANGOLO.residuo(dt), MOLLA_RESTO.residuo(dt)) * a.ampiezza < 1.0) || dt > 1.5;
-            elementiZoom(a, ferma ? 1 : pv, ferma ? 1 : pl, 1.0, elementi);
-            if (gCapsulaOk) gCapsula.segui(a.hwnd, a.attuale, ferma ? 1 : pv);   // l'angolo della capsula e' quello della molla veloce
+            // "Arrivata" quando manca poco (6 punti), non quando la molla e' ferma al pixel: l'ultimo tratto del rimbalzo
+            // durava ~0,3 s in cui sullo schermo c'era ancora una foto ferma (contenuto bloccato). La foto finisce il suo
+            // movimento mentre sfuma sopra la finestra vera (fase 2)
+            const bool ferma = std::max(MOLLA_ANGOLO.residuo(dt), MOLLA_RESTO.residuo(dt)) * a.ampiezza < 6.0 * scalaFinestra(a.hwnd) || dt > 1.5;
+            elementiZoom(a, pv, pl, 1.0, elementi);
+            if (gCapsulaOk) gCapsula.segui(a.hwnd, a.attuale, pv);   // l'angolo della capsula e' quello della molla veloce
             if (ferma) {
                 // arrivata: la finestra vera torna subito normale (non layered: angoli suoi) sotto la foto, che sfuma
                 rendiVisibileFinestra(a.hwnd);
@@ -1369,7 +1403,8 @@ static void passo(double t) {
             }
         } else if (a.zoom && a.fase == 2) {
             const double k = morbido((t - a.tFase) / (DISSOLVENZA_MINI * 2));
-            elementiZoom(a, 1, 1, 1.0 - k, elementi);
+            const double dt = std::max(0.0, t - a.t0);   // la foto continua il suo movimento mentre sfuma
+            elementiZoom(a, MOLLA_ANGOLO.valore(dt), MOLLA_RESTO.valore(dt), 1.0 - k, elementi);
             if (gCapsulaOk) gCapsula.segui(a.hwnd, a.a, 1);
             if (k >= 1.0) {
                 a.fase = 3; a.tFase = t;
@@ -1535,7 +1570,7 @@ static void suCattura(HWND figlia) {
         DWORD_PTR colpo = 0;
         if (SendMessageTimeoutW(h, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y), SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &colpo) && colpo == HTCLOSE) { preparaChiusura(h); return; }
     }
-    if (!impostazioni::valori().genio) return;
+    if (!impostazioni::valori().genio || !gMovimento) return;
     const Anim* in = animDi(h);
     if (in && !(in->tipo == Tipo::Ripristina && in->genio)) return;
     // Barre del titolo classiche: il rettangolo dei pulsanti disegnati da DWM lo da' WM_GETTITLEBARINFOEX
@@ -1558,7 +1593,7 @@ static void suCattura(HWND figlia) {
 // Riduzione chiesta dal dock (clic sull'icona dell'app gia' in primo piano): stessa copia del pulsante "_",
 // poi la riduzione la chiediamo noi. false = non possibile, il dock usa la riduzione normale.
 static bool riduciDalDock(HWND h) {
-    if (gPausa || !impostazioni::valori().genio || !h || IsIconic(h)) { logf("dock: riduzione nativa %p (pausa o genio spento)", h); return false; }
+    if (gPausa || !gMovimento || !impostazioni::valori().genio || !h || IsIconic(h)) { logf("dock: riduzione nativa %p (pausa o genio spento)", h); return false; }
     if (animDi(h)) {
         if (!invertiRipristino(h)) { logf("dock: riduzione nativa %p (gia' in animazione)", h); return false; }
     } else {
@@ -1587,7 +1622,7 @@ static void suFineCattura(HWND figlia) {
 static std::unordered_set<HWND> gDaAdottare;
 
 static void adotta(HWND h) {
-    if (gPausa || !impostazioni::valori().genio || !IsWindow(h) || !IsIconic(h) || animDi(h) || !finestraApp(h)) return;
+    if (gPausa || !gMovimento || !impostazioni::valori().genio || !IsWindow(h) || !IsIconic(h) || animDi(h) || !finestraApp(h)) return;
     if (!nascondibile(h)) return;   // layered per conto suo in un modo che non si puo' ripristinare
     spegniTransizioniNative(h);
     if (!rendiLayered(h, 0)) { riaccendiTransizioniNative(h); return; }
@@ -1644,7 +1679,7 @@ static void suRipristina(HWND h) {
     const double adesso = ora();
     raffica = adesso - ultimoRipristino < 0.25 ? raffica + 1 : 0; ultimoRipristino = adesso;
     InfoFinestra* i = traccia(h);
-    if (gPausa || !i || raffica >= 2 || schermoInteroAttivo() || !leggiRettangoli(h, *i)) {
+    if (gPausa || !gMovimento || !i || raffica >= 2 || schermoInteroAttivo() || !leggiRettangoli(h, *i)) {
         logf("ripristino senza animazione %p (pausa=%d info=%d raffica=%d)", h, (int)gPausa, (int)(i != nullptr), raffica);
         liberaFoto(h); rendiVisibileFinestra(h); return;
     }
@@ -1877,7 +1912,7 @@ static void gestisciEvento(DWORD ev, HWND h) {
             if (GetAncestor(h, GA_ROOT) == h) {   // trascinamento fatto dall'app (vedi gTrascinoApp)
                 RECT w; GetWindowRect(h, &w);
                 auto up = gUltimoPosto.find(h);
-                if (up != gUltimoPosto.end() && !gInSpostamento && !gTrascinoApp && impostazioni::valori().gelatina) {
+                if (up != gUltimoPosto.end() && !gInSpostamento && !gTrascinoApp && gMovimento && impostazioni::valori().gelatina) {
                     const RECT& p0 = up->second;
                     const bool spostata = (w.left != p0.left || w.top != p0.top) && w.right - w.left == p0.right - p0.left && w.bottom - w.top == p0.bottom - p0.top;
                     if (spostata && (GetAsyncKeyState(VK_LBUTTON) & 0x8000) && h == GetForegroundWindow() && !gelatinaDi(h) && !animDi(h) &&
@@ -1996,21 +2031,28 @@ static const UINT WM_VOLUME = WM_APP + 6, WM_PANORAMICA = WM_APP + 7, WM_RICERCA
 // scorciatoie di FluidWin (dalle impostazioni): tasti del volume, Win+Tab (panoramica), Alt+Tab (ricerca)
 static std::atomic<bool> gTastiVolume{false}, gTastoPanoramica{false}, gTastoRicerca{false};
 
+// Battito del thread principale: lo aggiorna un timer ogni 250 ms (e ogni fotogramma). Se e' fermo da piu' di un
+// secondo (FluidWin bloccato) l'hook non si tiene piu' i tasti: volume, Win, Alt+Tab e Alt+F4 tornano a Windows,
+// invece di essere inghiottiti e non fare nulla
+static std::atomic<ULONGLONG> gBattito{0};
+static bool uiViva() { return GetTickCount64() - gBattito.load() < 1000; }
+
 static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
     if (code == HC_ACTION) {
         const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)l;
         const bool win = k->vkCode == VK_LWIN || k->vkCode == VK_RWIN;
         const bool giu = w == WM_KEYDOWN || w == WM_SYSKEYDOWN;
+        const bool viva = uiViva();
         if (!(k->flags & LLKHF_INJECTED)) {
             // tasti del volume: li gestisce FluidWin (cambia il volume e mostra il suo indicatore); quello di Windows
             // non compare. Si trattengono anche i rilasci, cosi' Windows non vede niente
-            if ((k->vkCode == VK_VOLUME_UP || k->vkCode == VK_VOLUME_DOWN || k->vkCode == VK_VOLUME_MUTE) && gTastiVolume && gLauncherTasto) {
+            if ((k->vkCode == VK_VOLUME_UP || k->vkCode == VK_VOLUME_DOWN || k->vkCode == VK_VOLUME_MUTE) && gTastiVolume && gLauncherTasto && viva) {
                 if (giu) PostMessageW(gMessaggi, WM_VOLUME, k->vkCode == VK_VOLUME_UP ? 1 : k->vkCode == VK_VOLUME_DOWN ? 2 : 0, 0);
                 return 1;
             }
             // Win+Tab: panoramica di FluidWin. Al rilascio di Win serve la "maschera" (sotto), altrimenti Windows vedrebbe
             // Win premuto e rilasciato da solo e aprirebbe lo Start. (Win+S e Win+Maiusc+S restano di Windows)
-            if (gWinGiu && gLauncherTasto && k->vkCode == VK_TAB && gTastoPanoramica) {
+            if (gWinGiu && gLauncherTasto && k->vkCode == VK_TAB && gTastoPanoramica && viva) {
                 if (giu) PostMessageW(gMessaggi, WM_PANORAMICA, 0, 0);
                 gWinConAltro = true; gWinMaschera = true;
                 return 1;
@@ -2019,13 +2061,13 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
             // al rilascio di Alt va la maschera: Alt premuto e rilasciato da solo aprirebbe i menu delle app.
             // Sempre, finche' FluidWin gira (anche con un'app a schermo intero o senza dock): il selettore di Windows
             // non deve comparire mai. (Con Alt+Maiusc+Tab e Ctrl+Alt+Tab lo stesso: hanno Alt premuto)
-            if (!gWinGiu && gTastoRicerca && k->vkCode == VK_TAB && ((k->flags & LLKHF_ALTDOWN) || gAltMaschera)) {
+            if (!gWinGiu && gTastoRicerca && k->vkCode == VK_TAB && (viva || gAltMaschera) && ((k->flags & LLKHF_ALTDOWN) || gAltMaschera)) {
                 if (giu && !gAltMaschera) PostMessageW(gMessaggi, WM_RICERCA, 0, 0);
                 gAltMaschera = true;
                 return 1;
             }
             // Alt+F4 su una finestra d'app: lo fa FluidWin (foto per l'animazione, poi la stessa chiusura di Windows)
-            if (k->vkCode == VK_F4 && (gF4Preso || ((k->flags & LLKHF_ALTDOWN) && giu && !gWinGiu && gLauncherTasto))) {
+            if (k->vkCode == VK_F4 && (gF4Preso || ((k->flags & LLKHF_ALTDOWN) && giu && !gWinGiu && gLauncherTasto && viva))) {
                 if (giu && !gF4Preso) {
                     HWND fg = GetAncestor(GetForegroundWindow(), GA_ROOT);
                     if (!fg || !finestraApp(fg)) return CallNextHookEx(nullptr, code, w, l);   // desktop e altro: Alt+F4 di Windows
@@ -2056,7 +2098,7 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
                     SendInput(3, in, sizeof(INPUT));
                     return 1;
                 }
-                if (solo && gLauncherTasto) {
+                if (solo && gLauncherTasto && viva) {
                     // Windows apre lo Start al rilascio di Win se nel frattempo non e' stato premuto altro: prima del
                     // rilascio (trattenuto qui e reinviato) si inserisce un tasto "maschera" che non fa nulla (0xE8)
                     INPUT in[3]{};
@@ -2189,6 +2231,11 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_SETTINGCHANGE:
             if (l && !wcscmp((const wchar_t*)l, L"ImmersiveColorSet") && gDockOk) gDock.aggiornaTemaVetri();   // tema chiaro/scuro
             SetTimer(h, 12, 800, nullptr);   // (cambiando la scala da Impostazioni arriva anche questo)
+            {   // effetti di animazione di Windows accesi o spenti
+                const bool prima = gMovimento;
+                leggiMovimento();
+                if (prima != gMovimento) { logf("effetti di animazione di Windows: %s", gMovimento ? "accesi" : "spenti"); aggiornaTransizioni(); }
+            }
             return 0;
         case WM_APRI_LAUNCHER: if (gDockOk) gDock.apriLauncher(); return 0;
         case WM_VOLUME:
@@ -2210,6 +2257,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (IsWindow((HWND)w)) { preparaChiusura((HWND)w); PostMessageW((HWND)w, WM_SYSCOMMAND, SC_CLOSE, 0); }
             return 0;
         case WM_TIMER:
+            if (w == 13) { gBattito = GetTickCount64(); return 0; }   // battito per l'hook della tastiera (uiViva)
             if (w == 12) {
                 // Scala dello schermo principale cambiata (Impostazioni > Schermo, o un portatile attaccato a un monitor
                 // con un'altra scala): dock, pannelli, launcher e capsule hanno misure calcolate alla scala di prima.
@@ -2317,6 +2365,7 @@ static LONG WINAPI suCrash(EXCEPTION_POINTERS*) { ripristinaTutte(); return EXCE
 static bool daDisegnare() { return !gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || chiusureAttive() || copertureAttive() || (gDockOk && gDock.serveFotogramma()); }
 
 static void unFotogramma() {
+    gBattito = GetTickCount64();
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     const double t = tempoProssimoFotogramma();
     if (!gAnim.empty() || !gGelatine.empty() || !gAperture.empty() || chiusureAttive() || copertureAttive()) passo(t);
@@ -2383,7 +2432,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     RegisterClassW(&wm);
     gMessaggi = CreateWindowExW(0, wm.lpszClassName, L"FluidWin", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
     SetTimer(gMessaggi, 1, 500, nullptr);
+    gBattito = GetTickCount64(); SetTimer(gMessaggi, 13, 250, nullptr);   // battito per l'hook della tastiera
     gDpiAvvio = dpiPrincipale();
+    leggiMovimento();
+    if (!gMovimento) logf("effetti di animazione di Windows spenti: niente movimenti delle finestre");
     logf("schermo principale: %d x %d, scala %u%%", GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), gDpiAvvio * 100 / 96);
 
     gIcona = {};
@@ -2428,7 +2480,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gPanoramica.idonea = finestraApp;
     gRicerca.elencoApp = []() { return gDockOk ? gDock.elencoApp() : std::vector<std::pair<std::wstring, std::wstring>>{}; };
     gRicerca.apriImpostazioni = apriImpostazioni;
-    gRicerca.conOnda = []() { return impostazioni::valori().onda; };
+    gRicerca.conOnda = []() { return gMovimento && impostazioni::valori().onda; };
     gRicerca.registro = [](const char* s) { logf("%s", s); };
     gBanner.isola = []() { return gDockOk ? gDock.rettIsolaSchermo() : vetro::areaPrincipale(true); };
     gImpostazioni.cambiato = applicaImpostazioni;

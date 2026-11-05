@@ -88,7 +88,11 @@ private:
         WinHttpSetTimeouts(s, 5000, 5000, 8000, 8000);
         HINTERNET c = WinHttpConnect(s, host, INTERNET_DEFAULT_HTTPS_PORT, 0);
         HINTERNET r = c ? WinHttpOpenRequest(c, L"GET", percorso.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE) : nullptr;
-        if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr)) {
+        DWORD stato = 0, ls = sizeof(stato);
+        if (r && WinHttpSendRequest(r, WINHTTP_NO_ADDITIONAL_HEADERS, 0, nullptr, 0, 0, 0) && WinHttpReceiveResponse(r, nullptr) &&
+            // solo le risposte buone: una pagina d'errore (404, 500...) non va letta come dati
+            WinHttpQueryHeaders(r, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &stato, &ls, WINHTTP_NO_HEADER_INDEX) &&
+            stato == 200) {
             DWORD n = 0;
             while (WinHttpQueryDataAvailable(r, &n) && n > 0 && out.size() < 4 * 1024 * 1024) {
                 std::string b(n, '\0'); DWORD letti = 0;
@@ -134,7 +138,7 @@ private:
     void meteo(Istantanea& d) {
         wchar_t p[400];
         swprintf(p, 400, L"/v1/forecast?latitude=%.4f&longitude=%.4f&current=temperature_2m,weather_code,wind_speed_10m,relative_humidity_2m"
-                         L"&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=Europe%%2FRome&forecast_days=5", lat, lon);
+                         L"&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=auto&forecast_days=5", lat, lon);   // (giorni del fuso della citta')
         const std::string j = scarica(L"api.open-meteo.com", p);
         const size_t cur = j.find("\"current\":");
         if (cur == std::string::npos) return;
@@ -169,10 +173,15 @@ private:
                 const size_t f = w.find(L';', i);
                 if (f != std::wstring::npos && f - i < 10) {
                     const std::wstring e = w.substr(i + 1, f - i - 1);
-                    wchar_t c = 0;
+                    unsigned long c = 0;
                     if (e == L"amp") c = L'&'; else if (e == L"quot") c = L'"'; else if (e == L"apos") c = L'\''; else if (e == L"lt") c = L'<'; else if (e == L"gt") c = L'>';
-                    else if (!e.empty() && e[0] == L'#') c = (wchar_t)(e.size() > 1 && (e[1] == L'x' || e[1] == L'X') ? wcstol(e.c_str() + 2, nullptr, 16) : wcstol(e.c_str() + 1, nullptr, 10));
-                    if (c) { o += c; i = f; continue; }
+                    else if (!e.empty() && e[0] == L'#') c = e.size() > 1 && (e[1] == L'x' || e[1] == L'X') ? wcstoul(e.c_str() + 2, nullptr, 16) : wcstoul(e.c_str() + 1, nullptr, 10);
+                    if (c && c <= 0x10FFFF) {
+                        // oltre 0xFFFF (emoji): due wchar_t (coppia surrogata), prima si troncava
+                        if (c > 0xFFFF) { c -= 0x10000; o += (wchar_t)(0xD800 + (c >> 10)); o += (wchar_t)(0xDC00 + (c & 0x3FF)); }
+                        else o += (wchar_t)c;
+                        i = f; continue;
+                    }
                 }
             }
             o += (w[i] == L'\n' || w[i] == L'\r' || w[i] == L'\t') ? L' ' : w[i];
