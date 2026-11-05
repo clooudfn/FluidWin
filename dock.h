@@ -62,7 +62,9 @@ namespace dock {
 static const UINT WM_APPBAR = WM_APP + 20;
 static const UINT_PTR TIMER_INVIO = 7;   // "icone nascoste": Invio poco dopo Win+B
 static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse arriva sul bordo in basso
+static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
 static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" del dock
+static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
 
 struct Voce {
     std::wstring nome;
@@ -189,6 +191,7 @@ public:
         scambiaScheda(); const bool seconda = creaPannello(inst); scambiaScheda();   // scheda 1 (sta in ltra)
         if (!seconda) return false;
         if (!creaLauncher(inst)) return false;
+        creaNotch(inst);
 
         // nessuno spazio riservato: le finestre ingrandite prendono tutto lo schermo e il dock si nasconde sotto il bordo
         SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
@@ -204,9 +207,10 @@ public:
         aggiornaApp();
         attivo = true;
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
-        ShowWindow(vetroStato, SW_SHOWNOACTIVATE);
-        ShowWindow(vetroOra, SW_SHOWNOACTIVATE);
+
+
         ShowWindow(icone, SW_SHOWNOACTIVATE);
+        disegnaNotch();
         dirty = true;
         return true;
     }
@@ -217,7 +221,7 @@ public:
         attivo = false;
         APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima;
         SHAppBarMessage(ABM_SETSTATE, &tb);
-        ShowWindow(icone, SW_HIDE); ShowWindow(vetro, SW_HIDE); ShowWindow(vetroStato, SW_HIDE); ShowWindow(vetroOra, SW_HIDE);
+        ShowWindow(icone, SW_HIDE); ShowWindow(vetro, SW_HIDE); ShowWindow(vetroStato, SW_HIDE); ShowWindow(vetroOra, SW_HIDE); if (notch) ShowWindow(notch, SW_HIDE);
         nascondiSchede(); nascondiLauncher();
     }
 
@@ -260,6 +264,7 @@ public:
         if (registro) { char b[96]; snprintf(b, 96, "ora su %ld,%ld-%ld,%ld", schermo.left, schermo.top, schermo.right, schermo.bottom); scrivi(b); }
         // nascondersi o no dipende dalle finestre del nuovo schermo
         controllaFinestre(true);
+        disegnaNotch();   // il notch va in alto al centro del nuovo schermo
         dirty = true;
     }
 
@@ -414,7 +419,8 @@ public:
     void schermoIntero(bool si) {
         if (si == nascostoSchermoIntero) return;
         nascostoSchermoIntero = si;
-        for (HWND h : {icone, vetro, vetroStato, vetroOra}) ShowWindow(h, si ? SW_HIDE : SW_SHOWNOACTIVATE);
+        for (HWND h : {icone, vetro}) ShowWindow(h, si ? SW_HIDE : SW_SHOWNOACTIVATE);
+        if (notch) ShowWindow(notch, si ? SW_HIDE : SW_SHOWNOACTIVATE);
         if (si) { nascondiSchede(); nascondiLauncher(); }
         if (!si) dirty = true;
     }
@@ -478,7 +484,9 @@ private:
     D2D1_RECT_F rettStato[N_STATO]{}, isola{};
     double evidenza[N_STATO]{};      // 0..1, sfondo dell'elemento sotto il mouse
     int statoSopra = -1, statoPremuto = -1;
-    std::wstring testoOra, testoData, testoDataLunga;
+    std::wstring testoOra, testoData, testoDataLunga, testoNotch;
+    const wchar_t *fontTesto = L"Segoe UI Variable Text", *fontTitoli = L"Segoe UI Variable Display";   // scelti in grafica()
+    HWND notch = nullptr;                // ora e data in alto al centro, come il notch del Mac e dell'iPhone
     std::wstring misuratoOra, misuratoData; float larghezzaOra = 0;   // ultima misura dei due testi
     float volume = 0; bool muto = false, audioOk = false;
     int rete = 0; std::wstring nomeRete;   // 0 = nessuna, 1 = cavo, 2 = Wi-Fi
@@ -566,6 +574,7 @@ private:
             for (const wchar_t* n : {L"Inter Variable Display", L"Inter Display"}) if (esiste(n)) { fTitoli = n; break; }
             if (sys) sys->Release();
             if (registro) { char b[160]; snprintf(b, 160, "font: testo %ls, titoli %ls", fTesto, fTitoli); scrivi(b); }
+        fontTesto = fTesto; fontTitoli = fTitoli;
         }
         formato(fTesto, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0f, &testo);
         formato(fTitoli, DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0f, &fmtOra);
@@ -752,6 +761,8 @@ private:
         std::stable_sort(nuove.begin() + fissate, nuove.end(), [&](const Voce& a, const Voce& b) {
             return std::find(ordineAperte.begin(), ordineAperte.end(), chiave(a)) < std::find(ordineAperte.begin(), ordineAperte.end(), chiave(b));
         });
+        // ultima icona: il centro di controllo (sempre in fondo, come il Cestino su macOS; disegnata dal dock)
+        { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = L"Centro di controllo"; nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
         const bool primaVolta = voci.empty();
         std::vector<bool> ritrovata(voci.size(), false);
@@ -768,7 +779,7 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
@@ -788,6 +799,9 @@ private:
             Voce u = std::move(vecchia); vecchia.icona = nullptr;   // l'icona passa alla voce uscente: non va liberata qui sotto
             nuove.insert(nuove.begin() + pos, std::move(u));
         }
+        // (un'app che si chiude puo' essere finita dopo il centro di controllo: lui resta l'ultimo)
+        for (size_t i = 0; i + 1 < nuove.size(); i++)
+            if (nuove[i].avvio == AVVIO_CONTROLLO) { std::rotate(nuove.begin() + i, nuove.begin() + i + 1, nuove.end()); break; }
         for (auto& vecchia : voci) if (vecchia.icona) vecchia.icona->Release();
         voci = std::move(nuove);
         primaNonFissata = fissateTot;
@@ -828,7 +842,7 @@ private:
         const float x = (float)(pt.x - schermo.left);
         // sul bordo in basso le zone sono solo due: sotto il dock (risale il dock) e da sotto l'isola di stato fino
         // all'angolo destro (risale l'isola). Lo spazio vuoto fra i due e i lati non fanno nulla
-        const bool zonaIsola = x >= isola.left - 10 * dpi;
+        const bool zonaIsola = isola.right > isola.left && x >= isola.left - 10 * dpi;   // (isola tolta: mai)
         const bool zonaDock = x >= zonaDockL - 10 * dpi && x <= zonaDockR + 10 * dpi;
         if (pt.y >= schermo.bottom - 2 && pt.x >= schermo.left && pt.x < schermo.right && (zonaIsola || zonaDock)) {
             bool &r = zonaIsola ? rivelatoI : rivelato;
@@ -998,12 +1012,14 @@ private:
             const float alfa = (premuto < 1 ? 0.8f : 1.0f) * std::min(1.0f, sc * 1.5f);
             if (v.icona) dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
+            else if (v.avvio == AVVIO_CONTROLLO) disegnaIconaControllo(r, alfa, scuro);
             else {
                 pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f * alfa));
                 dc->FillRoundedRectangle({r, dd * 0.22f, dd * 0.22f}, pennello);
             }
             // pallino delle app aperte
-            if (!v.finestre.empty()) {
+            // (anche sotto App e il centro di controllo mentre sono aperti)
+            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda()) || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 dc->FillEllipse({{x + d / 2, yb + PAD * 0.55f}, 2.0f * dpi, 2.0f * dpi}, pennello);
             }
@@ -1012,11 +1028,8 @@ private:
         // icona sotto il mouse ricalcolata sulle posizioni appena disegnate (il dock si muove anche col mouse fermo)
         sopra = (mouseDentro && mouseSulDock) ? iconaInPunto(mouseX, mouseY) : -1;
 
-        {   // l'isola di stato ha la sua altezza (nascosta e rivelata per conto suo)
-            const float ybI = yBaseRiposo() + (float)yNascostoI;
-            const float allungaI = (float)std::clamp(-velNascostoI * 0.010, -3.0 * dpi, 7.0 * dpi);
-            movimento |= disegnaIsola(scuro, std::round(ybI - S - PAD - allungaI), std::round(ybI + PAD));
-        }
+        // (l'isola di stato in basso a destra non c'e' piu': il centro di controllo e' l'ultima icona del dock e l'ora sta
+        // nel notch in alto al centro)
 
         // etichetta: nome dell'app, oppure descrizione dell'elemento di stato
         bool etichettaVoluta = false;
@@ -1043,7 +1056,7 @@ private:
         // la regione ritaglia anche il disegno: l'etichetta, finche' e' visibile, deve starci dentro
         // (dock nascosto: regioni vuote, nessun clic rubato alle finestre a schermo intero)
         const RECT rd = {(int)fondoL - 2, std::min((int)regTop - 2, H), (int)fondoR + 2, H};
-        const RECT rs = {(int)isola.left - 2, std::min((int)isola.top - 2, H), (int)isola.right + 2, H};
+        const RECT rs = isola.right > isola.left ? RECT{(int)isola.left - 2, std::min((int)isola.top - 2, H), (int)isola.right + 2, H} : RECT{};
         RECT re{};
         if (etichettaAlfa > 0.01) re = {(int)rettEtichetta.left - 2, (int)rettEtichetta.top - 2, (int)rettEtichetta.right + 2, (int)rettEtichetta.bottom + 2};
         if (!EqualRect(&rd, &regioneDock) || !EqualRect(&rs, &regioneIsola) || !EqualRect(&re, &regioneEtichetta)) {
@@ -1256,6 +1269,8 @@ private:
             testoOra = b; cambiato = true;
             if (GetDateFormatEx(L"it-IT", 0, &st, L"ddd d MMM", b, 96, nullptr)) testoData = b;
             if (GetDateFormatEx(L"it-IT", 0, &st, L"dddd d MMMM yyyy", b, 96, nullptr)) { testoDataLunga = b; if (!testoDataLunga.empty()) testoDataLunga[0] = (wchar_t)towupper(testoDataLunga[0]); }
+            if (GetDateFormatEx(L"it-IT", 0, &st, L"dddd d MMMM", b, 96, nullptr)) { testoNotch = b; if (!testoNotch.empty()) testoNotch[0] = (wchar_t)towupper(testoNotch[0]); }
+            disegnaNotch();   // il notch mostra ora e data
         }
         const float v0 = volume; const bool m0 = muto, ok0 = audioOk;
         leggiVolume();
@@ -1340,7 +1355,7 @@ private:
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
-                  A_WIDGET, A_SFONDO, A_NOTIZIA };
+                  A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO };
     sistema::Sistema sis;                // Wi-Fi, Bluetooth e luminosita' (letti e cambiati in un thread a parte)
     double temaK = -1;                   // simbolo del tema: 0 sole (chiaro) .. 1 luna (scuro), animato
     bool trascinaLum = false;
@@ -1388,6 +1403,18 @@ private:
         double posDietro = 0, posObj = 0; bool gira = false, davanti = true; double chiudiAlle = -1;
     } altra;
     int slotCorrente = 0;
+    // ---- viste del centro di controllo, tutte nella stessa finestra ----
+    // Il centro di controllo e' una finestra sola: "In background", "Widget" e "Notifiche" ci si aprono dentro. La vista
+    // nuova nasce in un cerchio che si allarga dal punto toccato, mentre quella di prima si allontana (piu' piccola e
+    // sfumata) e la finestra cambia altezza con una molla; tornando indietro ("<" nella testata) il cerchio si richiude
+    // verso il pulsante da cui era nato e il centro di controllo torna avanti
+    bool pRipreso = false;                // primo piano gia' ripreso una volta dopo l'apertura (vedi WM_ACTIVATE)
+    double phVis = 0, phVel = 0;          // altezza che si vede: va verso PH (quella della vista) con una molla
+    int vistaPrima = P_NESSUNO; float phPrima = 0; double tVista = -1; bool vistaAvanti = true;
+    D2D1_POINT_2F origineVista{}, origineRitorno{};
+    D2D1::Matrix3x2F baseVista = D2D1::Matrix3x2F::Identity();   // trasformazione della vista che si sta disegnando
+    static constexpr float TESTA = 44;     // testata delle viste interne (punti): "<" e titolo
+    static constexpr double DURATA_VISTA = 0.46;
     void scambiaScheda() {
         Scheda& a = altra;
         std::swap(pannello, a.pannello); std::swap(vetroPannello, a.vetroPannello); std::swap(scP, a.scP); std::swap(targetP, a.targetP);
@@ -1401,7 +1428,8 @@ private:
         std::swap(posDietro, a.posDietro); std::swap(posObj, a.posObj); std::swap(gira, a.gira); std::swap(davanti, a.davanti); std::swap(chiudiAlle, a.chiudiAlle);
     }
     void usa(int slot) { if (slot != slotCorrente) { scambiaScheda(); slotCorrente = slot; } }
-    static int slotDiTipo(int tipo) { return tipo == P_NOTIFICHE ? 1 : 0; }
+    // una sola finestra per tutto il centro di controllo: le notifiche non sono piu' una carta a parte
+    static int slotDiTipo(int) { return 0; }
     int slotDiFinestra(HWND h) const { return (h == pannello || h == vetroPannello) ? slotCorrente : 1 - slotCorrente; }
     bool schedaFinestra(HWND h) const { return h && (h == pannello || h == vetroPannello || h == altra.pannello || h == altra.vetroPannello); }
     bool nessunaScheda() const { return pannelloTipo == P_NESSUNO && altra.pannelloTipo == P_NESSUNO; }
@@ -1458,49 +1486,77 @@ private:
         // si sta chiudendo: torna indietro dal punto in cui e' (prima ripartiva da zero, e per 0,3 s dopo la chiusura i
         // clic si ignoravano). Stessa curva dell'apertura, ripresa dalla stessa altezza
         if (pannelloTipo == tipo && pChiusura) {
-            const bool cresce = tipo != P_NOTIFICHE;
             const double k = std::clamp(pK < 0 ? 0.0 : pK, 0.0, 1.0);
-            const double x = 1 - std::pow(1 - k, 1.0 / (cresce ? 4 : 3));
-            pT0 = adesso() - x * (cresce ? 0.25 : 0.19);
+            const double x = 1 - std::pow(1 - k, 1.0 / 4);
+            pT0 = adesso() - x * 0.25;
             pChiusura = false; pAnimazione = true; pDirty = true;
             SetForegroundWindow(pannello);
             ordinaSchede(); usa(slot);
             return;
         }
-        if (tipo == P_SFONDO) leggiAppSfondo();
         if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
         pannelloTipo = tipo; pChiusura = false; pT0 = adesso(); pK = -1;
         pSopra = pPremuto = -1; evidP.clear(); trascinaVolume = false; pMouseDentro = false;
         PW = PWMAX;
-        // spazio vero sopra l'isola (schermi bassi, scala al 150%: 1080 px sono 720 punti): nessun pannello lo supera
-        {
-            const int y1 = schermo.bottom - H + (int)isola.top - (int)std::round(10 * dpi);
-            phDisponibile = std::max(200 * dpi, (float)(y1 - schermo.top) - 12 * dpi);
-        }
-        if (tipo == P_SFONDO) {
-            PH = altezzaSfondo();   // con l'elenco di adesso; quello nuovo arriva dal thread e la corregge
-        } else if (tipo == P_WIDGET) {
-            widD.aggiorna(); wid = widD.copia();
-            PH = std::round(560 * dpi);
-        } else if (tipo == P_NOTIFICHE) {
-            Cronometro cr(this, "notifiche");
-            permessoN = lettoreN.leggi(listaN);
-            PH = altezzaNotifiche();
-        } else PH = altezzaControllo();
-        PH = std::min(PH, altezzaMassimaP());
-        // sopra l'isola, allineato al suo bordo destro
-        const int x1 = schermo.left + (int)isola.right, y1 = schermo.bottom - H + (int)isola.top - (int)std::round(10 * dpi);
+        // spazio vero sopra l'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
+        // nessuna vista lo supera
+        const D2D1_RECT_F rc = rettCentro();
+        const int y1 = schermo.bottom - H + (int)std::round(rc.top - PAD - 10 * dpi);
+        phDisponibile = std::max(200 * dpi, (float)(y1 - schermo.top) - 12 * dpi);
+        preparaVista(tipo);
+        PH = altezzaVista(tipo);
+        phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false;
+        // sopra l'icona, allineato al suo bordo destro (dentro lo schermo)
+        const int x1 = std::clamp(schermo.left + (int)std::round(rc.right + PAD), schermo.left + (int)PW + 8, schermo.right - 8);
         rettPannello = {x1 - (int)PW, y1 - (int)PH, x1, y1};
         posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
         posizionaPannello(0);
         ShowWindow(vetroPannello, SW_SHOWNOACTIVATE);
         ShowWindow(pannello, SW_SHOW);
+        if (registro) { char b[120]; snprintf(b, 120, "pannello %d aperto: visibile %d, rett %ld,%ld-%ld,%ld", tipo, (int)IsWindowVisible(pannello), rettPannello.left, rettPannello.top, rettPannello.right, rettPannello.bottom); scrivi(b); }
         // l'altra carta, se e' aperta, va dietro: un po' piu' piccola, se ne vede solo il bordo sinistro
         if (altraAperta) { usa(1 - slot); davanti = false; posObj = 1; gira = false; chiudiAlle = -1; pAnimazione = true; usa(slot); }
-        SetForegroundWindow(pannello);   // permesso: l'ultimo clic e' arrivato al nostro processo
+        prendiFuoco(pannello);   // (come il launcher: senza il primo piano il controllo di sicurezza lo richiudeva dopo 0,6 s)
         ordinaSchede(); usa(slot);
         pDirty = true;
     }
+
+    // i dati che servono a una vista, letti quando ci si entra
+    void preparaVista(int tipo) {
+        if (tipo == P_SFONDO) leggiAppSfondo();   // l'elenco nuovo arriva dal thread e l'altezza si adatta
+        else if (tipo == P_WIDGET) { widD.aggiorna(); wid = widD.copia(); }
+        else if (tipo == P_NOTIFICHE) { Cronometro cr(this, "notifiche"); permessoN = lettoreN.leggi(listaN); }
+        else if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
+    }
+
+    // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
+    float altezzaVista(int tipo) const {
+        const float testa = std::round(TESTA * dpi);
+        float h;
+        if (tipo == P_SFONDO) h = altezzaSfondo() + testa;
+        else if (tipo == P_WIDGET) h = std::round(560 * dpi) + testa;
+        else if (tipo == P_NOTIFICHE) h = altezzaNotifiche() + testa;
+        else h = altezzaControllo();
+        return std::min(h, altezzaMassimaP());
+    }
+
+    // Passa a un'altra vista dentro la stessa finestra. origine: il punto da cui nasce (quello toccato), in coordinate
+    // del pannello. Verso il centro di controllo e' un ritorno: il cerchio si richiude verso il pulsante di partenza
+    void cambiaVista(int tipo, D2D1_POINT_2F origine) {
+        if (pannelloTipo == P_NESSUNO || pChiusura || tipo == pannelloTipo) return;
+        vistaPrima = pannelloTipo; phPrima = PH;
+        vistaAvanti = tipo != P_CONTROLLO;
+        if (vistaAvanti) origineVista = origineRitorno = origine;
+        preparaVista(tipo);
+        pannelloTipo = tipo;
+        PH = altezzaVista(tipo);
+        tVista = adesso();
+        if (trascinaVolume || trascinaLum) { trascinaVolume = trascinaLum = false; ReleaseCapture(); }
+        pSopra = pPremuto = -1; evidP.clear();
+        pAnimazione = true; pDirty = true;
+    }
+    void tornaIndietro() { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
+    bool inTransizione() const { return tVista >= 0; }
 
     // La carta dietro torna davanti: esce a sinistra, passa sopra l'altra a meta' strada e si rimette al suo posto
     // (in senso antiorario); l'altra intanto scivola dietro
@@ -1567,9 +1623,9 @@ private:
     void chiudiPannello() {
         if (pannelloTipo == P_NESSUNO || pChiusura) return;
         // chiuso mentre si apriva: la chiusura parte dall'altezza a cui e' arrivato, non da tutto aperto
-        const bool cresce = pannelloTipo != P_NOTIFICHE;
+        // (tutte le viste crescono dall'icona del centro di controllo e ci rientrano)
         const double k = std::clamp(pK < 0 ? 0.0 : pK, 0.0, 1.0);
-        pChiusura = true; pT0 = adesso() - std::sqrt(1 - k) * (cresce ? 0.17 : 0.13); pDirty = true; chiudiAlle = -1;
+        pChiusura = true; pT0 = adesso() - std::sqrt(1 - k) * 0.17; pDirty = true; chiudiAlle = -1;
         if (trascinaVolume || trascinaLum) { trascinaVolume = trascinaLum = false; ReleaseCapture(); }
         // si chiude quella davanti e l'altra resta: torna davanti al suo posto (senza giro)
         const int s = slotCorrente;
@@ -1587,7 +1643,9 @@ private:
         if (pannello) ShowWindow(pannello, SW_HIDE);
         if (vetroPannello) ShowWindow(vetroPannello, SW_HIDE);
         if (pannelloTipo != P_NESSUNO) { pannelloChiuso = pannelloTipo; pChiusoT = adesso(); }
+        if (registro && pannelloTipo != P_NESSUNO) { char b[80]; snprintf(b, 80, "pannello %d nascosto%s", pannelloTipo, pChiusura ? " (fine chiusura)" : ""); scrivi(b); }
         pannelloTipo = P_NESSUNO; pChiusura = false; pAnimazione = false; pDirty = false;
+        phVis = 0; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO;
         posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
     }
 
@@ -1600,11 +1658,11 @@ private:
         D2D1::Matrix3x2F m = D2D1::Matrix3x2F::Identity();
         float tx = 0;
         double alfa = std::min(1.0, k * 2.2);
-        if (pannelloTipo == P_NOTIFICHE) { tx = (float)((1 - k) * 56 * dpi); alfa = std::clamp(k, 0.0, 1.0); }
-        else {
+        {   // nasce piccolo sopra l'icona del centro di controllo nel dock e cresce (senza piegarsi)
             const float s = (float)(0.10 + 0.90 * k);
-            const float ax = std::clamp((float)(schermo.left + (pillolaControllo.left + pillolaControllo.right) / 2 - r.left), 0.0f, pw);
-            m = D2D1::Matrix3x2F::Scale(s, s, {ax, ph});   // dal bordo in basso, sopra la pillola
+            const D2D1_RECT_F rc = rettCentro();
+            const float ax = std::clamp((float)(schermo.left + (rc.left + rc.right) / 2 - r.left), 0.0f, pw);
+            m = D2D1::Matrix3x2F::Scale(s, s, {ax, ph});   // dal bordo in basso, sopra l'icona
         }
         const float pd = (float)(posDietro * posDietro * (3 - 2 * posDietro));
         const float sb = 1 - 0.06f * pd;
@@ -1627,35 +1685,138 @@ private:
     bool renderPannello() {
         const double ora = adesso();
         double k;
-        const bool cresce = pannelloTipo != P_NOTIFICHE;   // il centro di controllo cresce dalla pillola
         const bool posaInMoto = posDietro != posObj || chiudiAlle > 0;
         if (!pChiusura) {
             // (niente rimbalzo oltre 1: il contenuto uscirebbe dalla sua finestra e verrebbe tagliato)
-            const double x = std::clamp((ora - pT0) / (cresce ? 0.25 : 0.19), 0.0, 1.0);
-            k = 1 - std::pow(1 - x, cresce ? 4 : 3);
+            const double x = std::clamp((ora - pT0) / 0.25, 0.0, 1.0);
+            k = 1 - std::pow(1 - x, 4);
             pAnimazione = x < 1 || posaInMoto;
         } else {
-            const double x = std::clamp((ora - pT0) / (cresce ? 0.17 : 0.13), 0.0, 1.0);
+            const double x = std::clamp((ora - pT0) / 0.17, 0.0, 1.0);
             k = 1 - x * x; pAnimazione = x < 1 || posaInMoto;
             if (x >= 1) { nascondiPannello(); return false; }
         }
+        // altezza: va verso quella della vista con una molla appena morbida (il bordo in basso resta fermo, sopra il dock)
+        if (phVis <= 0) phVis = PH;
+        if (molla(phVis, phVel, PH, 210, 0.86, 0.3)) pAnimazione = true;
+        const LONG alto = (LONG)std::lround(phVis);
+        if (rettPannello.bottom - rettPannello.top != alto) rettPannello.top = rettPannello.bottom - alto;
         posizionaPannello(k); pK = k;
+
+        // cambio di vista in corso: 0..1
+        double e = 1;
+        if (tVista >= 0) {
+            const double x = std::clamp((ora - tVista) / DURATA_VISTA, 0.0, 1.0);
+            e = 1 - std::pow(1 - x, 3);
+            if (x >= 1) { tVista = -1; vistaPrima = P_NESSUNO; } else pAnimazione = true;
+        }
 
         const bool scuro = temaScuro();
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.88f);
         dc->SetTarget(bersaglioP);
         dc->BeginDraw();
         dc->Clear(D2D1::ColorF(0, 0, 0, 0));
-        disegnaFondo({0.5f, 0.5f, PW - 0.5f, PH - 0.5f}, scuro);
+        const float hv = (float)phVis;
+        disegnaFondo({0.5f, 0.5f, PW - 0.5f, hv - 0.5f}, scuro);
         elementi.clear();
-        if (pannelloTipo == P_SFONDO) disegnaSfondo(scuro, ink);
-        else if (pannelloTipo == P_NOTIFICHE) disegnaNotifiche(scuro, ink);
-        else if (pannelloTipo == P_WIDGET) disegnaWidget(scuro, ink);
-        else disegnaControllo(scuro, ink);
+        dc->PushAxisAlignedClip({0, 0, PW, hv}, D2D1_ANTIALIAS_MODE_ALIASED);
+        if (tVista < 0) disegnaVista(pannelloTipo, PH, scuro, ink, D2D1::Matrix3x2F::Identity());
+        else {
+            const float E = (float)e;
+            const D2D1_POINT_2F o = origineVista;
+            // il cerchio deve arrivare all'angolo piu' lontano della finestra, alla sua altezza piu' grande
+            const float hm = std::max(phPrima, PH);
+            float rMax = 0;
+            for (D2D1_POINT_2F c : {D2D1_POINT_2F{0, 0}, D2D1_POINT_2F{PW, 0}, D2D1_POINT_2F{0, hm}, D2D1_POINT_2F{PW, hm}})
+                rMax = std::max(rMax, std::hypot(c.x - o.x, c.y - o.y));
+            rMax += 8 * dpi;
+            const D2D1_POINT_2F centro = {PW / 2, hv * 0.35f};
+            // sotto: quella che resta indietro (andando avanti la vecchia si allontana; tornando, il centro di controllo
+            // torna avanti); sopra: quella nel cerchio, che si apre (avanti) o si richiude verso il suo pulsante (indietro)
+            const int sotto = vistaAvanti ? vistaPrima : pannelloTipo, sopra = vistaAvanti ? pannelloTipo : vistaPrima;
+            const float hSotto = vistaAvanti ? phPrima : PH, hSopra = vistaAvanti ? PH : phPrima;
+            const float lontano = vistaAvanti ? E : 1 - E;   // 0 = davanti, 1 = lontano
+            const float rCerchio = rMax * (vistaAvanti ? E : 1 - E);
+            {
+                const float s = 1 - 0.07f * lontano;
+                ID2D1Layer* l = nullptr;
+                dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                     D2D1::IdentityMatrix(), 1 - 0.82f * lontano), l);
+                disegnaVista(sotto, hSotto, scuro, ink, D2D1::Matrix3x2F::Scale(s, s, centro));
+                dc->PopLayer();
+            }
+            ID2D1EllipseGeometry* cerchio = nullptr;
+            f2d->CreateEllipseGeometry({o, rCerchio, rCerchio}, &cerchio);
+            if (cerchio && rCerchio > 0.5f) {
+                // il contenuto nel cerchio arriva appena piu' grande e si posa (come se emergesse dal punto toccato)
+                const float s = 1 + 0.05f * (1 - (vistaAvanti ? E : 1 - E));
+                dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), cerchio, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                     D2D1::IdentityMatrix(), 1.0f), nullptr);
+                disegnaFondo({0.5f, 0.5f, PW - 0.5f, hv - 0.5f}, scuro);   // il vetro del cerchio copre la vista sotto
+                disegnaVista(sopra, hSopra, scuro, ink, D2D1::Matrix3x2F::Scale(s, s, o));
+                dc->PopLayer();
+                // il bordo del cerchio: un anello di luce che si spegne mentre si allarga
+                const float a = 0.28f * (1 - E);
+                if (a > 0.01f) {
+                    pennello->SetColor(D2D1::ColorF(0.35f, 0.62f, 1.0f, a));
+                    dc->DrawEllipse({o, rCerchio, rCerchio}, pennello, 2.0f * dpi);
+                }
+            }
+            if (cerchio) cerchio->Release();
+            elementi.clear();   // durante il cambio niente clic: le zone si ricalcolano a fine animazione
+            pDirty = true;
+        }
+        dc->PopAxisAlignedClip();
         controllaGpu(dc->EndDraw());
         dc->SetTarget(bersaglio);
-        pDirty = false;
+        if (tVista < 0) pDirty = false;
         return true;
+    }
+
+    // Una vista intera con la trasformazione t (scala del cambio di vista): il centro di controllo, oppure una vista
+    // interna con la sua testata ("<" e titolo) e sotto il contenuto. Le zone cliccabili del contenuto si spostano
+    // sotto la testata. h = altezza di tutta la vista
+    void disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink, const D2D1::Matrix3x2F& t) {
+        const float phSalvato = PH;
+        PH = h; baseVista = t; dc->SetTransform(t);
+        if (tipo == P_CONTROLLO) disegnaControllo(scuro, ink);
+        else {
+            const float testa = std::round(TESTA * dpi);
+            disegnaTesta(tipo, scuro, ink);
+            const size_t n = elementi.size();
+            PH = h - testa;
+            baseVista = D2D1::Matrix3x2F::Translation(0, testa) * t; dc->SetTransform(baseVista);
+            if (tipo == P_SFONDO) disegnaSfondo(scuro, ink);
+            else if (tipo == P_NOTIFICHE) disegnaNotifiche(scuro, ink);
+            else if (tipo == P_WIDGET) disegnaWidget(scuro, ink);
+            for (size_t i = n; i < elementi.size(); i++) { elementi[i].r.top += testa; elementi[i].r.bottom += testa; }
+        }
+        baseVista = D2D1::Matrix3x2F::Identity(); dc->SetTransform(baseVista);
+        PH = phSalvato;
+    }
+
+    // testata delle viste interne: "<" con il nome del centro di controllo (si torna li') e il titolo della vista
+    void disegnaTesta(int tipo, bool scuro, D2D1_COLOR_F ink) {
+        const float testa = std::round(TESTA * dpi), m = 12 * dpi;
+        const D2D1_RECT_F ri = {6 * dpi, 6 * dpi, 104 * dpi, testa - 4 * dpi};
+        const int e = aggiungi(ri, A_INDIETRO, 0);
+        evidenzia(e, ri, scuro, 10 * dpi);
+        const float s = (e == pPremuto) ? 0.94f : 1.0f;
+        const D2D1_COLOR_F blu = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
+        dc->SetTransform(D2D1::Matrix3x2F::Scale(s, s, {ri.left, (ri.top + ri.bottom) / 2}) * baseVista);
+        pennello->SetColor(blu);
+        const float cy = (ri.top + ri.bottom) / 2, cx = m + 6 * dpi;
+        dc->DrawLine({cx + 4 * dpi, cy - 7 * dpi}, {cx - 3 * dpi, cy}, pennello, 2.2f * dpi, tratto);
+        dc->DrawLine({cx - 3 * dpi, cy}, {cx + 4 * dpi, cy + 7 * dpi}, pennello, 2.2f * dpi, tratto);
+        scrivi(L"Controllo", fmtVoce, {cx + 12 * dpi, ri.top, ri.right, ri.bottom});
+        dc->SetTransform(baseVista);
+        // titolo al centro vero della testata (il formato dei titoli e' allineato a sinistra: si misura)
+        const std::wstring titolo = tipo == P_SFONDO ? L"In background" : tipo == P_WIDGET ? L"Widget" : L"Notifiche";
+        const float lt = larghezzaTesto(titolo, fmtTitolo);
+        pennello->SetColor(ink);
+        scrivi(titolo, fmtTitolo, {std::max(110 * dpi, PW / 2 - lt / 2), ri.top, PW - m, ri.bottom});
+        pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+        dc->DrawLine({m, testa - 0.5f}, {PW - m, testa - 0.5f}, pennello, 1.0f);
     }
 
     int aggiungi(const D2D1_RECT_F& r, Azione a, int indice) { elementi.push_back({r, a, indice}); return (int)elementi.size() - 1; }
@@ -1693,8 +1854,8 @@ private:
     void disegnaSfondo(bool scuro, D2D1_COLOR_F ink) {
         const float m = 16 * dpi;
         pennello->SetColor(ink);
-        scrivi(L"In background", fmtTitolo, {m, 12 * dpi, PW - m, 40 * dpi});
-        const float tw = (PW - 2 * m) / 4, th = 86 * dpi, top = 48 * dpi;
+        // (il titolo e' nella testata della vista)
+        const float tw = (PW - 2 * m) / 4, th = 86 * dpi, top = 10 * dpi;
         if (appSfondo.empty()) {
             pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.6f});
             scrivi(L"Nessuna app in background", fmtSotto, {m, top, PW - m, top + 40 * dpi});
@@ -1727,19 +1888,19 @@ private:
     // altezza massima di un pannello adesso: quella della sua superficie e lo spazio sopra l'isola
     float altezzaMassimaP() const { return std::min(PHMAX, phDisponibile > 0 ? phDisponibile : PHMAX); }
     int schedeVisibili() const {
-        const int spazio = (int)((altezzaMassimaP() / dpi - N_TESTA - N_CAL - N_TITOLO - N_PIEDE - 10) / N_SCHEDA);
+        const int spazio = (int)((altezzaMassimaP() / dpi - TESTA - N_TESTA - N_CAL - N_TITOLO - N_PIEDE - 10) / N_SCHEDA);
         return std::max(1, std::min((int)listaN.size(), spazio));
     }
     float altezzaNotifiche() const {
         const float schede = (!permessoN || listaN.empty()) ? 56 : schedeVisibili() * N_SCHEDA + ((int)listaN.size() > schedeVisibili() ? 22 : 0);
-        return std::min(altezzaMassimaP(), std::round((N_TESTA + N_CAL + N_TITOLO + schede + N_PIEDE) * dpi));
+        return std::min(altezzaMassimaP() - std::round(TESTA * dpi), std::round((N_TESTA + N_CAL + N_TITOLO + schede + N_PIEDE) * dpi));
     }
 
     // dopo aver tolto notifiche: elenco nuovo e pannello della nuova altezza (il bordo in basso resta fermo)
     void ricaricaNotifiche() {
         permessoN = lettoreN.leggi(listaN);
-        const float nuova = altezzaNotifiche();
-        if (nuova != PH) { PH = nuova; rettPannello.top = rettPannello.bottom - (int)PH; posizionaPannello(pK < 0 ? 1 : pK); }
+        const float nuova = altezzaVista(P_NOTIFICHE);
+        if (nuova != PH) { PH = nuova; pAnimazione = true; }   // l'altezza ci arriva con la molla (il bordo in basso resta fermo)
         pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
     }
 
@@ -1939,10 +2100,10 @@ private:
         const D2D1_RECT_F rm = {rv.left, rv.top, rv.left + 48 * dpi, rv.bottom};
         const int em = aggiungi(rm, A_MUTO, 0);
         const float sm = (em == pPremuto) ? 0.88f : 1.0f;
-        dc->SetTransform(D2D1::Matrix3x2F::Scale(sm, sm, {rv.left + 26 * dpi, (rv.top + rv.bottom) / 2}));
+        dc->SetTransform(D2D1::Matrix3x2F::Scale(sm, sm, {rv.left + 26 * dpi, (rv.top + rv.bottom) / 2}) * baseVista);
         pennello->SetColor(scuro && v < 0.12f ? ink : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.85f));
         simboloVolume(rv.left + 26 * dpi, (rv.top + rv.bottom) / 2);
-        dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        dc->SetTransform(baseVista);
         wchar_t pc[16]; swprintf(pc, 16, muto ? L"muto" : L"%d%%", (int)std::lround(volume * 100));
         pennello->SetColor(scuro && v < 0.9f ? ink : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.7f));
         scrivi(pc, fmtNome, {rv.right - 56 * dpi, rv.top, rv.right - 8 * dpi, rv.bottom});
@@ -1979,8 +2140,8 @@ private:
 
         // scorciatoie tonde
         y += 36 * dpi + 16 * dpi;
-        const wchar_t* nomi[4] = {L"Widget", L"In background", L"Schermo", L"Impostazioni"};
-        const Azione az[4] = {A_WIDGET, A_SFONDO, A_SCHERMO, A_IMPOSTAZIONI};
+        const wchar_t* nomi[4] = {L"Widget", L"In background", L"Notifiche", L"Impostazioni"};
+        const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_IMPOSTAZIONI};
         for (int i = 0; i < 4; i++) {
             const float cx = m + larg * (i + 0.5f) / 4, cy = y + 26 * dpi;
             const D2D1_RECT_F r = {cx - 36 * dpi, y - 4 * dpi, cx + 36 * dpi, y + 76 * dpi};
@@ -1990,7 +2151,7 @@ private:
             pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f + 0.06f * (float)h) : D2D1::ColorF(0, 0, 0, 0.06f + 0.05f * (float)h));
             dc->FillEllipse({{cx, cy}, 26 * dpi * s, 26 * dpi * s}, pennello);
             pennello->SetColor(ink);
-            if (i == 0) simboloWidget(cx, cy); else if (i == 1) simboloFreccia(cx, cy); else if (i == 2) simboloSole(cx, cy); else simboloIngranaggio(cx, cy);
+            if (i == 0) simboloWidget(cx, cy); else if (i == 1) simboloFreccia(cx, cy); else if (i == 2) simboloCampana(cx, cy); else simboloIngranaggio(cx, cy);
             pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.75f});
             scrivi(nomi[i], fmtNome, {cx - 40 * dpi, cy + 30 * dpi, cx + 40 * dpi, cy + 48 * dpi});
         }
@@ -2103,7 +2264,7 @@ private:
         temaK = std::abs(obj - temaK) <= passo ? obj : temaK + (obj > temaK ? passo : -passo);
         if (temaK != obj) pAnimazione = true;
         const float k = (float)(temaK * temaK * (3 - 2 * temaK));   // morbida all'inizio e alla fine
-        dc->SetTransform(D2D1::Matrix3x2F::Rotation(-90.0f * (1 - k), {cx, cy}));
+        dc->SetTransform(D2D1::Matrix3x2F::Rotation(-90.0f * (1 - k), {cx, cy}) * baseVista);
         // raggi del sole: si accorciano fino a sparire
         if (k < 0.98f) {
             const float r0 = (6.6f + 1.5f * k) * dpi, r1 = (9.2f - 2.6f * k) * dpi;
@@ -2125,7 +2286,7 @@ private:
             dc->FillGeometry(g, pennello);
         }
         for (IUnknown* o : std::initializer_list<IUnknown*>{a, b, g}) if (o) o->Release();
-        dc->SetTransform(D2D1::Matrix3x2F::Identity());
+        dc->SetTransform(baseVista);
     }
 
     void simboloLuna(float cx, float cy) {
@@ -2186,6 +2347,27 @@ private:
             const float a = i * (float)M_PI / 4 + (float)M_PI / 8, c = std::cos(a), s = std::sin(a);
             linea(c * 6.6f, s * 6.6f, c * 8.6f, s * 8.6f, cx, cy, 2.6f);
         }
+    }
+
+    // campanella delle notifiche: cupola, bordo in basso e batacchio
+    void simboloCampana(float cx, float cy) {
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            const float d = dpi;
+            s->BeginFigure({cx - 7.5f * d, cy + 4.5f * d}, D2D1_FIGURE_BEGIN_HOLLOW);
+            s->AddLine({cx - 6 * d, cy + 2.5f * d});
+            s->AddLine({cx - 6 * d, cy - 1.5f * d});
+            s->AddArc({{cx + 6 * d, cy - 1.5f * d}, {6 * d, 6.5f * d}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
+            s->AddLine({cx + 6 * d, cy + 2.5f * d});
+            s->AddLine({cx + 7.5f * d, cy + 4.5f * d});
+            s->AddLine({cx - 7.5f * d, cy + 4.5f * d});
+            s->EndFigure(D2D1_FIGURE_END_CLOSED);
+            s->Close(); s->Release();
+            dc->DrawGeometry(g, pennello, 1.9f * d, tratto);
+        }
+        if (g) g->Release();
+        linea(-2.2f, 7.2f, 2.2f, 7.2f, cx, cy, 2.0f);
+        linea(0, -8.6f, 0, -7.6f, cx, cy, 2.0f);
     }
 
     // ---- dati dei pannelli ----
@@ -2305,8 +2487,8 @@ private:
             const int s = slotCorrente;
             usa(0);
             if (pannelloTipo == P_SFONDO && !pChiusura) {
-                const float nuova = altezzaSfondo();
-                if (nuova != PH) { PH = nuova; rettPannello.top = rettPannello.bottom - (int)PH; posizionaPannello(pK < 0 ? 1 : pK); }
+                const float nuova = altezzaVista(P_SFONDO);
+                if (nuova != PH) { PH = nuova; pAnimazione = true; }   // con la molla, dal bordo in basso
                 pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
             }
             usa(s);
@@ -2315,9 +2497,9 @@ private:
 
     float altezzaSfondo() const {
         // righe di app: quante ce ne sono (massimo 6) e quante ne entrano nello spazio sopra l'isola
-        const int entrano = std::max(1, (int)((altezzaMassimaP() / dpi - 48 - 52) / 86));
+        const int entrano = std::max(1, (int)((altezzaMassimaP() / dpi - TESTA - 10 - 52) / 86));
         const int righe = std::max(1, std::min({(int)std::min<size_t>(6, (appSfondo.size() + 3) / 4), entrano}));
-        return std::round((48 + righe * 86 + 52) * dpi);
+        return std::round((10 + righe * 86 + 52) * dpi);
     }
 
     static std::vector<AppSfondo> elencaAppSfondo() {
@@ -2450,8 +2632,11 @@ private:
                 aggiornaTemaVetri(); dirty = true; pDirty = true;
                 break;
             case A_FLUIDWIN:     chiudiPannello(); if (impostazioni) impostazioni(); break;
-            case A_WIDGET:       nascondiPannello(); apriPannello(P_WIDGET); break;
-            case A_SFONDO:       nascondiPannello(); apriPannello(P_SFONDO); break;
+            // le viste interne si aprono dentro la stessa finestra, dal pulsante toccato
+            case A_WIDGET:       cambiaVista(P_WIDGET, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;
+            case A_SFONDO:       cambiaVista(P_SFONDO, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;
+            case A_NOTIFICHE:    cambiaVista(P_NOTIFICHE, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;
+            case A_INDIETRO:     tornaIndietro(); break;
             case A_NOTIZIA:      if (e.indice < (int)wid.notizie.size()) { chiudiPannello(); apriPagina(wid.notizie[e.indice].link.c_str()); } break;
             case A_LUMINOSITA:   break;
             case A_AUDIO: {   // le uscite audio in un menu: si sceglie quella predefinita
@@ -2494,6 +2679,7 @@ private:
     }
 
     int elementoIn(float x, float y) const {
+        if (tVista >= 0) return -1;   // cambio di vista in corso: le zone sono quelle della vista di prima
         for (int i = (int)elementi.size() - 1; i >= 0; i--) {   // gli ultimi aggiunti stanno sopra (es. l'altoparlante sul volume)
             const auto& r = elementi[i].r;
             if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return i;
@@ -2556,11 +2742,21 @@ private:
             case WM_MOUSEWHEEL:
                 if (d->pannelloTipo == P_CONTROLLO) d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f), d->pDirty = true;
                 return 0;
-            case WM_KEYDOWN: if (w == VK_ESCAPE) d->chiudiTutte(); return 0;
+            // Esc chiude tutto; Backspace (o Alt+freccia sinistra) torna al centro di controllo da una vista interna
+            case WM_APP + 4: if (d->pannelloTipo != P_NESSUNO && !d->pChiusura) prendiFuoco(h); return 0;
+            case WM_KEYDOWN: if (w == VK_ESCAPE) d->chiudiTutte(); else if (w == VK_BACK) d->tornaIndietro(); return 0;
+            case WM_SYSKEYDOWN: if (w == VK_LEFT) { d->tornaIndietro(); return 0; } break;
             case WM_CLOSE: d->chiudiTutte(); return 0;   // Alt+F4: come Esc (la finestra non si distrugge, si riusa)
             // il fuoco va altrove (non all'altra carta): si chiudono tutte e due, una dopo l'altra
             case WM_ACTIVATE:
                 if (LOWORD(w) == WA_INACTIVE && !d->schedaFinestra((HWND)l)) {
+                    // appena aperto, il primo piano preso agganciandosi all'app di prima a volte le torna subito dopo lo
+                    // sgancio: non e' un clic altrove. Si riprende una volta invece di chiudersi (come il launcher)
+                    if (d->pannelloTipo != P_NESSUNO && !d->pChiusura && !d->pRipreso && adesso() - d->pT0 < 0.35) {
+                        d->pRipreso = true; d->scrivi("centro di controllo: primo piano perso appena aperto, lo riprende");
+                        PostMessageW(h, WM_APP + 4, 0, 0);
+                        return 0;
+                    }
                     // il fuoco va via perche' si e' cliccata l'isola: decide quel clic (apre, chiude o cambia pannello).
                     // Chiudendo qui, il clic subito dopo riaprirebbe quello appena chiuso
                     POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo();
@@ -2580,7 +2776,7 @@ private:
         return -1;
     }
 
-    bool sullIsola(float x, float y) const { return x >= isola.left - 2 && x <= isola.right + 2 && y >= isola.top - 2; }
+    bool sullIsola(float x, float y) const { return isola.right > isola.left && x >= isola.left - 2 && x <= isola.right + 2 && y >= isola.top - 2; }
 
     // il vetro acrilico segue il fondo, con la stessa forma
     void aggiornaVetro(HWND h, RECT& ultimo, float l, float t, float r, float b) {
@@ -2712,7 +2908,7 @@ private:
             ID2D1Bitmap1* b = ip.ok ? bitmapDaPixel(ip.w, ip.h, ip.px) : nullptr;
             bool presa = false;
             if (ip.lato == 256) {          // dock
-                for (auto& v : voci) if (!v.icona && v.avvio != AVVIO_LAUNCHER && sorgenteIcona(v) == ip.percorso) { v.icona = b; presa = true; dirty = true; break; }
+                for (auto& v : voci) if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && sorgenteIcona(v) == ip.percorso) { v.icona = b; presa = true; dirty = true; break; }
                 // (si potra' richiedere: l'app puo' chiudersi e riaprirsi; se e' fallita si riprova al prossimo aggiornamento)
                 iconeChieste.erase(chiaveIcona(ip.percorso, ip.lato));
             } else if (ip.lato == 128) {   // app in background (se non c'e', la piccola foto salvata da Windows)
@@ -2916,19 +3112,55 @@ public:
         return r;
     }
 
-    // l'isola sullo schermo (per i banner delle notifiche, che escono da li')
-    RECT rettIsolaSchermo() const {
-        // a riposo (anche quando e' nascosta in basso)
-        const float top = yBaseRiposo() - S - PAD, bottom = yBaseRiposo() + PAD;
-        return {schermo.left + (LONG)isola.left, schermo.bottom - H + (LONG)top, schermo.left + (LONG)isola.right, schermo.bottom - H + (LONG)bottom};
+    // l'icona del centro di controllo a riposo, in coordinate della finestra del dock (non si muove con l'ingrandimento:
+    // e' il punto da cui il centro di controllo nasce e a cui torna)
+    D2D1_RECT_F rettCentro() const {
+        const auto pos = posizioniRiposo();
+        float x = W - S - 12 * dpi;
+        for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == AVVIO_CONTROLLO) x = pos[i];
+        const float yb = yBaseRiposo();
+        return {x, yb - S, x + S, yb};
     }
-    bool isolaVisibile() const { return attivo && !nascostoSchermoIntero && (!vuoleNascondersiI || rivelatoI); }
+    // ... sullo schermo (per i banner delle notifiche, che escono da li', e per i clic sull'icona a pannello aperto)
+    RECT rettIsolaSchermo() const {
+        const D2D1_RECT_F r = rettCentro();
+        return {schermo.left + (LONG)r.left, schermo.bottom - H + (LONG)(r.top - PAD), schermo.left + (LONG)r.right, schermo.bottom - H + (LONG)(r.bottom + PAD)};
+    }
+    bool isolaVisibile() const { return attivo && !nascostoSchermoIntero; }
+
+    // apre il centro di controllo da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
+    void apriPannelloIsola(int tipo) { if (attivo && tipo >= P_SFONDO && tipo <= P_WIDGET) apriCentro(tipo); }
+
+    // Il centro di controllo (icona a destra nel dock, notch, Win+N...): si apre sulla vista chiesta. Gia' aperto: la
+    // stessa vista lo chiude, un'altra ci passa dentro la stessa finestra. Col launcher aperto prima si chiude lui
+    void apriCentro(int tipo) {
+        if (registro) { char b[120]; snprintf(b, 120, "centro di controllo: chiesta vista %d (attivo %d, schermo intero %d, launcher %d, vista ora %d%s)", tipo, (int)attivo, (int)nascostoSchermoIntero, (int)lAperto, pannelloTipo, pChiusura ? ", si chiude" : ""); scrivi(b); }
+        if (!attivo || nascostoSchermoIntero) return;
+        if (lAperto) { if (!lChiusura) chiudiLauncher(); if (dopo != 2) apriDopo(2, tipo); return; }
+        usa(0);
+        if (pannelloTipo != P_NESSUNO && !pChiusura) {
+            if (pannelloTipo == tipo || tipo == P_CONTROLLO) { chiudiPannello(); return; }
+            cambiaVista(tipo, {PW / 2, PH / 2});   // (da fuori: la vista nuova si apre dal centro)
+            return;
+        }
+        apriPannello(tipo);
+    }
+
+    // apertura in attesa che l'altro (launcher o centro di controllo) abbia finito di chiudersi: 1 launcher, 2 centro
+    int dopo = 0, dopoTipo = 0; double dopoT0 = 0;
+    void apriDopo(int cosa, int tipo) { dopo = cosa; dopoTipo = tipo; dopoT0 = adesso(); SetTimer(icone, TIMER_DOPO, 15, nullptr); }
+    void suTimerDopo() {
+        const bool pronto = dopo == 1 ? nessunaScheda() : !lAperto;
+        if (!pronto && adesso() - dopoT0 < 1.0) return;   // (al massimo un secondo: poi si apre comunque)
+        KillTimer(icone, TIMER_DOPO);
+        const int cosa = dopo; dopo = 0;
+        if (cosa == 1) apriLauncher();
+        else if (cosa == 2) apriCentro(dopoTipo);
+    }
 
     // apre le impostazioni di FluidWin (dal centro di controllo)
     void (*impostazioni)() = nullptr;
 
-    // apre un pannello dell'isola da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
-    void apriPannelloIsola(int tipo) { if (attivo && tipo >= P_SFONDO && tipo <= P_WIDGET) apriPannello(tipo); }
 
     // Apre il launcher (o lo chiude, se e' gia' aperto): cresce dall'icona "App" del dock con un piccolo rimbalzo
     void apriLauncher() {
@@ -2945,7 +3177,8 @@ public:
         }
         if (tutteApp.empty()) leggiTutteApp(true);
         else if (adesso() - lLetto > 600) leggiTutteApp();
-        if (!nessunaScheda()) nascondiSchede();
+        // centro di controllo aperto: prima si chiude lui, poi (TIMER_DOPO) si apre il launcher; mai uno sopra l'altro
+        if (!nessunaScheda()) { if (dopo != 1) { chiudiTutte(); apriDopo(1, 0); } return; }
         primaDelLauncher = GetForegroundWindow();
         query.clear(); filtra(); lSopra = -1; lScroll = 0;
         lAperto = true; lChiusura = false; lScala = 0.12; lVel = 0; lAlfa = 0; lT0 = adesso(); lRegione = false; lRipreso = false;
@@ -3147,6 +3380,121 @@ private:
             D2D1_COLOR_F c = colori[k]; c.a = alfa;
             pennello->SetColor(c);
             dc->FillEllipse({{cx + (k % 3 - 1) * passo, cy + (k / 3 - 1) * passo}, raggio, raggio}, pennello);
+        }
+    }
+
+    // ---- notch: ora e data in alto al centro dello schermo del dock ----
+    // Nero come il notch del Mac e dell'iPhone, attaccato al bordo in alto: ai lati si raccorda al bordo con due curve
+    // all'indietro, sotto ha gli angoli tondi. Su una riga l'ora (piu' grande) e il giorno; il mouse lo attraversa
+    bool creaNotch(HINSTANCE inst) {
+        WNDCLASSW wc{}; wc.lpfnWndProc = procNotch; wc.hInstance = inst; wc.lpszClassName = L"FluidWin.Notch";
+        wc.hCursor = LoadCursor(nullptr, IDC_HAND);
+        RegisterClassW(&wc);
+        // trasparente al mouse: sta dove si afferrano le finestre ingrandite per trascinarle, non deve rubare quel clic
+        notch = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT, wc.lpszClassName, L"",
+                                WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
+        if (!notch) return false;
+        BOOL niente = TRUE; DwmSetWindowAttribute(notch, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
+        return true;
+    }
+
+    // ridisegna il notch (a ogni minuto, cambio di schermo o di tema); con il dock nascosto a schermo intero resta nascosto
+    void disegnaNotch() {
+        if (!notch || !fdw || !f2d || testoOra.empty()) return;
+        static IDWriteTextFormat *fOra = nullptr, *fGiorno = nullptr;
+        static float fDpi = 0;
+        if (fDpi != dpi) {   // formati alla scala del dock
+            if (fOra) fOra->Release();
+            if (fGiorno) fGiorno->Release();
+            fdw->CreateTextFormat(fontTitoli, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.5f * dpi, L"it-it", &fOra);
+            fdw->CreateTextFormat(fontTesto, nullptr, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 9.5f * dpi, L"it-it", &fGiorno);
+            for (IDWriteTextFormat* f : {fOra, fGiorno}) if (f) { f->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING); f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER); f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP); }
+            fDpi = dpi;
+        }
+        if (!fOra || !fGiorno) return;
+        // piccolo come quello del Mac: una riga sola, ora (piu' grande) e giorno uno accanto all'altro, un po' piu' largo che alto
+        const float lo = larghezzaTesto(testoOra, fOra), lg = larghezzaTesto(testoNotch, fGiorno), spazio = std::round(7 * dpi);
+        const float f = std::round(6 * dpi);                       // raccordo con il bordo in alto
+        const float w = std::round(std::max(200 * dpi, lo + spazio + lg + 48 * dpi)), h = std::round(22 * dpi), R = std::round(9 * dpi);
+        const int W2 = (int)(w + 2 * f), H2 = (int)h;
+        BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), W2, -H2, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+        void* bits = nullptr;
+        HDC scr = GetDC(nullptr), mem = CreateCompatibleDC(scr);
+        HBITMAP dib = CreateDIBSection(scr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (!dib || !bits) { if (dib) DeleteObject(dib); DeleteDC(mem); ReleaseDC(nullptr, scr); return; }
+        HGDIOBJ vecchio = SelectObject(mem, dib);
+        ID2D1DCRenderTarget* rt = nullptr;
+        const D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+            D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
+        if (SUCCEEDED(f2d->CreateDCRenderTarget(&p, &rt))) {
+            RECT rr = {0, 0, W2, H2};
+            rt->BindDC(mem, &rr);
+            rt->BeginDraw();
+            rt->Clear(D2D1::ColorF(0, 0, 0, 0));
+            rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);
+            ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+                const float x0 = f, x1 = f + w;
+                s->BeginFigure({0, 0}, D2D1_FIGURE_BEGIN_FILLED);
+                s->AddArc({{x0, f}, {f, f}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});        // raccordo a sinistra
+                s->AddLine({x0, h - R});
+                s->AddArc({{x0 + R, h}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
+                s->AddLine({x1 - R, h});
+                s->AddArc({{x1, h - R}, {R, R}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL});
+                s->AddLine({x1, f});
+                s->AddArc({{x1 + f, 0}, {f, f}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL});   // raccordo a destra
+                s->EndFigure(D2D1_FIGURE_END_CLOSED);
+                s->Close(); s->Release();
+                ID2D1SolidColorBrush* b = nullptr; rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &b);
+                if (b) {
+                    rt->FillGeometry(g, b);
+                    b->SetColor(D2D1::ColorF(1, 1, 1, 1));
+                    const float xt = x0 + (w - (lo + spazio + lg)) / 2, yt = 1 * dpi;
+                    rt->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fOra, {xt, yt, xt + lo + 2, h - 1 * dpi}, b);
+                    b->SetColor(D2D1::ColorF(1, 1, 1, 0.66f));
+                    rt->DrawText(testoNotch.c_str(), (UINT32)testoNotch.size(), fGiorno, {xt + lo + spazio, yt, xt + lo + spazio + lg + 2, h - 1 * dpi}, b);
+                    b->Release();
+                }
+            }
+            if (g) g->Release();
+            rt->EndDraw(); rt->Release();
+        }
+        GdiFlush();
+        POINT pos = {schermo.left + (schermo.right - schermo.left - W2) / 2, schermo.top}, zero = {0, 0}; SIZE sz = {W2, H2};
+        BLENDFUNCTION bl = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+        UpdateLayeredWindow(notch, scr, &pos, &sz, mem, &zero, 0, &bl, ULW_ALPHA);
+        SelectObject(mem, vecchio); DeleteObject(dib); DeleteDC(mem); ReleaseDC(nullptr, scr);
+        if (attivo && !nascostoSchermoIntero) SetWindowPos(notch, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+    }
+
+    static LRESULT CALLBACK procNotch(HWND h, UINT m, WPARAM w, LPARAM l) {
+        Motore* d = gIstanza();
+        switch (m) {
+            case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
+            case WM_LBUTTONUP: if (d) d->apriCentro(P_NOTIFICHE); return 0;   // un clic sul notch: le notifiche
+            case WM_CLOSE: return 0;
+        }
+        return DefWindowProcW(h, m, w, l);
+    }
+
+    // l'icona del centro di controllo: la stessa piastrella di vetro di "App", con i due interruttori di iOS (quello in
+    // alto acceso, azzurro; quello in basso spento)
+    void disegnaIconaControllo(const D2D1_RECT_F& r, float alfa, bool scuro) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const float lw = d * 0.27f, lh = d * 0.115f, rk = lh * 0.78f;   // mezza larghezza, mezza altezza, pomello
+        for (int k = 0; k < 2; k++) {
+            const float y = cy + (k == 0 ? -1 : 1) * d * 0.15f;
+            const D2D1_RECT_F p = {cx - lw, y - lh, cx + lw, y + lh};
+            if (k == 0) pennello->SetColor(D2D1::ColorF(0.0f, 0.478f, 1.0f, alfa));
+            else pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.28f * alfa) : D2D1::ColorF(0, 0, 0, 0.16f * alfa));
+            dc->FillRoundedRectangle({p, lh, lh}, pennello);
+            pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
+            dc->FillEllipse({{k == 0 ? p.right - lh : p.left + lh, y}, rk, rk}, pennello);
         }
     }
 
@@ -3426,6 +3774,7 @@ private:
         if (i < 0 || i >= (int)voci.size() || voci[i].uscente) return;
         Voce& v = voci[i];
         if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(); return; }
+        if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
         if (v.finestre.empty()) {
             segnaLancio(v);   // la sua prima finestra uscira' dall'icona col genio
             ShellExecuteW(nullptr, L"open", v.avvio.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -3463,7 +3812,7 @@ private:
         // copia: mentre il menu e' aperto (ha un suo ciclo dei messaggi) l'elenco delle app puo' essere rifatto da
         // capo, e un riferimento a voci[i] resterebbe a puntare a memoria liberata
         const Voce v = voci[i];
-        if (v.avvio == AVVIO_LAUNCHER) return;
+        if (v.avvio == AVVIO_LAUNCHER || v.avvio == AVVIO_CONTROLLO) return;
         // eseguibile vero sul disco (non quelli protetti delle app dello Store)
         const bool exeVero = !v.exe.empty() && v.exe.find(L"\\windowsapps\\") == std::wstring::npos &&
                              GetFileAttributesW(v.exe.c_str()) != INVALID_FILE_ATTRIBUTES;
@@ -3542,11 +3891,14 @@ private:
             }
             case WM_MOUSEWHEEL: {   // rotella sul volume: +-2% per scatto
                 POINT pt{GET_X_LPARAM(l), GET_Y_LPARAM(l)}; ScreenToClient(h, &pt);
-                if (d->statoInPunto((float)pt.x, (float)pt.y) == CONTROLLO) d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f);
+                // (sull'icona del centro di controllo, come prima sulla pillola dell'isola)
+                const int iv = d->iconaInPunto((float)pt.x, (float)pt.y);
+                if (iv >= 0 && d->voci[iv].avvio == AVVIO_CONTROLLO) d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f);
                 return 0;
             }
             case WM_TIMER:
                 if (w == TIMER_BORDO) { d->controllaBordo(); return 0; }
+                if (w == TIMER_DOPO) { d->suTimerDopo(); return 0; }
                 if (w == TIMER_INVIO) {
                     KillTimer(h, TIMER_INVIO);
                     // solo se il fuoco e' davvero sulla barra di Windows: l'Invio non deve finire in un'altra app
