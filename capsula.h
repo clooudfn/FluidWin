@@ -23,6 +23,12 @@
 #include <algorithm>
 #include <unordered_map>
 #include <vector>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <condition_variable>
+#include <deque>
+#include <thread>
 
 namespace capsula {
 
@@ -36,7 +42,11 @@ public:
     ~LettoreSchermo() { ferma(); }
 
     // l'ultima lettura di r, se e' recente (eta' ms); intanto ne chiede una nuova
-    bool leggi(const RECT& r, std::vector<UINT>& out, ULONGLONG eta) {
+    // (avvisa: quando la nuova e' pronta arriva un messaggio WM_APP + 20 a "finestra")
+    HWND finestra = nullptr;
+    // dopo: valgono solo le letture con un numero piu' alto (fatte dopo che ultimo() valeva dopo)
+    ULONGLONG ultimo() { if (!avvia()) return 0; EnterCriticalSection(&cs); const ULONGLONG n = contatore; LeaveCriticalSection(&cs); return n; }
+    bool leggi(const RECT& r, std::vector<UINT>& out, ULONGLONG eta, bool avvisa = false, ULONGLONG dopo = 0) {
         if (!avvia()) return false;
         bool ok = false;
         const ULONGLONG ora = GetTickCount64();
@@ -46,10 +56,10 @@ public:
         if (!l) {
             // (quelle non piu' chieste da qualche secondo se ne vanno)
             letture.erase(std::remove_if(letture.begin(), letture.end(), [&](const Lettura& x) { return ora - x.chiesta > 3000; }), letture.end());
-            letture.push_back({r, {}, 0, 0, false}); l = &letture.back();
+            letture.push_back({r, {}, 0, 0, false, false}); l = &letture.back();
         }
-        if (!l->px.empty() && ora - l->quando <= eta) { out = l->px; ok = true; }
-        l->chiesta = ora; l->daLeggere = true;
+        if (!l->px.empty() && ora - l->quando <= eta && l->numero > dopo) { out = l->px; ok = true; }
+        l->chiesta = ora; l->daLeggere = true; if (avvisa) l->avvisa = true;
         LeaveCriticalSection(&cs);
         SetEvent(evento);
         return ok;
@@ -67,8 +77,9 @@ private:
     HANDLE evento = nullptr, thread = nullptr;
     bool pronto = false;
     volatile LONG fine = 0;
-    struct Lettura { RECT r; std::vector<UINT> px; ULONGLONG quando, chiesta; bool daLeggere; };   // quando = letta, chiesta = ultima richiesta
+    struct Lettura { RECT r; std::vector<UINT> px; ULONGLONG quando, chiesta; bool daLeggere; bool avvisa = false; ULONGLONG numero = 0; };   // quando = letta, chiesta = ultima richiesta; avvisa = a lettura fatta, un messaggio a "finestra"
     std::vector<Lettura> letture;
+    ULONGLONG contatore = 0;   // letture fatte finora (sotto cs): ognuna ha il suo numero
 
     bool avvia() {
         if (pronto) return thread != nullptr;
@@ -107,8 +118,10 @@ private:
             if (buf.empty()) continue;
             for (UINT& c : buf) c &= 0xFFFFFF;
             EnterCriticalSection(&l->cs);
-            for (auto& x : l->letture) if (EqualRect(&x.r, &r)) { x.px.swap(buf); x.quando = GetTickCount64(); break; }
+            bool avvisa = false;
+            for (auto& x : l->letture) if (EqualRect(&x.r, &r)) { x.px.swap(buf); x.quando = GetTickCount64(); x.numero = ++l->contatore; avvisa = x.avvisa; x.avvisa = false; break; }
             LeaveCriticalSection(&l->cs);
+            if (avvisa && l->finestra) PostMessageW(l->finestra, WM_APP + 20, 0, 0);   // chi aspettava questa lettura la usa subito
             }
         }
         return 0;
@@ -143,10 +156,8 @@ public:
         RegisterClassW(&wt);
         tempi = CreateWindowExW(0, wt.lpszClassName, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr, inst, nullptr);
         if (tempi) SetTimer(tempi, 3, 50, nullptr);   // colore della barra in primo piano (controlloColore)
-        // UI Automation: CLSID_CUIAutomation / IID_IUIAutomation (scritti qui: non tutte le librerie di MinGW li hanno)
-        static const GUID clsid = {0xff48dba4, 0x60ef, 0x4201, {0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e}};
-        static const GUID iid = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee}};
-        if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, iid, (void**)&uia))) uia = nullptr;
+        uia = creaUia();
+        if (tempi) { avviaSonde(); lettore.finestra = tempi; }
         return tempi && SUCCEEDED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &f2d));
     }
 
@@ -356,7 +367,9 @@ public:
     }
 
 private:
+    struct Sonda;
     struct Capsula {
+        std::shared_ptr<Sonda> sonda;   // misura in corso (o finita e non ancora usata) nel thread della sonda
         HWND fin = nullptr, bersaglio = nullptr;
         RECT tasti{}, ultimoVisibile{};   // ultimoVisibile = GetWindowRect quando si sono misurati i tasti
         float bordoDx = 0, bordoSu = 0;   // distanza dei tasti dal bordo destro e da quello alto della parte visibile, alla misura
@@ -375,6 +388,8 @@ private:
         int colpiDx = 0, colpiDy = 0, colpiW = 0, colpiH = 0;
         int uiaDx = 0, uiaDy = 0, uiaW = 0, uiaH = 0, tentativiUia = 0;
         int riprove = 0;   // misure fallite di fila con la finestra ferma
+        ULONGLONG prossimoColore = 0;   // prima di allora niente nuova lettura del colore (riletture distanziate)
+        ULONGLONG coloreDopo = 0;       // valgono solo le letture dello schermo con un numero piu' alto (non quelle di prima di un cambio)
         COLORREF fondo = RGB(240, 240, 240);
         bool coloreVero = false, provata = false, misurata = false, visibile = false, trascinando = false, attiva = false, mouseDentro = false;
         int sopra = -1, premuto = -1;   // 0 riduci, 1 ingrandisci, 2 chiudi
@@ -449,18 +464,108 @@ private:
     static float scalaDi(HWND h) { return scala::di(h); }
     static int P(float sc, int n) { return (int)std::lround(n * sc); }
 
-    bool tastiUia(Capsula& c, const RECT& v, RECT& t) {
-        if (!uia || c.tentativiUia >= 4) return false;
-        wchar_t cl[64] = L""; GetClassNameW(c.bersaglio, cl, 64);
-        if (wcscmp(cl, L"Chrome_WidgetWin_1") || IsHungAppWindow(c.bersaglio)) return false;
-        c.tentativiUia++;
-        const float sc = scalaDi(c.bersaglio);
+    // Le misure dei tasti chiedono molte cose all'app (barra del titolo, decine di hit test, accessibilita'): ogni
+    // domanda aspetta che l'app risponda, fino a 30-40 ms se e' occupata. Fatte sul thread principale fermavano tutto
+    // FluidWin (misure da 18-76 ms nel registro: animazioni e gelatina a scatti). Le fa un thread a parte, la "sonda",
+    // su una copia di quello che serve; il risultato torna al thread principale con un messaggio, e li' si finisce la
+    // misura (pixel della barra, colore, forma della capsula).
+    struct Sonda {
+        HWND h = nullptr; RECT v{}, fr{}; float sc = 1; bool zoom = false;
+        bool verifica = false;   // controllo a finestra ferma (il risultato si confronta, non si adotta direttamente)
+        // ricordi della capsula: entrano e, aggiornati, tornano indietro
+        bool viaUia = false, uiaZoom = false, viaColpi = false, colpiZoom = false;
+        int colpiDx = 0, colpiDy = 0, colpiW = 0, colpiH = 0, uiaDx = 0, uiaDy = 0, uiaW = 0, uiaH = 0, tentativiUia = 0;
+        // risultato
+        bool ok = false; RECT t{}; LONG barra = 0; int colpi = 0; double ms = 0; char scarto[140] = "";
+        // la striscia in alto a destra della finestra letta dallo schermo dalla sonda: i pixel della barra si prendono
+        // da qui invece di un BitBlt sul thread principale (aspetta il compositore, ~6 ms)
+        std::vector<UINT> banda; RECT bandaR{}; bool bandaOk = false;
+        std::atomic<bool> fatta{false};
+    };
+    static void prendiRicordi(Sonda& s, const Capsula& c) {
+        s.viaUia = c.viaUia; s.uiaZoom = c.uiaZoom; s.viaColpi = c.viaColpi; s.colpiZoom = c.colpiZoom;
+        s.colpiDx = c.colpiDx; s.colpiDy = c.colpiDy; s.colpiW = c.colpiW; s.colpiH = c.colpiH;
+        s.uiaDx = c.uiaDx; s.uiaDy = c.uiaDy; s.uiaW = c.uiaW; s.uiaH = c.uiaH; s.tentativiUia = c.tentativiUia;
+    }
+    static void rendiRicordi(Capsula& c, const Sonda& s) {
+        c.viaUia = s.viaUia; c.uiaZoom = s.uiaZoom; c.viaColpi = s.viaColpi; c.colpiZoom = s.colpiZoom;
+        c.colpiDx = s.colpiDx; c.colpiDy = s.colpiDy; c.colpiW = s.colpiW; c.colpiH = s.colpiH;
+        c.uiaDx = s.uiaDx; c.uiaDy = s.uiaDy; c.uiaW = s.uiaW; c.uiaH = s.uiaH; c.tentativiUia = s.tentativiUia;
+    }
+
+    // UI Automation: CLSID_CUIAutomation / IID_IUIAutomation (scritti qui: non tutte le librerie di MinGW li hanno)
+    static IUIAutomation* creaUia() {
+        static const GUID clsid = {0xff48dba4, 0x60ef, 0x4201, {0xaa, 0x87, 0x54, 0x10, 0x3e, 0xef, 0x59, 0x4e}};
+        static const GUID iid = {0x30cbe57d, 0xd9d0, 0x452a, {0xab, 0x13, 0x7a, 0xc5, 0xac, 0x48, 0x25, 0xee}};
+        IUIAutomation* u = nullptr;
+        if (FAILED(CoCreateInstance(clsid, nullptr, CLSCTX_INPROC_SERVER, iid, (void**)&u))) u = nullptr;
+        return u;
+    }
+
+    // Il thread della sonda: uno solo, sempre lo stesso, con il suo UI Automation in un appartamento multithread (come
+    // consiglia Microsoft per UIA: il thread principale non resta piu' fermo ad aspettare l'accessibilita' di Discord).
+    // Le misure in coda si fanno una dopo l'altra; finita una, un messaggio al thread principale
+    struct CodaSonde {
+        std::mutex mx; std::condition_variable cv;
+        std::deque<std::shared_ptr<Sonda>> lavori;
+        HWND avvisa = nullptr;
+    };
+    CodaSonde* coda = nullptr;   // mai liberata: il thread vive quanto FluidWin
+
+    void avviaSonde() {
+        coda = new CodaSonde; coda->avvisa = tempi;
+        CodaSonde* q = coda;
+        std::thread([q] {
+            CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+            SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);   // le capsule compaiono presto
+            IUIAutomation* u = creaUia();
+            for (;;) {
+                std::shared_ptr<Sonda> s;
+                {
+                    std::unique_lock<std::mutex> lk(q->mx);
+                    q->cv.wait(lk, [q] { return !q->lavori.empty(); });
+                    s = std::move(q->lavori.front()); q->lavori.pop_front();
+                }
+                if (IsWindow(s->h)) sonda(*s, u);
+                s->fatta.store(true, std::memory_order_release);
+                PostMessageW(q->avvisa, WM_APP + 20, 0, 0);
+            }
+        }).detach();
+    }
+
+    // chiede alla sonda di misurare la capsula c (verifica: controllo a finestra ferma, su una copia senza "forzata").
+    // false: nessuna sonda (allora si misura qui)
+    bool chiediSonda(Capsula& c, bool verifica) {
+        if (!coda) return false;
+        auto s = std::make_shared<Sonda>();
+        if (verifica) { Capsula prova = c; prova.forzata = 0; prepara(prova, *s); }
+        else prepara(c, *s);
+        s->verifica = verifica;
+        c.sonda = s;
+        { std::lock_guard<std::mutex> lk(coda->mx); coda->lavori.push_back(std::move(s)); }
+        coda->cv.notify_one();
+        return true;
+    }
+
+    // la misura della sonda di c, se e' finita e del tipo giusto (altrimenti nullptr; una del tipo sbagliato si butta)
+    std::shared_ptr<Sonda> sondaFinita(Capsula& c, bool verifica) {
+        if (!c.sonda || !c.sonda->fatta.load(std::memory_order_acquire)) return nullptr;
+        std::shared_ptr<Sonda> s = std::move(c.sonda);
+        return s->verifica == verifica ? s : nullptr;
+    }
+
+    static bool tastiUia(Sonda& s, IUIAutomation* uia, const RECT& v, RECT& t) {
+        if (!uia || s.tentativiUia >= 4) return false;
+        wchar_t cl[64] = L""; GetClassNameW(s.h, cl, 64);
+        if (wcscmp(cl, L"Chrome_WidgetWin_1") || IsHungAppWindow(s.h)) return false;
+        s.tentativiUia++;
+        const float sc = s.sc;
         RECT tt{}; int n = 0, x = v.right - P(sc, 4), ultimo = x;
         const int y = v.top + P(sc, 12);
         while (n < 3 && x > v.right - P(sc, 300)) {
             const POINT p = {x, y};
             HWND sotto = WindowFromPoint(p);
-            if (!sotto || GetAncestor(sotto, GA_ROOT) != c.bersaglio) return false;   // angolo coperto da un'altra finestra
+            if (!sotto || GetAncestor(sotto, GA_ROOT) != s.h) return false;   // angolo coperto da un'altra finestra
             IUIAutomationElement* e = nullptr;
             if (FAILED(uia->ElementFromPoint(p, &e)) || !e) return false;
             CONTROLTYPEID tipo = 0; RECT r{};
@@ -474,9 +579,9 @@ private:
             else break;
         }
         if (n < 3) return false;
-        t = tt; c.viaUia = true; c.tentativiUia = 0;
-        c.uiaZoom = IsZoomed(c.bersaglio);
-        c.uiaDx = v.right - tt.right; c.uiaDy = tt.top - v.top; c.uiaW = tt.right - tt.left; c.uiaH = tt.bottom - tt.top;
+        t = tt; s.viaUia = true; s.tentativiUia = 0;
+        s.uiaZoom = s.zoom;
+        s.uiaDx = v.right - tt.right; s.uiaDy = tt.top - v.top; s.uiaW = tt.right - tt.left; s.uiaH = tt.bottom - tt.top;
         return true;
     }
 
@@ -487,15 +592,15 @@ private:
         return v;
     }
 
-    static inline int colpiFatti = 0;   // hit test chiesti (per il registro: quanto costa una misura)
+    static inline thread_local int colpiFatti = 0;   // hit test chiesti da questo thread (per il registro: quanto costa una misura)
     static double adessoMs() { LARGE_INTEGER f, c; QueryPerformanceFrequency(&f); QueryPerformanceCounter(&c); return c.QuadPart * 1000.0 / f.QuadPart; }
 
     static bool tastoColpo(LRESULT r) { return r == HTCLOSE || r == HTMAXBUTTON || r == HTMINBUTTON; }
 
     // I tasti trovati l'ultima volta (stessa distanza dall'angolo in alto a destra) ci sono ancora? Si guardano il
     // chiudi, il riduci e un punto appena a sinistra (non deve essere un tasto): 3-4 hit test invece di ~70
-    bool tastiAncoraLi(const Capsula& c, HWND h, const RECT& v, RECT& t) {
-        const float sc = scalaDi(h);
+    static bool tastiAncoraLi(const Sonda& c, HWND h, const RECT& v, RECT& t) {
+        const float sc = c.sc;
         const RECT r = {v.right - c.colpiDx - c.colpiW, v.top + c.colpiDy, v.right - c.colpiDx, v.top + c.colpiDy + c.colpiH};
         if (r.left <= v.left || r.right - r.left < P(sc, 40)) return false;
         const int y = v.top + P(sc, 10);
@@ -558,8 +663,8 @@ private:
         return true;
     }
 
-    // dove sono i tre tasti; false se la finestra non li ha (o non si capisce)
-    bool misura(Capsula& c) {
+    // Prima parte della misura (thread principale): rettangolo visibile, scala, stato e ricordi della capsula
+    void prepara(Capsula& c, Sonda& s) {
         HWND h = c.bersaglio;
         // appena tornata visibile (fine di gelatina o genio) DWM da' ancora il rettangolo di quando era trasparente:
         // si usano i bordi letti l'ultima volta a finestra normale
@@ -571,10 +676,50 @@ private:
             c.inset = {v.left - fr.left, v.top - fr.top, fr.right - v.right, fr.bottom - v.bottom}; c.insetOk = true;
             if (!IsZoomed(h)) { c.insetN = c.inset; c.insetNOk = true; }
         }
+        s.h = h; s.v = v; s.fr = fr; s.sc = scalaDi(h); s.zoom = IsZoomed(h) != FALSE;
+        prendiRicordi(s, c);
+    }
+
+    // Seconda parte (qualsiasi thread, di solito la sonda): tutto quello che si chiede all'app. Dove sono i tre tasti,
+    // fin dove arrivano in basso e dove finisce la barra del titolo per l'hit test. Usa solo s e uia
+    static bool sonda(Sonda& s, IUIAutomation* uia) {
+        const double t0 = adessoMs(); colpiFatti = 0;
+        const bool ok = sondaDentro(s, uia);
+        if (ok) leggiBanda(s);
+        s.colpi = colpiFatti; s.ms = adessoMs() - t0; s.ok = ok;
+        return ok;
+    }
+
+    // la parte in alto a destra della finestra com'e' sullo schermo: fin dove arrivano le letture della barra
+    // (fondoBarra e il colore, a sinistra dei tasti) per qualsiasi app, alla scala della finestra
+    static void leggiBanda(Sonda& s) {
+        const RECT v = s.v;
+        const RECT r = {std::max(v.left, v.right - P(s.sc, 400)), v.top, v.right, std::min(v.bottom, v.top + P(s.sc, 130))};
+        const int w = r.right - r.left, hh = r.bottom - r.top;
+        if (w <= 0 || hh <= 0) return;
+        HDC scr = GetDC(nullptr), mem = CreateCompatibleDC(scr);
+        BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -hh, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
+        void* bits = nullptr; HBITMAP dib = CreateDIBSection(scr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+        if (dib && bits) {
+            HGDIOBJ o = SelectObject(mem, dib);
+            if (BitBlt(mem, 0, 0, w, hh, scr, r.left, r.top, SRCCOPY)) {
+                GdiFlush();
+                s.banda.assign((const UINT*)bits, (const UINT*)bits + (size_t)w * hh);
+                s.bandaR = r; s.bandaOk = true;
+            }
+            SelectObject(mem, o);
+        }
+        if (dib) DeleteObject(dib);
+        DeleteDC(mem); ReleaseDC(nullptr, scr);
+    }
+
+    // durante applica: la striscia della sonda, da cui pixelGrezzi prende i pixel dello schermo se ci stanno
+    const Sonda* bandaUsa = nullptr;
+    static bool sondaDentro(Sonda& s, IUIAutomation* uia) {
+        const HWND h = s.h; const RECT v = s.v; const float sc = s.sc;
         TITLEBARINFOEX tb{}; tb.cbSize = sizeof(tb);
         DWORD_PTR ok = 0;
         RECT t{};
-        const float sc = scalaDi(h);
         // misura accettabile: dentro la finestra e con le dimensioni di tre tasti
         auto valida = [&](RECT r) {
             IntersectRect(&r, &r, &v);
@@ -590,9 +735,9 @@ private:
             classica = valida(t);
         }
         if (classica) {
-        } else if (c.viaUia && c.uiaZoom == (IsZoomed(h) != FALSE)) {
-            t = {v.right - c.uiaDx - c.uiaW, v.top + c.uiaDy, v.right - c.uiaDx, v.top + c.uiaDy + c.uiaH};
-        } else if (c.viaColpi && c.colpiZoom == (IsZoomed(h) != FALSE) && tastiAncoraLi(c, h, v, t)) {
+        } else if (s.viaUia && s.uiaZoom == s.zoom) {
+            t = {v.right - s.uiaDx - s.uiaW, v.top + s.uiaDy, v.right - s.uiaDx, v.top + s.uiaDy + s.uiaH};
+        } else if (s.viaColpi && s.colpiZoom == s.zoom && tastiAncoraLi(s, h, v, t)) {
             // tasti gia' trovati con l'hit test in questo stato: stanno ancora li' (verificato con pochi hit test)
         } else {
             // barra del titolo disegnata dall'app: da destra verso sinistra, dove iniziano e finiscono i tasti
@@ -619,9 +764,9 @@ private:
                 }
                 t = {sinistra - 1, v.top + 1, destra + 3, basso + 2};   // il passo era di 2 px: l'ultimo tratto e' ancora tasto
                 // si ricorda dove stanno rispetto all'angolo in alto a destra: la prossima volta basta verificarlo
-                c.viaColpi = true; c.colpiZoom = IsZoomed(h) != FALSE;
-                c.colpiDx = v.right - t.right; c.colpiDy = t.top - v.top; c.colpiW = t.right - t.left; c.colpiH = t.bottom - t.top;
-            } else if (!tastiUia(c, v, t)) return false;
+                s.viaColpi = true; s.colpiZoom = s.zoom;
+                s.colpiDx = v.right - t.right; s.colpiDy = t.top - v.top; s.colpiW = t.right - t.left; s.colpiH = t.bottom - t.top;
+            } else if (!tastiUia(s, uia, v, t)) return false;
         }
         // il tasto chiudi vero puo' essere piu' alto di quanto dice l'app (o di quanto si e' misurato): se sotto la
         // capsula resta un pezzo di tasto, col mouse sopra diventa rosso. Si scende finche' l'hit test dice "tasto"
@@ -633,9 +778,36 @@ private:
         IntersectRect(&t, &t, &v);   // la capsula non esce mai dalla finestra
         const int w = t.right - t.left, hh = t.bottom - t.top;
         if (w < P(sc, 40) || hh < P(sc, 18) || hh > P(sc, 90) || w > P(sc, 400)) {
-            if (registro) { char b[120]; snprintf(b, 120, "capsula %p: misura scartata %dx%d (finestra %ld,%ld-%ld,%ld)", (void*)h, w, hh, v.left, v.top, v.right, v.bottom); scrivi(b); }
+            snprintf(s.scarto, sizeof(s.scarto), "capsula %p: misura scartata %dx%d (finestra %ld,%ld-%ld,%ld)", (void*)h, w, hh, v.left, v.top, v.right, v.bottom);
             return false;
         }
+        // centro: quello della barra del titolo vera. Alcune app hanno i tasti piu' bassi della barra (allineati in
+        // alto): centrata su di loro la capsula restava in alto. Si scende appena a sinistra dei tasti finche' l'hit
+        // test dice "barra del titolo"
+        LONG barra = t.bottom;
+        for (int yy = t.bottom; yy < v.top + P(sc, 90); yy += 2) { if (colpo(h, t.left - P(sc, 6), yy) != HTCAPTION) break; barra = yy + 2; }
+        s.t = t; s.barra = barra;
+        return true;
+    }
+
+    // Misura completa sul thread principale (per quando serve subito: finestra staccata da ingrandita, la foto della
+    // gelatina ha bisogno della capsula adesso)
+    bool misura(Capsula& c) {
+        Sonda s;
+        prepara(c, s);
+        sonda(s, uia);
+        return applica(c, s);
+    }
+
+    // Terza parte (thread principale): dai tasti trovati alla capsula. Pixel della barra, centro, forma, colore
+    bool applica(Capsula& c, const Sonda& s) {
+        struct Usa { const Sonda*& p; Usa(const Sonda*& q, const Sonda* s) : p(q) { p = s; } ~Usa() { p = nullptr; } } usa(bandaUsa, &s);
+        rendiRicordi(c, s);
+        if (!s.ok) { if (s.scarto[0] && registro) scrivi(s.scarto); return false; }
+        HWND h = c.bersaglio;
+        const RECT v = s.v, t = s.t;
+        const float sc = s.sc;
+        LONG barra = s.barra;
         // La capsula ha sempre la stessa misura (non quella dei tasti dell'app, che cambia da app ad app e fra
         // finestra ingrandita e normale): la sua finestra copre i tasti originali e quanto serve in piu' per lei.
         // Le parti non disegnate sono trasparenti anche al mouse
@@ -643,11 +815,6 @@ private:
         const int pw = (int)std::ceil(c.r * 9.3f), ph = (int)std::ceil(c.r * 2.9f);
         c.zoom = IsZoomed(h);
         const int ra = c.zoom ? 0 : (int)std::ceil(raggioAngoli * sc);
-        // centro: quello della barra del titolo vera. Alcune app hanno i tasti piu' bassi della barra (allineati in
-        // alto): centrata su di loro la capsula restava in alto. Si scende appena a sinistra dei tasti finche' l'hit
-        // test dice "barra del titolo"
-        LONG barra = t.bottom;
-        for (int yy = t.bottom; yy < v.top + P(sc, 90); yy += 2) { if (colpo(h, t.left - P(sc, 6), yy) != HTCAPTION) break; barra = yy + 2; }
         // barre che all'hit test sono "contenuto" (Esplora file e altre app moderne): il bordo inferiore lo si vede dai
         // pixel, dove il colore della barra cambia (due strisce uguali: niente icone di mezzo)
         // e barre che all'hit test continuano un po' sotto a quella che si vede (Brave: 46 px contro 40): vince il pixel
@@ -731,7 +898,7 @@ private:
     // altrimenti chiesti alla finestra stessa (PrintWindow: la disegna intera, anche se coperta)
     // stampa = si puo' chiedere alla finestra con PrintWindow (la fa ridisegnare: solo quando serve davvero)
     // asincrono = dallo schermo con il lettore in sottofondo (l'ultima lettura, senza aspettare il compositore)
-    bool pixel(HWND h, int x, int y, int w, int hh, std::vector<UINT>& out, bool stampa = true, bool asincrono = false) {
+    bool pixel(HWND h, int x, int y, int w, int hh, std::vector<UINT>& out, bool stampa = true, bool asincrono = false, ULONGLONG eta = 600, bool avvisa = false, ULONGLONG dopo = 0) {
         if (w <= 0 || hh <= 0) return false;
         out.assign((size_t)w * hh, 0);
         const RECT r = {x, y, x + w, y + hh};
@@ -742,11 +909,11 @@ private:
         const bool trasparente = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) && GetLayeredWindowAttributes(h, &ck, &alfa, &fl) && (fl & LWA_ALPHA) && alfa < 250;
         if (trasparente || !so || GetAncestor(so, GA_ROOT) != h) return false;
         HWND sopra = sovrapposta(h, r);
-        if (!sopra) return asincrono ? lettore.leggi(r, out, 600) : pixelGrezzi(h, x, y, w, hh, out, true);
+        if (!sopra) return asincrono ? lettore.leggi(r, out, eta, avvisa, dopo) : pixelGrezzi(h, x, y, w, hh, out, true);
         RECT sr{}; GetWindowRect(sopra, &sr);
         auto fi = fiducie.find(sopra);
         const bool valida = fi != fiducie.end() && fi->second.fino > GetTickCount64() && EqualRect(&fi->second.r, &sr);
-        if (valida && fi->second.ok) return asincrono ? lettore.leggi(r, out, 600) : pixelGrezzi(h, x, y, w, hh, out, true);
+        if (valida && fi->second.ok) return asincrono ? lettore.leggi(r, out, eta, avvisa, dopo) : pixelGrezzi(h, x, y, w, hh, out, true);
         if (!stampa || asincrono) return false;   // (le letture in sottofondo non fanno mai PrintWindow: aspettano)
         if (!pixelGrezzi(h, x, y, w, hh, out, false)) return false;
         if (!valida) {
@@ -768,7 +935,14 @@ private:
         if (W <= 0 || H <= 0 || (!schermo && (x < f.left || y < f.top || x + w > f.right || y + hh > f.bottom))) return false;
         std::vector<UINT> buf;
         bool ok = false;
-        if (schermo) {
+        // dalla striscia gia' letta dalla sonda, se il rettangolo ci sta (niente attesa del compositore qui)
+        const RECT chiesto = {x, y, x + w, y + hh}; RECT dentro{};
+        if (schermo && bandaUsa && bandaUsa->bandaOk && IntersectRect(&dentro, &chiesto, &bandaUsa->bandaR) && EqualRect(&dentro, &chiesto)) {
+            const RECT& b = bandaUsa->bandaR; const int bw = b.right - b.left;
+            buf.resize((size_t)w * hh);
+            for (int yy = 0; yy < hh; yy++) memcpy(buf.data() + (size_t)yy * w, bandaUsa->banda.data() + (size_t)(y - b.top + yy) * bw + (x - b.left), (size_t)w * 4);
+            ok = true;
+        } else if (schermo) {
             HDC s = GetDC(nullptr), mem = CreateCompatibleDC(s);
             BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), W, -H, 1, 32, BI_RGB, 0, 0, 0, 0, 0};
             void* bits = nullptr; HBITMAP dib = CreateDIBSection(s, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
@@ -818,14 +992,14 @@ private:
     // colore della barra del titolo appena a sinistra dei tasti: con lui si coprono i tasti originali.
     // Dallo schermo se li' si vede solo la finestra, altrimenti chiesto a lei (vedi pixel()).
     // asincrono: l'ultima lettura del lettore in sottofondo (gia' c'e' un colore: aggiornarlo puo' aspettare 50 ms)
-    void leggiColore(Capsula& c, bool stampa = true, bool asincrono = false) {
+    void leggiColore(Capsula& c, bool stampa = true, bool asincrono = false, ULONGLONG eta = 600, bool avvisa = false, ULONGLONG dopo = 0) {
         // La striscia verticale della barra subito a sinistra della capsula: il fondo copia sfumature e righe della barra
         // (un colore solo faceva un alone). Si prendono due strisce a 8 px di distanza: se non coincidono li' c'e'
         // un'icona o un testo dell'app, e si resta al colore unico. Il colore unico e' quello della striscia
         // all'altezza del centro della capsula (fuori dalla sua finestra, che altrimenti si leggerebbe)
         const int hh = c.tasti.bottom - c.tasti.top, xs = c.tasti.left - 3;
         std::vector<UINT> px;
-        if (hh > 0 && pixel(c.bersaglio, xs - 8, c.tasti.top, 9, hh, px, stampa, asincrono)) {
+        if (hh > 0 && pixel(c.bersaglio, xs - 8, c.tasti.top, 9, hh, px, stampa, asincrono, eta, avvisa, dopo)) {
             bool uguali = true;
             for (int y = 0; y < hh && uguali; y++) {
                 const UINT a = px[y * 9 + 8], b = px[y * 9];
@@ -847,14 +1021,15 @@ private:
     std::vector<HWND> daDistruggere;
 
     int contaMisure = 0, contaColori = 0, contaFinestre = 0;   // diagnostica dell'ultimo aggiorna
+    double tDisegno = 0, tPos = 0, tColore = 0, tApplica = 0, tScelta = 0;   // ... e dove e' andato il tempo (ms)
 
     void aggiorna() {
         if (dentroAggiorna) { programma(30); return; }
         dentroAggiorna++;
-        const double t0 = adessoMs(); contaMisure = contaColori = contaFinestre = 0;
+        const double t0 = adessoMs(); contaMisure = contaColori = contaFinestre = 0; tDisegno = tPos = tColore = tApplica = tScelta = 0;
         aggiornaTutte();
         const double d = adessoMs() - t0;
-        if (d > 8 && registro) { char b[140]; snprintf(b, 140, "capsule: aggiorna %.1f ms (%d finestre, %d misure, %d letture del colore)", d, contaFinestre, contaMisure, contaColori); scrivi(b); }
+        if (d > 8 && registro) { char b[220]; snprintf(b, 220, "capsule: aggiorna %.1f ms (%d finestre, %d misure, %d letture del colore; disegno %.1f, posto %.1f, colore %.1f, misure %.1f, scelta %.1f)", d, contaFinestre, contaMisure, contaColori, tDisegno, tPos, tColore, tApplica, tScelta); scrivi(b); }
         dentroAggiorna--;
         std::vector<HWND> via; via.swap(daDistruggere);
         for (HWND h : via) distrutta(h);
@@ -868,7 +1043,8 @@ private:
         std::vector<HWND> viste;
         bool rileggi = false;
         for (HWND h = GetTopWindow(nullptr); h; h = GetWindow(h, GW_HWNDNEXT)) {
-            if (!daMostrare(h)) continue;
+            const double tm0 = adessoMs(); const bool mostra = daMostrare(h); tScelta += adessoMs() - tm0;
+            if (!mostra) continue;
             viste.push_back(h); contaFinestre++;
             auto it = capsule.find(h);
             if (it == capsule.end()) {
@@ -894,22 +1070,36 @@ private:
             // ricontrollo a finestra ferma (dopo una misura fatta coi bordi ricordati): se la capsula risulta fuori posto
             // la si sposta, altrimenti non si tocca (niente sfarfallio)
             if (c.verificaAlle && GetTickCount64() >= c.verificaAlle && c.misurata && c.provata && EqualRect(&v, &c.ultimoVisibile)) {
-                c.verificaAlle = 0;
-                Capsula prova = c; prova.forzata = 0;
-                if (misura(prova) && (!EqualRect(&prova.tasti, &c.tasti) || prova.bordoDx != c.bordoDx || prova.bordoSu != c.bordoSu || prova.zoom != c.zoom)) {
-                    c.tasti = prova.tasti; c.bordoDx = prova.bordoDx; c.bordoSu = prova.bordoSu; c.inset = prova.inset; c.insetOk = true;
-                    c.r = prova.r; c.cy = prova.cy; c.oL = prova.oL; c.oB = prova.oB; c.zoom = prova.zoom;
-                    ridisegna = true; c.visibile = false;   // si ridisegna e si rimette al posto giusto
-                    if (registro) { char b[96]; snprintf(b, 96, "capsula %p corretta dopo il controllo", (void*)h); scrivi(b); }
+                // la misura la fa la sonda: qui si chiede, e al suo messaggio si confronta
+                std::shared_ptr<Sonda> s = sondaFinita(c, true);
+                if (!s && !c.sonda && !chiediSonda(c, true)) { s = std::make_shared<Sonda>(); Capsula p = c; p.forzata = 0; prepara(p, *s); sonda(*s, uia); }
+                if (s) {
+                    c.verificaAlle = 0;
+                    Capsula prova = c; prova.forzata = 0;
+                    if (EqualRect(&s->fr, &v) && applica(prova, *s) &&
+                        (!EqualRect(&prova.tasti, &c.tasti) || prova.bordoDx != c.bordoDx || prova.bordoSu != c.bordoSu || prova.zoom != c.zoom)) {
+                        c.tasti = prova.tasti; c.bordoDx = prova.bordoDx; c.bordoSu = prova.bordoSu; c.inset = prova.inset; c.insetOk = true;
+                        c.r = prova.r; c.cy = prova.cy; c.oL = prova.oL; c.oB = prova.oB; c.zoom = prova.zoom;
+                        ridisegna = true; c.visibile = false;   // si ridisegna e si rimette al posto giusto
+                        if (registro) { char b[96]; snprintf(b, 96, "capsula %p corretta dopo il controllo", (void*)h); scrivi(b); }
+                    }
                 }
             } else if (c.verificaAlle && GetTickCount64() < c.verificaAlle) programma((UINT)(c.verificaAlle - GetTickCount64() + 30));
             if (!c.provata || !EqualRect(&v, &c.ultimoVisibile)) {
                 if (!EqualRect(&v, &c.ultimoVisibile)) c.riprove = 0;
                 nascondi(c, "rimisura");
-                c.provata = true;
-                const double t0 = adessoMs(); colpiFatti = 0; contaMisure++;
-                c.misurata = misura(c);
-                if (registro) { char b[120]; snprintf(b, 120, "capsula %p: misura con %d hit test in %.1f ms", (void*)h, colpiFatti, adessoMs() - t0); scrivi(b); }
+                // la misura la fa la sonda in sottofondo: la prima volta si chiede e si passa alle altre finestre; al suo
+                // messaggio (aggiorna di nuovo) si finisce qui. Se nel frattempo la finestra si e' mossa, si richiede
+                if (c.sonda && !c.sonda->fatta.load(std::memory_order_acquire)) continue;   // in corso
+                std::shared_ptr<Sonda> s = sondaFinita(c, false);
+                if (s && !EqualRect(&s->fr, &v)) s = nullptr;
+                if (!s) {
+                    if (chiediSonda(c, false)) continue;
+                    s = std::make_shared<Sonda>(); prepara(c, *s); sonda(*s, uia);   // (nessuna sonda: qui)
+                }
+                c.provata = true; contaMisure++;
+                { const double ta0 = adessoMs(); c.misurata = applica(c, *s); tApplica += adessoMs() - ta0; }
+                if (registro) { char b[120]; snprintf(b, 120, "capsula %p: misura con %d hit test in %.1f ms (in sottofondo)", (void*)h, s->colpi, s->ms); scrivi(b); }
                 if (!c.misurata) {
                     c.ultimoVisibile = v;
                     if (registro) { char b[80]; snprintf(b, 80, "capsula %p: tasti non trovati", (void*)h); scrivi(b); }
@@ -923,13 +1113,28 @@ private:
                 // il colore si rilegge piu' volte nei primi secondi e a ogni cambio di primo piano (il punto letto e'
                 // fuori dalla capsula, quindi anche con la capsula visibile)
                 const COLORREF prima = c.fondo;
-                // (sincrona: dopo un cambio di attivazione serve il colore di adesso, a dissolvenza finita; sono poche,
-                // quattro per cambio. In sottofondo resta il controllo ogni 50 ms della finestra in primo piano)
-                leggiColore(c); contaColori++;
+                // Dallo schermo serve una lettura recente, a dissolvenza finita: la fa il lettore in sottofondo (un BitBlt
+                // dallo schermo aspetta il compositore, ~6 ms l'uno: a ogni cambio di finestra attiva erano 12-18 ms
+                // fermi sul thread principale). Quando ha letto avvisa, e qui si usa la lettura: solo se fatta dopo il
+                // cambio (numero della lettura, non l'ora: il contatore di Windows va a scatti di 15 ms) e recente.
+                // Riletture a 120 ms e poi ogni 250 ms: l'ultima e' a dissolvenza finita.
+                // (La prima lettura di una capsula, senza ancora nessun colore vero, resta qui: puo' servire PrintWindow)
+                const ULONGLONG ora = GetTickCount64();
+                if (ridisegna) { c.prossimoColore = 0; c.coloreDopo = lettore.ultimo(); }
+                if (!c.coloreVero) { const double tc0 = adessoMs(); leggiColore(c); tColore += adessoMs() - tc0; contaColori++; }
+                else if (ora >= c.prossimoColore) {
+                    const int letti = c.campioni;
+                    leggiColore(c, false, true, 150, true, c.coloreDopo);
+                    if (c.campioni > letti) {
+                        // seconda rilettura presto (la dissolvenza di Windows dura ~200 ms), poi ogni 250 ms
+                        const ULONGLONG passo = c.campioni == 1 ? 120 : 250;
+                        contaColori++; c.prossimoColore = ora + passo; c.coloreDopo = lettore.ultimo(); if (c.campioni < 4) programma((UINT)passo + 10);
+                    }
+                } else programma((UINT)(c.prossimoColore - ora + 10));
                 if (c.fondo != prima) ridisegna = true;
             }
             if (!c.misurata) continue;
-            if (ridisegna || !c.visibile) disegna(c);
+            if (ridisegna || !c.visibile) { const double td0 = adessoMs(); disegna(c); tDisegno += adessoMs() - td0; }
             if (c.zoom == (IsZoomed(h) != FALSE) && !c.verificaAlle && c.forzata <= GetTickCount64()) ricorda(c);
             // subito sopra la sua finestra (sopra a quella che le sta davanti, se c'e', non va)
             const bool inCima = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
@@ -938,8 +1143,10 @@ private:
                 // gia' al suo posto nell'ordine (anche da nascosta): solo mostrarla. "Dopo se stessa" Windows lo rifiuta
                 const bool alPosto = sopraDi == c.fin;
                 HWND dopo = alPosto ? nullptr : (sopraDi ? sopraDi : (inCima ? HWND_TOPMOST : HWND_TOP));
+                const double tp0 = adessoMs();
                 const BOOL ok = SetWindowPos(c.fin, dopo, c.tasti.left, c.tasti.top, c.tasti.right - c.tasti.left, c.tasti.bottom - c.tasti.top,
                                              SWP_NOACTIVATE | SWP_SHOWWINDOW | (alPosto ? SWP_NOZORDER : 0));
+                tPos += adessoMs() - tp0;
                 c.visibile = ok && IsWindowVisible(c.fin);
                 if (!c.visibile && registro) { char b[80]; snprintf(b, 80, "capsula %p non mostrata (errore %lu)", (void*)h, GetLastError()); scrivi(b); }
             }
@@ -1243,6 +1450,7 @@ private:
         if (m == WM_TIMER && w == 1) { if (Motore* d = gIstanza()) d->aggiorna(); return 0; }
         if (m == WM_TIMER && w == 2) { if (Motore* d = gIstanza()) d->passoVolo(); return 0; }
         if (m == WM_TIMER && w == 3) { if (Motore* d = gIstanza()) d->controlloColore(); return 0; }
+        if (m == WM_APP + 20) { if (Motore* d = gIstanza()) d->aggiorna(); return 0; }   // una sonda ha finito
         return DefWindowProcW(h, m, w, l);
     }
 
