@@ -18,6 +18,7 @@
 #include <uiautomationclient.h>
 #include "stampa.h"
 #include "scala.h"
+#include "suggerimento.h"
 #include <cmath>
 #include <algorithm>
 #include <unordered_map>
@@ -521,6 +522,7 @@ private:
     }
 
     void nascondi(Capsula& c, const char* motivo = "") {
+        if (c.visibile && c.mouseDentro) sugg.nascondi();
         if (c.visibile) {
             ShowWindow(c.fin, SW_HIDE); c.visibile = false;
             if (registro) { char b[96]; snprintf(b, 96, "capsula %p nascosta (%s)", (void*)c.bersaglio, motivo); scrivi(b); }
@@ -529,8 +531,21 @@ private:
     }
 
     // finestra da coprire con la capsula adesso?
+    // Contrasto elevato di Windows acceso: la capsula (vetro, colori suoi) non lo rispetterebbe, restano i tasti
+    // originali. Letto al massimo ogni 2 s
+    static bool contrastoElevato() {
+        static ULONGLONG letto = 0; static bool si = false;
+        const ULONGLONG ora = GetTickCount64();
+        if (ora - letto > 2000) {
+            HIGHCONTRASTW hc{}; hc.cbSize = sizeof(hc);
+            si = SystemParametersInfoW(SPI_GETHIGHCONTRAST, sizeof(hc), &hc, 0) && (hc.dwFlags & HCF_HIGHCONTRASTON);
+            letto = ora;
+        }
+        return si;
+    }
+
     bool daMostrare(HWND h) const {
-        if (sospese || spenta || !IsWindowVisible(h) || IsIconic(h) || (idonea && !idonea(h))) return false;
+        if (sospese || spenta || contrastoElevato() || !IsWindowVisible(h) || IsIconic(h) || (idonea && !idonea(h))) return false;
         DWORD cl = 0; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cl, sizeof(cl));
         if (cl) return false;
         auto it = capsule.find(h);
@@ -979,12 +994,42 @@ private:
         return p;
     }
 
+    // Tasto sotto il punto. L'area cliccabile e' piu' grande del cerchio disegnato (22 px di diametro, piccolo per un
+    // bersaglio in alto a destra dove si va di fretta): tutta l'altezza della capsula e meta' dello spazio verso i
+    // tasti vicini (ai lati, fino a un passo intero)
     int tastoIn(const Capsula& c, int x, int y) const {
         const float W = (float)(c.tasti.right - c.tasti.left), Hh = (float)(c.tasti.bottom - c.tasti.top);
         float cx[3], r; geometria(c, W, Hh, cx, r);
-        for (int i = 0; i < 3; i++) if (std::hypot(x - cx[i], y - c.cy) <= r + 4) return i;
-        return -1;
+        if (y < 0 || y >= Hh) return -1;
+        const float passo = cx[1] - cx[0], meta = passo / 2;
+        if (x < cx[0] - std::max(meta, r + 4) || x > cx[2] + std::max(meta, r + 4)) return -1;
+        int migliore = -1; float dmin = 1e9f;
+        for (int i = 0; i < 3; i++) { const float d = std::abs(x - cx[i]); if (d < dmin) { dmin = d; migliore = i; } }
+        return migliore;
     }
+
+    // suggerimento del tasto i (sotto di lui) o, sul tasto ingrandisci della finestra in primo piano, Snap Layouts di
+    // Windows (la capsula copre il tasto vero, che lo mostrerebbe al passaggio del mouse)
+    void suggerisci(Capsula& c, int i) {
+        if (i < 0 || !c.visibile) return;
+        HWND h = c.bersaglio;
+        if (i == 1 && GetForegroundWindow() == h && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) {
+            // Win+Z: il menu dei layout di Snap per la finestra attiva, vicino al suo tasto ingrandisci
+            INPUT in[4]{};
+            for (auto& x : in) x.type = INPUT_KEYBOARD;
+            in[0].ki.wVk = VK_LWIN; in[1].ki.wVk = 'Z';
+            in[2].ki.wVk = 'Z'; in[2].ki.dwFlags = KEYEVENTF_KEYUP;
+            in[3].ki.wVk = VK_LWIN; in[3].ki.dwFlags = KEYEVENTF_KEYUP;
+            SendInput(4, in, sizeof(INPUT));
+            return;
+        }
+        const float W = (float)(c.tasti.right - c.tasti.left), Hh = (float)(c.tasti.bottom - c.tasti.top);
+        float cx[3], r; geometria(c, W, Hh, cx, r);
+        const wchar_t* testi[3] = {L"Riduci a icona", IsZoomed(h) ? L"Ripristina" : L"Ingrandisci", L"Chiudi"};
+        const float sc = scalaDi(h);
+        sugg.mostra(testi[i], c.tasti.left + (int)cx[i], c.tasti.top + (int)(c.cy + r + 8 * sc), sc);
+    }
+    suggerimento::Suggerimento sugg;
 
     void disegna(Capsula& c) {
         disegnaE(c, [&](HDC scr, HDC mem, const void*, int W, int Hh) {
@@ -1203,14 +1248,25 @@ private:
             case WM_MOUSEMOVE: {
                 if (!c.mouseDentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, h, 0}; TrackMouseEvent(&tm); c.mouseDentro = true; }
                 const int s = d->tastoIn(c, GET_X_LPARAM(l), GET_Y_LPARAM(l));
-                if (s != c.sopra) { c.sopra = s; d->disegna(c); }
+                if (s != c.sopra) {
+                    c.sopra = s; d->disegna(c);
+                    // suggerimento (o Snap Layouts) dopo mezzo secondo fermi sullo stesso tasto
+                    KillTimer(h, 7); d->sugg.nascondi();
+                    if (s >= 0 && c.premuto < 0) SetTimer(h, 7, 550, nullptr);
+                }
                 return 0;
             }
+            case WM_TIMER:
+                if (w == 7) { KillTimer(h, 7); if (c.sopra >= 0 && c.premuto < 0) d->suggerisci(c, c.sopra); return 0; }
+                break;
             case WM_MOUSELEAVE:
                 c.mouseDentro = false;
+                KillTimer(h, 7); d->sugg.nascondi();
                 if (c.sopra >= 0 || c.premuto >= 0) { c.sopra = c.premuto = -1; if (c.visibile) d->disegna(c); }
                 return 0;
-            case WM_LBUTTONDOWN: c.premuto = d->tastoIn(c, GET_X_LPARAM(l), GET_Y_LPARAM(l)); SetCapture(h); d->disegna(c); return 0;
+            case WM_LBUTTONDOWN:
+                KillTimer(h, 7); d->sugg.nascondi();
+                c.premuto = d->tastoIn(c, GET_X_LPARAM(l), GET_Y_LPARAM(l)); SetCapture(h); d->disegna(c); return 0;
             case WM_LBUTTONUP: {
                 ReleaseCapture();
                 const int s = d->tastoIn(c, GET_X_LPARAM(l), GET_Y_LPARAM(l)), p = c.premuto;

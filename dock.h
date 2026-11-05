@@ -24,6 +24,7 @@
 #include <dwmapi.h>
 #include "raggio.h"
 #include "sistema.h"
+#include "pool.h"
 #include "widget.h"
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
@@ -2628,9 +2629,8 @@ private:
     }
     void inSottofondo(std::function<void()> fai, std::function<void()> applica) {
         Sottofondo* l = new Sottofondo{std::move(fai), std::move(applica), icone};
-        HANDLE t = CreateThread(nullptr, 0, threadSottofondo, l, 0, nullptr);
-        if (t) { SetThreadPriority(t, THREAD_PRIORITY_BELOW_NORMAL); CloseHandle(t); }
-        else { l->fai(); l->applica(); delete l; }   // senza thread: subito, come prima
+        // nel pool di thread (vedi pool.h); se non parte, subito qui, come prima
+        if (!pool::lancia(threadSottofondo, l, THREAD_PRIORITY_BELOW_NORMAL, true)) { l->fai(); l->applica(); delete l; }
     }
 
     void chiediIcona(const std::wstring& percorso, int lato) {

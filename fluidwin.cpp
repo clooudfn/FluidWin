@@ -975,9 +975,10 @@ static void suCreata(HWND h) {
     spegniTransizioniNative(h);
     SetPropW(h, PROP_NASCOSTA, (HANDLE)1);   // prima del thread: se FluidWin si chiudesse male, il guardiano la rimette a posto
     InterlockedIncrement(&gNascondendo);
-    const HANDLE t = CreateThread(nullptr, 0, nascondiNata, h, 0, nullptr);
-    if (!t) { InterlockedDecrement(&gNascondendo); RemovePropW(h, PROP_NASCOSTA); riaccendiTransizioniNative(h); return; }
-    CloseHandle(t);
+    // nel pool di thread (vedi pool.h): "lungo" perche' aspetta l'app, che puo' essere ancora occupata ad avviarsi
+    if (!pool::lancia(nascondiNata, h, THREAD_PRIORITY_NORMAL, true)) {
+        InterlockedDecrement(&gNascondendo); RemovePropW(h, PROP_NASCOSTA); riaccendiTransizioniNative(h); return;
+    }
     Attesa& a = gInAttesa[h] = {ora()};
     // Foto dello sfondo subito, senza aspettare il thread (un'attesa di pochi ms ne dura 15: la risoluzione dei timer
     // di Windows, e intanto la finestra compariva). Se il thread finisce prima, la copertura non si disegna mai.

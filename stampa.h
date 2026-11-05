@@ -7,6 +7,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include "pool.h"
 #include <algorithm>
 #include <vector>
 
@@ -63,10 +64,8 @@ inline Lavoro* avvia(HWND h, int w, int hh, int priorita = THREAD_PRIORITY_NORMA
     if (w <= 0 || hh <= 0 || !IsWindow(h) || IsHungAppWindow(h)) return nullptr;
     if (!prenota(h)) return nullptr;   // ce n'e' gia' una ferma su questa finestra
     Lavoro* l = new Lavoro{h, w, hh, {}, FALSE, CreateEventW(nullptr, TRUE, FALSE, nullptr), 2};
-    HANDLE t = l->fatto ? CreateThread(nullptr, 0, thread, l, 0, nullptr) : nullptr;
-    if (!t) { if (l->fatto) CloseHandle(l->fatto); delete l; libera(h); return nullptr; }
-    SetThreadPriority(t, priorita);
-    CloseHandle(t);
+    // nel pool di thread (vedi pool.h): "lungo" perche' con un'app bloccata PrintWindow puo' non tornare per molto
+    if (!l->fatto || !pool::lancia(thread, l, priorita, true)) { if (l->fatto) CloseHandle(l->fatto); delete l; libera(h); return nullptr; }
     return l;
 }
 inline bool pronta(Lavoro* l) { return l && WaitForSingleObject(l->fatto, 0) == WAIT_OBJECT_0; }
