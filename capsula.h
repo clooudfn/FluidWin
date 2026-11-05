@@ -1051,6 +1051,16 @@ public:
         dipingi(c, ox, oy, w, hh, px);
     }
 
+    // Dove sopraFoto dipinge la capsula sulla foto di quella finestra (pixel della foto, rettangolo visibile 'visibile'):
+    // sulle immagini vive della gelatina quella parte si ricopia dalla foto. false: nessuna capsula
+    bool areaFoto(HWND h, const RECT& visibile, RECT& out) const {
+        auto it = capsule.find(h);
+        if (spenta || it == capsule.end() || !it->second.misurata) return false;
+        const RECT& t = it->second.tasti;
+        out = {t.left - visibile.left, t.top - visibile.top, t.right - visibile.left, t.bottom - visibile.top};
+        return out.right > out.left && out.bottom > out.top;
+    }
+
     // Il colore della barra preso dalla foto, subito a sinistra della capsula (come leggiColore dallo schermo): il fondo
     // combacia con quello che si vede anche se la foto e' stata fatta a meta' di una dissolvenza attiva/inattiva
     static void coloreDaFoto(Capsula& c, int ox, int oy, int w, int hh, const unsigned int* px) {

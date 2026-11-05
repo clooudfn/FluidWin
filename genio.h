@@ -84,8 +84,10 @@ float4 ps(VO i) : SV_TARGET {
         // distanza dal bordo dell'ellisse, in pixel a schermo circa (il raggio piu' piccolo fa da scala)
         m = saturate((1.0 - length(d)) * min(r2.x, r2.y) + 0.5);
     }
+    // le foto sono opache (alfa 1); le immagini vive di Windows.Graphics.Capture sono premoltiplicate, con il bordo
+    // sottile di DWM semitrasparente e gli angoli gia' tondi: si rispetta la loro trasparenza
     float a = m * alfa;
-    return float4(c.rgb * a, a);
+    return float4(c.rgb * a, c.a * a);
 }
 )";
 
@@ -346,6 +348,25 @@ public:
         }
         controllaPresent(sc->Present(1, 0));
     }
+
+    // GPU e contesto del genio (le immagini vive della gelatina arrivano qui, senza passare dal processore)
+    ID3D11Device* dispositivo() const { return dev; }
+    ID3D11DeviceContext* contesto() const { return ctx; }
+
+    // dst diventa una copia di src (stessa misura, stessi livelli di dettaglio), pronta a ricevere le immagini vive
+    bool copia(const Immagine& src, Immagine& dst) {
+        dst.libera();
+        if (!src.tex) return false;
+        D3D11_TEXTURE2D_DESC td{}; src.tex->GetDesc(&td);
+        if (FAILED(dev->CreateTexture2D(&td, nullptr, &dst.tex))) return false;
+        ctx->CopyResource(dst.tex, src.tex);
+        if (FAILED(dev->CreateShaderResourceView(dst.tex, nullptr, &dst.srv))) { dst.libera(); return false; }
+        dst.w = src.w; dst.h = src.h;
+        return true;
+    }
+
+    // dopo aver cambiato il livello principale di un'immagine: si rifanno quelli piu' piccoli (rimpicciolita resta morbida)
+    void rifaiMips(Immagine& i) { if (i.srv) ctx->GenerateMips(i.srv); }
 
     // Pulisce l'overlay (nessun contenuto) senza nasconderlo
     void svuota() {

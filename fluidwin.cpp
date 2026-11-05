@@ -27,6 +27,8 @@
 #include <algorithm>
 #include <atomic>
 #include "genio.h"
+#include "viva.h"
+#include <memory>
 #include "dock.h"
 #include "capsula.h"
 #include "menu.h"
@@ -663,12 +665,80 @@ struct Gelatina {
     double tFase = 0, tUltimo = 0;
     double alza = 0;              // 0..1: l'ombra passa da "posata" a "sollevata" mentre la si tiene (e torna lasciandola)
     std::vector<genio::Vertice> maglia, ombra;
+    // contenuto vivo (Windows.Graphics.Capture): mentre la si trascina si vede la finestra com'e' adesso. 'viva' parte
+    // come copia della foto e riceve le immagini nuove, con sopra la capsula ricopiata dalla foto
+    std::shared_ptr<viva::Cattura> cattura;   // condivisa col thread che la avvia
+    bool vivaControllata = false; double tViva = 0;
+    genio::Immagine viva;
+    bool vivaPronta = false;      // e' arrivata almeno un'immagine viva: si disegna 'viva' invece di 'foto'
+    RECT capsula{};               // dove la foto ha la capsula (pixel della foto): si ricopia sulle immagini vive
+    int immaginiVive = 0;
 };
 static std::list<Gelatina> gGelatine;
 
 static Gelatina* gelatinaDi(HWND h) {
     for (auto& g : gGelatine) if (g.hwnd == h) return &g;
     return nullptr;
+}
+
+// Contenuto vivo della gelatina: parte all'inizio del trascinamento (e quando la si riafferra), si ferma quando
+// ricompare la finestra vera. Si avvia in sottofondo (35-55 ms dentro Windows): fino ad allora si vede la foto.
+// Se non si puo' (Windows vecchio, finestra protetta, misure diverse) resta la foto
+static void avviaViva(Gelatina& g) {
+    if (g.cattura) return;   // in avvio o gia' attiva
+    // finestre che chiedono di non essere catturate (password manager, app protette): si rispetta, resta la foto
+    DWORD aff = WDA_NONE;
+    if (GetWindowDisplayAffinity(g.hwnd, &aff) && aff != WDA_NONE) { logf("gelatina %p: finestra protetta, niente contenuto vivo", g.hwnd); return; }
+    if (!g.viva.tex && !gGenio.copia(g.foto, g.viva)) return;
+    g.cattura = std::make_shared<viva::Cattura>();
+    g.vivaControllata = false; g.tViva = ora();
+    viva::avviaInSottofondo(g.cattura, gGenio.dispositivo(), g.hwnd);
+}
+
+static void fermaViva(Gelatina& g) {
+    if (!g.cattura) return;
+    if (g.cattura->attiva()) logf("gelatina %p: contenuto vivo fermato (%d immagini)", g.hwnd, g.immaginiVive);
+    g.cattura.reset();   // ancora in avvio: la chiude il thread dell'avvio quando ha finito
+}
+
+// appena pronta: le immagini devono combaciare con la foto pixel per pixel, e la capsula va ricopiata sopra
+static bool controllaViva(Gelatina& g) {
+    if (g.vivaControllata) return true;
+    const int st = g.cattura->statoAvvio();
+    if (st == 0) return false;   // ancora in avvio
+    if (st < 0) { logf("gelatina %p: contenuto vivo non disponibile", g.hwnd); g.cattura.reset(); return false; }
+    if (g.cattura->larghezza() != g.viva.w || g.cattura->altezza() != g.viva.h) {
+        logf("gelatina %p: contenuto vivo %dx%d diverso dalla foto %dx%d, resta la foto", g.hwnd, g.cattura->larghezza(), g.cattura->altezza(), g.viva.w, g.viva.h);
+        g.cattura.reset(); return false;
+    }
+    // la capsula: nelle immagini vive ci sono i tasti originali, si ricopre con quella dipinta sulla foto
+    g.capsula = RECT{};
+    RECT c{};
+    if (gCapsulaOk && gCapsula.areaFoto(g.hwnd, g.inizio, c)) {
+        const RECT foto = {0, 0, g.foto.w, g.foto.h};
+        IntersectRect(&g.capsula, &c, &foto);
+        // l'ultima riga dell'area cade gia' sul contenuto della finestra: dalla foto resterebbe una riga del colore di
+        // prima sotto la capsula (si vedeva una linea sottile). Quella riga la danno le immagini vive
+        if (g.capsula.bottom - g.capsula.top > 4) g.capsula.bottom--;
+    }
+    g.vivaControllata = true;
+    logf("gelatina %p: contenuto vivo pronto dopo %.0f ms, capsula %ld,%ld-%ld,%ld", g.hwnd, (ora() - g.tViva) * 1000,
+         g.capsula.left, g.capsula.top, g.capsula.right, g.capsula.bottom);
+    return true;
+}
+
+// l'ultima immagine arrivata (se ce n'e' una nuova) va in 'viva', con la capsula della foto ricopiata sopra
+static void aggiornaViva(Gelatina& g) {
+    if (!g.cattura || !g.viva.tex || !controllaViva(g)) return;
+    ID3D11DeviceContext* ctx = gGenio.contesto();
+    if (!g.cattura->copia(ctx, g.viva.tex, 0, 0, RECT{0, 0, g.viva.w, g.viva.h})) return;
+    const RECT& r = g.capsula;
+    if (r.right > r.left && r.bottom > r.top) {
+        D3D11_BOX box{(UINT)r.left, (UINT)r.top, 0, (UINT)r.right, (UINT)r.bottom, 1};
+        ctx->CopySubresourceRegion(g.viva.tex, 0, (UINT)r.left, (UINT)r.top, 0, g.foto.tex, 0, &box);
+    }
+    gGenio.rifaiMips(g.viva);
+    g.vivaPronta = true; g.immaginiVive++;
 }
 
 // rettangolo visibile della gelatina adesso: quello della finestra meno i bordi invisibili misurati all'inizio
@@ -704,6 +774,7 @@ static void suInizioSpostamento(HWND h) {
         g->lasciata = false;
         if (g->fase >= 2) { g->rinascondi = true; g->fotogrammi = 0; }   // la foto torna a schermo, poi sparisce la finestra
         g->fase = 0;
+        avviaViva(*g);   // si era fermato quando era ricomparsa la finestra vera
         logf("gelatina ripresa %p", h);
         return;
     }
@@ -737,6 +808,7 @@ static void suInizioSpostamento(HWND h) {
     }
     g.tUltimo = ora();
     gGelatine.push_back(std::move(g));
+    avviaViva(gGelatine.back());
     logf("gelatina pronta %p (foto %.1f ms)", h, (ora() - t1) * 1000);
 }
 
@@ -748,6 +820,7 @@ static void suFineSpostamento(HWND h) {
 
 static void liberaGelatina(Gelatina& g) {
     if (g.nascosta && IsWindow(g.hwnd)) rendiVisibileFinestra(g.hwnd);
+    fermaViva(g); g.viva.libera();
     g.foto.libera();
 }
 
@@ -807,6 +880,7 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
                     g.vx[k] = g.vy[k] = 0;
                 }
                 g.fase = 2; g.tFase = t;
+                fermaViva(g);   // ricompare la finestra vera: per la dissolvenza basta l'ultima immagine
                 if (gCapsulaOk) gCapsula.mostraPer(g.hwnd);   // la finestra vera ricompare: capsula e angoli con lei
                 if (gAngoliOk) gAngoli.mostraPer(g.hwnd);
             }
@@ -857,12 +931,14 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
                 const double u = (double)ci / (GEL_C - 1) + sx * M / fw, vv = (double)ri / (GEL_R - 1) + sy * M / fh;
                 g.ombra[r * OC + c] = {(float)(g.x[k] + sx * M), (float)(g.y[k] + sy * M), (float)u, (float)vv};
             }
+            if (g.fase <= 1) aggiornaViva(g);   // trascinata o in assestamento: la finestra com'e' adesso
+            const genio::Immagine* img = g.vivaPronta ? &g.viva : &g.foto;
             if (alfaFoto > 0) {
-                genio::Elemento o{&g.foto, v, v, 0, alfaFoto * alfaOmbra};   // l'ombra vera torna con la finestra
+                genio::Elemento o{img, v, v, 0, alfaFoto * alfaOmbra};   // l'ombra vera torna con la finestra
                 o.maglia = g.ombra.data(); o.colonne = OC; o.righe = OR; o.ombra = true; o.alza = morbido(g.alza);
                 o.raggio = raggioDi(g.hwnd);
                 elementi.push_back(o);
-                genio::Elemento e{&g.foto, v, v, 0, alfaFoto};
+                genio::Elemento e{img, v, v, 0, alfaFoto};
                 e.maglia = g.maglia.data(); e.colonne = GEL_C; e.righe = GEL_R; e.raggio = o.raggio;
                 elementi.push_back(e);
             }
@@ -1520,8 +1596,12 @@ static bool preparaCopia(HWND h, InfoFinestra& i) {
         if (it->hwnd != h) continue;
         if (it->fase < 2) return false;   // ancora trascinata
         liberaFoto(h);
-        if (it->nascosta) { gFoto[h] = it->foto; alfaFinestra(h, 255); daGelatina = true; }
-        else it->foto.libera();
+        // con il contenuto vivo, l'ultima immagine (com'e' la finestra adesso) invece della foto di inizio trascinamento
+        genio::Immagine& usata = it->vivaPronta ? it->viva : it->foto;
+        genio::Immagine& altra = it->vivaPronta ? it->foto : it->viva;
+        altra.libera();
+        if (it->nascosta) { gFoto[h] = usata; alfaFinestra(h, 255); daGelatina = true; }
+        else usata.libera();
         gGelatine.erase(it);
         logf("genio: foto presa dalla gelatina %p", h);
         break;
@@ -2420,6 +2500,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetLayeredWindowAttributes(gOverlay, 0, 255, LWA_ALPHA);
     aggiornaOrigine();
     gGenioOk = gGenio.inizializza(inst);   // senza GPU disponibile resta l'animazione a molla
+    if (gGenioOk) viva::proteggi(gGenio.contesto());   // la GPU del genio la usa anche la cattura del contenuto vivo
     logf("genio disponibile: %d", (int)gGenioOk);
     salvaStatoBarra();                      // prima che il dock nasconda la barra di Windows
     gDock.riduci = riduciDalDock;
