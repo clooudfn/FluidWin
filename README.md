@@ -7,12 +7,17 @@ alive and more pleasant to use. So I started redesigning it, one piece at a time
 
 The result is an app that sits on top of Windows 11 and changes how it looks and feels:
 
-- a **dock** instead of the taskbar;
+- a **dock** instead of the taskbar, with **App** on the left and the **control center** on the right. It follows you
+  to another screen when you bring the mouse to its bottom edge;
+- a **control center** where everything opens inside the same glass panel: background apps, notifications,
+  weather and news;
+- the time and date in a small **notch** at the top of the screen;
+- new round **window buttons** that sit exactly where the original ones were;
 - windows that **minimize into the dock** with a genie effect, and come back out of it;
-- windows that **open and close** with a little bounce, and turn "jelly-like" while you drag them;
+- windows that **open and close** with a little bounce, and turn "jelly-like" while you drag them (with their content
+  still alive);
 - a **search** (Alt+Tab) that lights up the edges of the screen with a wave of color;
-- an **overview** of all your open windows (Win+Tab);
-- glass panels for volume, notifications, weather and settings.
+- an **overview** of all your open windows (Win+Tab).
 
 When you close it, Windows goes back exactly to how it was.
 
@@ -31,8 +36,8 @@ You need **Windows 11**.
 
 ## How to close it
 
-Right-click the FluidWin icon next to the clock -> **Esci** (Exit). From the same menu you can open the **settings**
-and turn each effect on or off.
+Open the **control center** (the last icon on the right of the dock) -> **In background** -> **FluidWin** -> **Esci**
+(Exit). From the same menu you can open the **settings** and turn each effect on or off.
 
 To remove it completely, close it and delete its folder.
 
@@ -44,7 +49,7 @@ approved every change, until the result matched what I had in mind.
 
 ## Good to know
 
-- This is the **first version**. I tested it thoroughly on my PC, but not on every PC in the world. If something
+- This is still an **early version**. I tested it thoroughly on my PC, but not on every PC in the world. If something
   doesn't work, tell me in the [Issues](../../issues).
 - The interface is in **Italian** for now.
 - It doesn't ask for administrator rights and doesn't touch Windows files.

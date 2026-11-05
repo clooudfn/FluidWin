@@ -3449,10 +3449,27 @@ private:
                 if (b) {
                     rt->FillGeometry(g, b);
                     b->SetColor(D2D1::ColorF(1, 1, 1, 1));
-                    const float xt = x0 + (w - (lo + spazio + lg)) / 2, yt = 1 * dpi;
-                    rt->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fOra, {xt, yt, xt + lo + 2, h - 1 * dpi}, b);
+                    const float xt = x0 + (w - (lo + spazio + lg)) / 2;
+                    // Ora e giorno occupano la stessa altezza: l'ora va dalla cima delle cifre alla linea di base; il
+                    // giorno, piu' piccolo, sale e sotto ha una linea sottile alla stessa linea di base dell'ora
+                    auto lineaBase = [&](IDWriteTextFormat* fmt, const std::wstring& t, float& alto) {
+                        IDWriteTextLayout* l = nullptr; float base = 0; alto = 0;
+                        if (SUCCEEDED(fdw->CreateTextLayout(t.c_str(), (UINT32)t.size(), fmt, 1000, 100, &l))) {
+                            DWRITE_LINE_METRICS lm{}; UINT32 n = 0; l->GetLineMetrics(&lm, 1, &n);
+                            base = lm.baseline; alto = lm.height; l->Release();
+                        }
+                        return base;
+                    };
+                    float altoOra = 0, altoGiorno = 0;
+                    const float bOra = lineaBase(fOra, testoOra, altoOra), bGiorno = lineaBase(fGiorno, testoNotch, altoGiorno);
+                    const float yOra = std::round((h - altoOra) / 2), baseOra = yOra + bOra;     // linea di base dell'ora
+                    const float yGiorno = baseOra - 3 * dpi - bGiorno;                            // il giorno 3 px piu' su
+                    rt->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fOra, {xt, yOra, xt + lo + 2, yOra + altoOra}, b);
                     b->SetColor(D2D1::ColorF(1, 1, 1, 0.66f));
-                    rt->DrawText(testoNotch.c_str(), (UINT32)testoNotch.size(), fGiorno, {xt + lo + spazio, yt, xt + lo + spazio + lg + 2, h - 1 * dpi}, b);
+                    const float xg = xt + lo + spazio;
+                    rt->DrawText(testoNotch.c_str(), (UINT32)testoNotch.size(), fGiorno, {xg, yGiorno, xg + lg + 2, yGiorno + altoGiorno}, b);
+                    b->SetColor(D2D1::ColorF(1, 1, 1, 0.38f));
+                    rt->DrawLine({xg, baseOra + 0.5f}, {xg + lg, baseOra + 0.5f}, b, 1.0f);
                     b->Release();
                 }
             }
