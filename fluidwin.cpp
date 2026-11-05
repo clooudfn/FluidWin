@@ -1954,7 +1954,13 @@ static void gestisciEvento(DWORD ev, HWND h) {
             // la barra di Windows prova a ricomparire (Explorer riavviato, pannelli di sistema): resta nascosta
             wchar_t c[32] = L""; GetClassNameW(h, c, 32);
             if (gDockOk && (!wcscmp(c, L"Shell_TrayWnd") || !wcscmp(c, L"Shell_SecondaryTrayWnd"))) {
-                logf("barra di Windows ricomparsa: la rinascondo"); ShowWindowAsync(h, SW_HIDE); break;
+                // (succede a ogni riduzione e ripristino: Windows la rimette per 7-8 ms, in posizione "a scomparsa", cioe'
+                // 2 px in fondo allo schermo per un fotogramma; misurato con barra.ps1. Impedirlo vorrebbe dire cambiare
+                // stile o trasparenza alla barra di Explorer da fuori: non vale il rischio. Nel registro un riepilogo)
+                ShowWindowAsync(h, SW_HIDE);
+                static int volte = 0; static double ultimo = -1e9; volte++;
+                if (ora() - ultimo > 30) { logf("barra di Windows ricomparsa e rinascosta (%d volte)", volte); ultimo = ora(); volte = 0; }
+                break;
             }
             [[fallthrough]];
         }
