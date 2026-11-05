@@ -1474,7 +1474,9 @@ private:
         if (!dib || !bits) { if (dib) DeleteObject(dib); DeleteDC(mem); ReleaseDC(nullptr, scr); return; }   // memoria finita
         HGDIOBJ vecchio = SelectObject(mem, dib);
         ID2D1DCRenderTarget* rt = nullptr;
-        const D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
+        // disegnata dal processore: per un'immagine cosi' piccola e' piu' veloce, e un render target "di default" su un DC
+        // creava un motore grafico a ogni disegno (il primo costava ~30 ms)
+        const D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_SOFTWARE,
             D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96);
         if (SUCCEEDED(f2d->CreateDCRenderTarget(&p, &rt))) {
             RECT rr = {0, 0, W, Hh};

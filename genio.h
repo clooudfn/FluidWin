@@ -18,6 +18,7 @@
 #include <vector>
 #include <algorithm>
 #include "stampa.h"
+#include "gpu.h"
 
 namespace genio {
 
@@ -120,9 +121,10 @@ public:
         DwmSetWindowAttribute(finestra, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         ShowWindow(finestra, SW_SHOWNOACTIVATE);   // sempre mostrata, ma 1x1 fuori schermo
 
-        D3D_FEATURE_LEVEL fl;
-        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                     nullptr, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx))) return false;
+        // la device di Direct3D condivisa con il dock (gpu.h): una sola per tutto FluidWin
+        dev = gpu::condivisa().dev; ctx = gpu::condivisa().ctx;
+        if (!dev) return false;
+        dev->AddRef(); ctx->AddRef();
         IDXGIDevice* dd = nullptr; dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd);
         { IDXGIDevice1* d1 = nullptr; if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&d1))) { d1->SetMaximumFrameLatency(1); d1->Release(); } }   // latenza minima: un solo fotogramma in coda
         IDXGIFactory2* fab = nullptr;

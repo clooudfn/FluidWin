@@ -13,6 +13,7 @@
 #include <windowsx.h>
 #include <dwmapi.h>
 #include "raggio.h"
+#include "fabbriche.h"
 #include <d2d1.h>
 #include <dwrite.h>
 #include <string>
@@ -104,11 +105,11 @@ private:
     // Fabbriche di Direct2D e DirectWrite: una sola per tutti i menu (crearle a ogni menu lasciava indietro un paio di
     // handle ogni volta). Non si liberano mai: servono fino all'uscita
     static ID2D1Factory* fabbrica2d() {
-        static ID2D1Factory* f = [] { ID2D1Factory* x = nullptr; D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &x); return x; }();
+        static ID2D1Factory* f = fabbriche::d2d();   // la stessa delle finestre di vetro (fabbriche.h)
         return f;
     }
     static IDWriteFactory* fabbricaTesto() {
-        static IDWriteFactory* f = [] { IDWriteFactory* x = nullptr; DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&x); return x; }();
+        static IDWriteFactory* f = fabbriche::testo();
         return f;
     }
 

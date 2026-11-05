@@ -25,6 +25,7 @@
 #include "raggio.h"
 #include "sistema.h"
 #include "vetro.h"
+#include "gpu.h"
 #include "pool.h"
 #include "widget.h"
 #include <mmdeviceapi.h>
@@ -517,9 +518,10 @@ private:
     }
 
     bool grafica() {
-        D3D_FEATURE_LEVEL fl;
-        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                     nullptr, 0, D3D11_SDK_VERSION, &dev, &fl, &ctx))) return false;
+        // la device di Direct3D condivisa con genio e gelatina (gpu.h): una sola per tutto FluidWin
+        dev = gpu::condivisa().dev; ctx = gpu::condivisa().ctx;
+        if (!dev) return false;
+        dev->AddRef(); ctx->AddRef();
         IDXGIDevice1* dd = nullptr; dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&dd);
         dd->SetMaximumFrameLatency(1);
         IDXGIFactory2* fab = nullptr;

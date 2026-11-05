@@ -14,6 +14,7 @@
 #include <cmath>
 #include <algorithm>
 #include "raggio.h"
+#include "fabbriche.h"
 
 namespace vetro {
 
@@ -98,8 +99,10 @@ public:
         int tipo = acrilico ? 3 : 1; DwmSetWindowAttribute(fin, 38 /* DWMWA_SYSTEMBACKDROP_TYPE */, &tipo, sizeof(tipo));
         DwmSetWindowAttribute(fin, DWMWA_WINDOW_CORNER_PREFERENCE, &angoli, sizeof(angoli));
         BOOL niente = TRUE; DwmSetWindowAttribute(fin, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
-        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, &f2d))) return false;
-        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&fdw))) return false;
+        // fabbriche condivise da tutte le finestre di vetro (e dai menu): con una fabbrica Direct2D a testa ognuna si
+        // creava il suo motore grafico, ~20 thread del driver video in piu' per finestra aperta almeno una volta
+        f2d = fabbriche::d2d(); fdw = fabbriche::testo();
+        if (!f2d || !fdw) return false;
         fam = famiglia(fdw);
         // superficie subito (1x1): una finestra creata e mai mostrata, senza superficie, teneva il thread
         // occupato al 100% e bloccava i timer di FluidWin finche' non compariva la prima volta
@@ -185,8 +188,8 @@ public:
     void chiudi() {
         if (pen) pen->Release();
         if (rt) rt->Release();
-        if (fdw) fdw->Release();
-        if (f2d) f2d->Release();
+
+        // (le fabbriche sono condivise: restano)
         pen = nullptr; rt = nullptr; fdw = nullptr; f2d = nullptr;
         if (fin) DestroyWindow(fin);
         fin = nullptr;
