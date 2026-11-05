@@ -3442,11 +3442,20 @@ private:
         // altrimenti: se e' ridotta a icona la ripristina, se no la porta in primo piano
         HWND scelta = nullptr;
         for (HWND h : v.finestre) if (IsIconic(h)) { scelta = h; break; }
-        if (scelta) { ShowWindow(scelta, SW_RESTORE); SetForegroundWindow(scelta); return; }
+        // Le app avviate come amministratore (Gestione attivita', o qualsiasi app con "Esegui come amministratore"):
+        // Windows non lascia a FluidWin ripristinarle con ShowWindow (errore 203, protezione UIPI) e il clic non faceva
+        // niente. SwitchToThisWindow, quello di Alt+Tab e della barra di Windows, invece funziona
+        if (scelta) {
+            if (!ShowWindow(scelta, SW_RESTORE) && IsIconic(scelta)) {
+                SwitchToThisWindow(scelta, TRUE);
+                if (registro) scrivi("clic dock: finestra di un'app amministratore, ripristinata come fa Alt+Tab");
+            } else SetForegroundWindow(scelta);
+            return;
+        }
         // la finestra piu' in alto fra quelle dell'app
         for (HWND h = GetTopWindow(nullptr); h; h = GetWindow(h, GW_HWNDNEXT))
             if (std::find(v.finestre.begin(), v.finestre.end(), h) != v.finestre.end()) { scelta = h; break; }
-        if (scelta) SetForegroundWindow(scelta);
+        if (scelta && !SetForegroundWindow(scelta)) SwitchToThisWindow(scelta, TRUE);
     }
 
     void menu(int i, POINT pt) {

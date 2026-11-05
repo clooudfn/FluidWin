@@ -479,22 +479,36 @@ static RECT puntoBarra(HWND h) {
 // ---------------------------------------------------------------------------------------------
 // Pausa automatica con giochi e app a schermo intero
 
+static const char* gPercheSchermoIntero = "";   // perche' l'ultimo controllo ha detto "schermo intero" (registro)
+
 static bool schermoInteroAttivo() {
     QUERY_USER_NOTIFICATION_STATE s;
-    // mentre un nostro overlay e' a schermo, Windows lo scambierebbe per un'app a schermo intero: si guarda solo la finestra in primo piano
     HWND fg = GetForegroundWindow();
-    // "occupato" Windows lo dice anche per una finestra solo ingrandita: con la sua barra nascosta copre tutto lo
-    // schermo. Quella non e' schermo intero (video e giochi a tutto schermo non sono "ingranditi")
-    const bool ingrandita = fg && IsZoomed(fg) && finestraApp(fg);
-    if (!gOverlayVisibile && !gGenio.visibile && SUCCEEDED(SHQueryUserNotificationState(&s)) &&
-        ((s == QUNS_BUSY && !ingrandita) || s == QUNS_RUNNING_D3D_FULL_SCREEN || s == QUNS_PRESENTATION_MODE))
-        return true;
-    if (!fg || finestraApp(fg)) return false;
-    wchar_t c[64]; GetClassNameW(fg, c, 64);
+    if (!fg) return false;
+    // In primo piano una finestra di FluidWin (ricerca, panoramica, impostazioni, copertura di un'animazione): non e'
+    // mai un'app a schermo intero. Prima qui si chiedeva lo stato a Windows, che diceva "occupato" per l'app ingrandita
+    // rimasta dietro: il dock spariva aprendo la ricerca e subito dopo un ripristino col genio, poi ricompariva
+    DWORD pid = 0; GetWindowThreadProcessId(fg, &pid);
+    if (pid == GetCurrentProcessId()) return false;
+    wchar_t c[64] = L""; GetClassNameW(fg, c, 64);
     if (!wcscmp(c, L"Progman") || !wcscmp(c, L"WorkerW")) return false;
+    // la finestra in primo piano copre esattamente tutto il suo schermo?
     RECT r; GetWindowRect(fg, &r);
     MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST), &mi);
-    return EqualRect(&r, &mi.rcMonitor);
+    const RECT& m = mi.rcMonitor;
+    const bool tuttoSchermo = r.left <= m.left && r.top <= m.top && r.right >= m.right && r.bottom >= m.bottom;
+    // giochi in Direct3D esclusivo e modalita' presentazione: lo dice Windows. "Occupato" invece Windows lo dice anche
+    // per una finestra solo ingrandita (con la sua barra nascosta copre tutto): vale solo se la finestra in primo piano
+    // copre davvero tutto lo schermo e non e' un'app ingrandita (video e giochi a tutto schermo non sono "ingranditi")
+    const bool ingrandita = IsZoomed(fg) && finestraApp(fg);
+    if (!gOverlayVisibile && !gGenio.visibile && SUCCEEDED(SHQueryUserNotificationState(&s))) {
+        if (s == QUNS_RUNNING_D3D_FULL_SCREEN) { gPercheSchermoIntero = "gioco Direct3D a schermo intero"; return true; }
+        if (s == QUNS_PRESENTATION_MODE) { gPercheSchermoIntero = "modalita' presentazione"; return true; }
+        if (s == QUNS_BUSY && tuttoSchermo && !ingrandita) { gPercheSchermoIntero = "app a tutto schermo (occupato)"; return true; }
+    }
+    if (finestraApp(fg) || !tuttoSchermo) return false;
+    gPercheSchermoIntero = "finestra senza bordi grande quanto lo schermo";
+    return true;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2396,7 +2410,11 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             { const double tc0 = ora();
             if (gCapsulaOk) {
                 static bool prima = false; const bool si = schermoInteroAttivo();
-                if (si != prima) { prima = si; gCapsula.sospendi(si); if (gAngoliOk) gAngoli.sospendi(si); }
+                if (si != prima) {
+                    prima = si; gCapsula.sospendi(si); if (gAngoliOk) gAngoli.sospendi(si);
+                    if (gLog) { wchar_t k[64] = L""; GetClassNameW(GetForegroundWindow(), k, 64);
+                                logf("schermo intero %s (primo piano %ls)%s%s", si ? "si': dock e tasti nascosti" : "finito", k, si ? ": " : "", si ? gPercheSchermoIntero : ""); }
+                }
                 gCapsula.controllo();
                 if (gAngoliOk) gAngoli.controllo();
             }
