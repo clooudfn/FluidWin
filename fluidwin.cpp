@@ -2175,7 +2175,7 @@ static void controllaAngolo() {
     static int fermo = 0; static bool armato = true;
     if (!impostazioni::valori().angolo || !gLauncherTasto || gPanoramica.aperta()) { fermo = 0; return; }
     POINT pt; GetCursorPos(&pt);
-    const RECT s = vetro::areaPrincipale();
+    const RECT s = vetro::areaPrimaria();
     const bool dentro = pt.x <= s.left + 1 && pt.y <= s.top + 1 && pt.x >= s.left - 1 && pt.y >= s.top - 1;
     if (!dentro) { fermo = 0; armato = true; return; }
     if (!armato || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) return;

@@ -45,10 +45,25 @@ inline float dpiMonitor(HMONITOR mon) {
     return 1.0f;
 }
 
+// Lo schermo dove sta il dock (si sposta col mouse sul bordo in basso di un altro schermo, come su macOS): vuoto
+// finche' il dock non c'e'. Lo usa solo il thread principale
+inline RECT& schermoDock() { static RECT r{}; return r; }
+
+// Lo schermo "di lavoro" di FluidWin: quello del dock (volume, ricerca, banner, impostazioni, panoramica compaiono
+// li'), altrimenti il principale
 inline RECT areaPrincipale(bool lavoro = false) {
     MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-    GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
+    const RECT& d = schermoDock();
+    const HMONITOR m = IsRectEmpty(&d) ? MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY) : MonitorFromRect(&d, MONITOR_DEFAULTTOPRIMARY);
+    GetMonitorInfoW(m, &mi);
     return lavoro ? mi.rcWork : mi.rcMonitor;
+}
+
+// Sempre lo schermo principale (l'angolo della panoramica sta li' e non si sposta col dock)
+inline RECT areaPrimaria() {
+    MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+    GetMonitorInfoW(MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY), &mi);
+    return mi.rcMonitor;
 }
 
 class Finestra {

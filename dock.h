@@ -24,6 +24,7 @@
 #include <dwmapi.h>
 #include "raggio.h"
 #include "sistema.h"
+#include "vetro.h"
 #include "pool.h"
 #include "widget.h"
 #include <mmdeviceapi.h>
@@ -154,6 +155,7 @@ public:
         monitor = mon;
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
         schermo = mi.rcMonitor;
+        ::vetro::schermoDock() = schermo; sis.schermo(schermo);
         UINT dx = 96, dy = 96; dpi = 1.0f;
         if (HMODULE sh = LoadLibraryW(L"shcore.dll")) {
             typedef HRESULT (WINAPI *Fn)(HMONITOR, int, UINT*, UINT*);
@@ -224,13 +226,19 @@ public:
     // true se il dock deve disegnare il prossimo fotogramma (ingrandimento, rimbalzo, etichetta in movimento)
     bool serveFotogramma() const { return attivo && !nascostoSchermoIntero && !perso && (dirty || inMovimento || pannelloDaDisegnare() || launcherDaDisegnare()); }
 
-    // Schermi cambiati (risoluzione dello schermo principale, monitor collegato o tolto): il dock torna in basso sullo
-    // schermo principale con le misure nuove (prima restava dove e grande com'era all'avvio)
-    void cambiaSchermo() {
-        monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+    // Il dock va sullo schermo 'verso' (nullptr: schermi cambiati, cioe' risoluzione cambiata, monitor collegato o
+    // tolto: resta su quello dov'era se c'e' ancora, altrimenti torna sul principale). Le misure restano quelle dello
+    // schermo principale (anche su uno con un'altra scala: cambiarle vorrebbe dire ricreare tutto)
+    void cambiaSchermo(HMONITOR verso = nullptr) {
+        if (!verso) {
+            const POINT c = {(schermo.left + schermo.right) / 2, (schermo.top + schermo.bottom) / 2};
+            verso = MonitorFromPoint(c, MONITOR_DEFAULTTOPRIMARY);
+        }
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);
-        if (!GetMonitorInfoW(monitor, &mi)) return;
+        if (!GetMonitorInfoW(verso, &mi)) return;
+        monitor = verso;
         schermo = mi.rcMonitor;
+        ::vetro::schermoDock() = schermo; sis.schermo(schermo);
         const int w = schermo.right - schermo.left;
         if (w != W && w > 0 && sc && dc) {
             dc->SetTarget(nullptr);
@@ -248,7 +256,19 @@ public:
         SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
         rettVetro = rettVetroStato = rettVetroOra = RECT{};          // i vetri si rimettono al prossimo fotogramma
         regioneDock = regioneIsola = regioneEtichetta = RECT{};
-        if (registro) { char b[96]; snprintf(b, 96, "schermi cambiati: dock su %ld,%ld-%ld,%ld", schermo.left, schermo.top, schermo.right, schermo.bottom); scrivi(b); }
+        if (registro) { char b[96]; snprintf(b, 96, "ora su %ld,%ld-%ld,%ld", schermo.left, schermo.top, schermo.right, schermo.bottom); scrivi(b); }
+        // nascondersi o no dipende dalle finestre del nuovo schermo
+        controllaFinestre(true);
+        dirty = true;
+    }
+
+    // Come su macOS: il mouse fermo sul bordo in basso di un altro schermo porta li' il dock. Prima scende sotto il
+    // bordo dello schermo dov'e', poi risale su quello nuovo
+    void spostaVerso(HMONITOR m) {
+        if (!m || m == monitor || spostamento) return;
+        spostamento = m;
+        chiudiTutte(); if (lAperto) chiudiLauncher();
+        if (registro) scrivi("si sposta su un altro schermo");
         dirty = true;
     }
 
@@ -344,7 +364,7 @@ public:
 
     // Da chiamare quando cambia la finestra in primo piano o la sua posizione: con una finestra ingrandita
     // (o grande quanto lo schermo) il dock si nasconde e riesce solo portando il mouse sul bordo in basso
-    void controllaFinestre() {
+    void controllaFinestre(bool forza = false) {
         if (!attivo) return;
         HWND fg = GetForegroundWindow();
         if (!fg) return;
@@ -358,7 +378,7 @@ public:
         char perche[200] = "";
         // il monitor si chiede ogni volta: Windows rinnova questi identificativi quando lo schermo si spegne e si
         // riaccende o cambia risoluzione, e uno salvato all'avvio non corrisponderebbe piu' a nulla
-        monitor = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        monitor = MonitorFromRect(&schermo, MONITOR_DEFAULTTOPRIMARY);
         if (wcscmp(c, L"Progman") && wcscmp(c, L"WorkerW")) {
             // la finestra stessa e la sua proprietaria (alcune app hanno una proprietaria invisibile: si guarda solo se si vede)
             for (HWND r : {GetAncestor(fg, GA_ROOT), GetAncestor(fg, GA_ROOTOWNER)}) {
@@ -381,7 +401,7 @@ public:
         }
         // orario e centro di controllo restano sempre giu' e risalgono solo col mouse sul bordo in basso
         nI = true;
-        if (n == vuoleNascondersi && nI == vuoleNascondersiI) return;
+        if (!forza && n == vuoleNascondersi && nI == vuoleNascondersiI) return;
         vuoleNascondersi = n; vuoleNascondersiI = nI; dirty = true;
         if (registro) { char b[360]; snprintf(b, 360, "a scomparsa: %s (primo piano %ls) %s", n ? "finestra a schermo intero" : "solo isola", c, perche); scrivi(b); }
         if (nI) SetTimer(icone, TIMER_BORDO, 40, nullptr);
@@ -433,6 +453,8 @@ private:
     double lente = 0, lenteVel = 0;  // 0 = icone normali, 1 = ingrandimento pieno (molla)
     // a scomparsa: con una finestra a schermo intero il dock scende sotto il bordo e riesce col mouse in fondo
     HMONITOR monitor = nullptr;
+    HMONITOR spostamento = nullptr;   // schermo verso cui il dock sta andando (prima scende, poi si sposta e risale)
+    HMONITOR bordoAltro = nullptr; double bordoAltroDa = -1;   // mouse sul bordo in basso di un altro schermo, da quando
     bool vuoleNascondersiI = false;   // l'isola sta sempre nascosta, il dock solo sotto le finestre
     bool vuoleNascondersi = false, rivelato = false, rivelatoI = false;   // dock e isola di stato risalgono separati
     double yNascosto = 0, velNascosto = 0;   // px sotto la posizione normale (dock)
@@ -789,6 +811,18 @@ private:
     // dock nascosto: il mouse sul bordo in basso lo fa risalire; quando si allontana torna giu'
     void controllaBordo() {
         POINT pt; GetCursorPos(&pt);
+        // un altro schermo: col mouse fermo sul suo bordo in basso (e nessun tasto premuto, per non spostarlo
+        // trascinando una finestra) il dock va li'
+        if (!(pt.x >= schermo.left && pt.x < schermo.right && pt.y >= schermo.top && pt.y < schermo.bottom)) {
+            const HMONITOR m = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
+            MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+            const bool tasti = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
+            if (m && !tasti && !nascostoSchermoIntero && GetMonitorInfoW(m, &mi) && pt.y >= mi.rcMonitor.bottom - 2) {
+                if (m != bordoAltro) { bordoAltro = m; bordoAltroDa = adesso(); }
+                else if (adesso() - bordoAltroDa > 0.2) { bordoAltro = nullptr; spostaVerso(m); }
+            } else bordoAltro = nullptr;
+            // il dock e l'isola rivelati sullo schermo lasciato tornano giu' come al solito (il mouse e' lontano)
+        } else bordoAltro = nullptr;
         const float x = (float)(pt.x - schermo.left);
         // sul bordo in basso le zone sono solo due: sotto il dock (risale il dock) e da sotto l'isola di stato fino
         // all'angolo destro (risale l'isola). Lo spazio vuoto fra i due e i lati non fanno nulla
@@ -893,10 +927,18 @@ private:
 
         // a scomparsa: scende piano sotto il bordo, risale con un piccolo rimbalzo (gelatina)
         const double fuori = altezzaDock + MARGINE + 6 * dpi;
-        const bool giu = vuoleNascondersi && !rivelato && t > rivelaFino && !lAperto;
+        // spostamento su un altro schermo: scende tutto e, arrivato sotto il bordo, passa sull'altro e risale
+        if (spostamento && yNascosto >= fuori - 1 && yNascostoI >= fuori - 1) {
+            const HMONITOR m = spostamento; spostamento = nullptr;
+            cambiaSchermo(m);
+            yNascosto = yNascostoI = fuori; velNascosto = velNascostoI = 0;
+            rivelato = true; fuoriDal = -1;   // risale anche se sul nuovo schermo dovrebbe stare nascosto (il mouse e' li')
+            movimento = true;
+        }
+        const bool giu = spostamento || (vuoleNascondersi && !rivelato && t > rivelaFino && !lAperto);
         if (giu) movimento |= molla(yNascosto, velNascosto, fuori, 260, 0.9);
         else movimento |= molla(yNascosto, velNascosto, 0, 340, 0.42);
-        const bool giuI = vuoleNascondersiI && !rivelatoI && nessunaScheda();
+        const bool giuI = spostamento || (vuoleNascondersiI && !rivelatoI && nessunaScheda());
         if (giuI) movimento |= molla(yNascostoI, velNascostoI, fuori, 260, 0.9);
         else movimento |= molla(yNascostoI, velNascostoI, 0, 340, 0.42);
         if (vuoleNascondersi && t <= rivelaFino) movimento = true;   // allo scadere della comparsa temporanea deve riscendere

@@ -48,6 +48,13 @@ public:
     std::atomic<int> luminosita{-1};   // 0..100, -1 = non regolabile
     std::atomic<bool> pronto{false};   // c'e' qualcosa di nuovo da ridisegnare
 
+    // Lo schermo del dock (il centro di controllo regola la luminosita' di quello su cui sta): un punto al suo centro,
+    // x nei 32 bit alti e y nei bassi; scritto dal thread principale, letto da quello della luminosita'
+    std::atomic<long long> centroSchermo{0};
+    void schermo(const RECT& r) {
+        centroSchermo = ((long long)((r.left + r.right) / 2) << 32) | (unsigned)((r.top + r.bottom) / 2);
+    }
+
     void avvia() {
         if (thread) return;
         evento = CreateEventW(nullptr, FALSE, TRUE, nullptr);   // parte subito con una lettura
@@ -189,9 +196,10 @@ private:
         wifi = w; bluetooth = b;
     }
 
-    // luminosita' del monitor principale (DDC/CI): legge, e imposta se v >= 0
+    // luminosita' del monitor del dock (DDC/CI): legge, e imposta se v >= 0
     void monitor(int v) {
-        HMONITOR mon = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        const long long c = centroSchermo;
+        HMONITOR mon = MonitorFromPoint({(LONG)(c >> 32), (LONG)(int)(c & 0xFFFFFFFF)}, MONITOR_DEFAULTTOPRIMARY);
         DWORD n = 0;
         if (!GetNumberOfPhysicalMonitorsFromHMONITOR(mon, &n) || !n) { luminosita = -1; return; }
         std::vector<PHYSICAL_MONITOR> pm(n);
