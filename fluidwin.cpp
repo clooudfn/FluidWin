@@ -2205,7 +2205,8 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
                     SendInput(3, in, sizeof(INPUT));
                     return 1;
                 }
-                if (solo && gLauncherTasto && viva) {
+                // (anche con un gioco o un video a tutto schermo: Win apre il launcher di FluidWin, non lo Start)
+                if (solo && gDockOk && viva) {
                     // Windows apre lo Start al rilascio di Win se nel frattempo non e' stato premuto altro: prima del
                     // rilascio (trattenuto qui e reinviato) si inserisce un tasto "maschera" che non fa nulla (0xE8)
                     INPUT in[3]{};
@@ -2595,6 +2596,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gRicerca.conOnda = []() { return gMovimento && impostazioni::valori().onda; };
     gRicerca.registro = [](const char* s) { logf("%s", s); };
     gBanner.isola = []() { return gDockOk ? gDock.rettIsolaSchermo() : vetro::areaPrincipale(true); };
+    gBanner.silenzio = []() { return schermoInteroAttivo(); };
     gImpostazioni.cambiato = applicaImpostazioni;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
     gDock.impostazioni = apriImpostazioni;

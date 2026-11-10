@@ -39,6 +39,30 @@ inline void spegniBannerWindows(const std::wstring& aumid) {
     DWORD zero = 0; RegSetKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", REG_DWORD, &zero, sizeof(zero));
 }
 
+// notifiche di sistema e di sicurezza (Defender, Sicurezza di Windows, centro operativo): restano a Windows, che le
+// mostra col suo banner come sempre; FluidWin non le spegne e non le doppia
+inline bool diSistema(const std::wstring& aumid) {
+    for (const wchar_t* p : {L"Windows.SystemToast", L"Defender", L"SecHealthUI", L"SecurityAndMaintenance"})
+        if (aumid.find(p) != std::wstring::npos) return true;
+    return false;
+}
+
+// spegne in anticipo i banner di Windows per tutte le app che hanno gia' mandato notifiche (le sottochiavi di
+// Notifications\Settings): senza, la prima notifica di ogni app compariva due volte, una di Windows e una di FluidWin
+inline void spegniBannerTutte() {
+    HKEY c = nullptr;
+    std::wstring radice = IMPOST; radice.pop_back();
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, radice.c_str(), 0, KEY_READ, &c) != ERROR_SUCCESS) return;
+    std::vector<std::wstring> app;
+    for (DWORD i = 0;; i++) {
+        wchar_t nome[512]; DWORD ln = 512;
+        if (RegEnumKeyExW(c, i, nome, &ln, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+        app.push_back(nome);
+    }
+    RegCloseKey(c);
+    for (const auto& a : app) if (!diSistema(a)) spegniBannerWindows(a);
+}
+
 // rimette i banner di Windows come erano, per tutte le app toccate
 inline void ripristinaBannerWindows() {
     HKEY c = nullptr;
@@ -61,6 +85,7 @@ inline void ripristinaBannerWindows() {
 class Banner {
 public:
     std::function<RECT()> isola;              // dove sta l'isola (il banner sale da sopra di lei)
+    std::function<bool()> silenzio;           // vero con un gioco o un video a tutto schermo: niente banner sopra
     bool attivo = false;
 
     ~Banner() { fermaLettura(); }
@@ -71,6 +96,7 @@ public:
         if (si) {
             if (!v.fin && !v.crea(L"FluidWin.Banner", vetro::procedura<Banner>, this, false)) { attivo = false; return; }
             primaLettura = true;
+            spegniBannerTutte(); tScansione = GetTickCount64();
             avviaLettura();
             SetTimer(v.fin, 2, 250, nullptr);
         } else {
@@ -124,6 +150,7 @@ private:
     ULONGLONG t0 = 0, tFine = 0;
     double k = 0;
     int x = 0, y = 0;
+    ULONGLONG tScansione = 0;
 
     // La lettura delle notifiche aspetta Windows (decine di millisecondi): la fa un thread a parte, ogni secondo e
     // mezzo, cosi' il thread principale (che disegna le animazioni) non si ferma mai
@@ -163,15 +190,22 @@ private:
             if (!nuova) return;
             lista = std::move(letta); nuova = false;
         }
+        // le app nuove (installate o che notificano per la prima volta) ogni mezzo minuto
+        if (GetTickCount64() - tScansione > 30000) { spegniBannerTutte(); tScansione = GetTickCount64(); }
+        // sopra un gioco o un video a tutto schermo un banner in primo piano lo fa uscire dal tutto schermo (o lo
+        // riduce a icona): li' le notifiche non compaiono, restano nel centro notifiche come fa Windows
+        const bool zitto = silenzio && silenzio();
         std::unordered_set<UINT32> ora;
         for (const auto& n : lista) {
             ora.insert(n.id);
+            if (diSistema(n.aumid)) continue;   // le mostra Windows
             spegniBannerWindows(n.aumid);   // da qui in poi le notifiche di quest'app le mostra FluidWin
             // alla prima lettura quelle gia' presenti non si mostrano
-            if (!primaLettura && !viste.count(n.id)) coda.push_back(n);
+            if (!primaLettura && !zitto && !viste.count(n.id)) coda.push_back(n);
         }
         viste = std::move(ora);
         primaLettura = false;
+        if (zitto) { coda.clear(); if (stato != 0) nascondi(); return; }
         if (stato == 0 && !coda.empty()) entra();
     }
 

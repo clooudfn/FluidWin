@@ -324,7 +324,11 @@ public:
         // rete di sicurezza: il pannello si chiude quando perde il fuoco anche se WM_ACTIVATE non arriva
         if (!nessunaScheda() && !schedaFinestra(GetForegroundWindow())) {
             usa(0); const double ta = pannelloTipo != P_NESSUNO ? pT0 : 0; usa(1); const double tb = pannelloTipo != P_NESSUNO ? pT0 : 0;
-            if (adesso() - std::max(ta, tb) > 0.6) chiudiTutte();
+            // (solo se il pannello aveva avuto il primo piano e Windows non glielo ha rimbalzato via: su alcuni PC non glielo
+            // da' mai o lo toglie subito, e prima si richiudeva da solo dopo 0,6 s. Li' lo chiude un clic fuori, vedi
+            // controllaClicFuori, o Esc)
+            usa(0);
+            if (adesso() - std::max(ta, tb) > 0.6 && pFuocoAvuto && !pRipreso) chiudiTutte();
         }
         if (lAperto && !lChiusura && GetForegroundWindow() != launcher && adesso() - lT0 > 0.6) chiudiLauncher();
     }
@@ -825,7 +829,24 @@ private:
     }
 
     // dock nascosto: il mouse sul bordo in basso lo fa risalire; quando si allontana torna giu'
+    // un clic fuori dal centro di controllo lo chiude anche se non ha mai avuto il primo piano (su alcuni PC Windows non
+    // glielo da' e WM_ACTIVATE non arriva): non dipende piu' dal fuoco per chiudersi, e quindi nemmeno per restare aperto
+    bool clicPrima = false;
+    void controllaClicFuori() {
+        const bool clic = ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON)) & 0x8000) != 0;
+        const bool nuovo = clic && !clicPrima;
+        clicPrima = clic;
+        if (!nuovo || nessunaScheda() || pChiusura || adesso() - pT0 < 0.15) return;
+        POINT pt; GetCursorPos(&pt);
+        RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
+        const RECT is = rettIsolaSchermo(); if (PtInRect(&is, pt)) return;   // l'icona del centro: decide il suo clic
+        if (schedaFinestra(WindowFromPoint(pt))) return;
+        scrivi("centro di controllo: clic fuori, si chiude");
+        chiudiTutte();
+    }
+
     void controllaBordo() {
+        controllaClicFuori();
         POINT pt; GetCursorPos(&pt);
         // un altro schermo: col mouse fermo sul suo bordo in basso (e nessun tasto premuto, per non spostarlo
         // trascinando una finestra) il dock va li'
@@ -1409,6 +1430,7 @@ private:
     // sfumata) e la finestra cambia altezza con una molla; tornando indietro ("<" nella testata) il cerchio si richiude
     // verso il pulsante da cui era nato e il centro di controllo torna avanti
     bool pRipreso = false;                // primo piano gia' ripreso una volta dopo l'apertura (vedi WM_ACTIVATE)
+    bool pFuocoAvuto = false;             // il pannello ha avuto il primo piano almeno una volta da quando e' aperto
     double phVis = 0, phVel = 0;          // altezza che si vede: va verso PH (quella della vista) con una molla
     int vistaPrima = P_NESSUNO; float phPrima = 0; double tVista = -1; bool vistaAvanti = true;
     D2D1_POINT_2F origineVista{}, origineRitorno{};
@@ -1505,7 +1527,7 @@ private:
         phDisponibile = std::max(200 * dpi, (float)(y1 - schermo.top) - 12 * dpi);
         preparaVista(tipo);
         PH = altezzaVista(tipo);
-        phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false;
+        phVis = PH; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO; pRipreso = false; pFuocoAvuto = false;
         // sopra l'icona, allineato al suo bordo destro (dentro lo schermo)
         const int x1 = std::clamp(schermo.left + (int)std::round(rc.right + PAD), schermo.left + (int)PW + 8, schermo.right - 8);
         rettPannello = {x1 - (int)PW, y1 - (int)PH, x1, y1};
@@ -2749,10 +2771,12 @@ private:
             case WM_CLOSE: d->chiudiTutte(); return 0;   // Alt+F4: come Esc (la finestra non si distrugge, si riusa)
             // il fuoco va altrove (non all'altra carta): si chiudono tutte e due, una dopo l'altra
             case WM_ACTIVATE:
+                if (LOWORD(w) != WA_INACTIVE && h == d->pannello) d->pFuocoAvuto = true;
                 if (LOWORD(w) == WA_INACTIVE && !d->schedaFinestra((HWND)l)) {
-                    // appena aperto, il primo piano preso agganciandosi all'app di prima a volte le torna subito dopo lo
-                    // sgancio: non e' un clic altrove. Si riprende una volta invece di chiudersi (come il launcher)
-                    if (d->pannelloTipo != P_NESSUNO && !d->pChiusura && !d->pRipreso && adesso() - d->pT0 < 0.35) {
+                    // primo piano perso appena aperto e senza nessun clic: e' Windows che lo rimbalza, non l'utente che va altrove
+                    // (su alcuni PC succede piu' volte di fila): lo si riprende. Un clic altrove invece chiude, qui o con controllaClicFuori
+                    const bool clic = ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON)) & 0x8000) != 0;
+                    if (d->pannelloTipo != P_NESSUNO && !d->pChiusura && !clic && adesso() - d->pT0 < 1.0) {
                         d->pRipreso = true; d->scrivi("centro di controllo: primo piano perso appena aperto, lo riprende");
                         PostMessageW(h, WM_APP + 4, 0, 0);
                         return 0;
@@ -3164,7 +3188,9 @@ public:
 
     // Apre il launcher (o lo chiude, se e' gia' aperto): cresce dall'icona "App" del dock con un piccolo rimbalzo
     void apriLauncher() {
-        if (!attivo || nascostoSchermoIntero) return;
+        if (!attivo) return;
+        // anche sopra un gioco o un video a tutto schermo (tasto Win): il dock torna a disegnarsi mentre il launcher e' aperto
+        if (nascostoSchermoIntero) schermoIntero(false);
         if (lAperto && !lChiusura) { chiudiLauncher(); return; }
         // si sta chiudendo: torna indietro da dove e' arrivato (stessa molla, stessa velocita'), senza ripartire da capo.
         // Prima c'era anche un blocco di 250 ms dopo la chiusura in cui i clic si ignoravano: non serve piu', il clic
@@ -3363,24 +3389,29 @@ private:
         lScrollObj = std::clamp(lScrollObj, 0.0, lScrollMax());
     }
 
-    // icona "App" nel dock: griglia di pallini colorati su vetro chiaro
+    // icona "App" nel dock: il logo di Windows 11 (quattro riquadri azzurri sfumati) su vetro chiaro
     void disegnaIconaApp(const D2D1_RECT_F& r, float alfa, bool scuro) {
         const float d = r.right - r.left;
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
         dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
         pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
         dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
-        static const D2D1_COLOR_F colori[9] = {
-            {1.00f, 0.37f, 0.34f, 1}, {1.00f, 0.62f, 0.20f, 1}, {1.00f, 0.80f, 0.20f, 1},
-            {0.30f, 0.82f, 0.40f, 1}, {0.20f, 0.68f, 0.98f, 1}, {0.36f, 0.45f, 0.98f, 1},
-            {0.69f, 0.42f, 0.95f, 1}, {1.00f, 0.42f, 0.70f, 1}, {0.55f, 0.58f, 0.62f, 1}};
-        const float passo = d * 0.22f, raggio = d * 0.075f;
-        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-        for (int k = 0; k < 9; k++) {
-            D2D1_COLOR_F c = colori[k]; c.a = alfa;
-            pennello->SetColor(c);
-            dc->FillEllipse({{cx + (k % 3 - 1) * passo, cy + (k / 3 - 1) * passo}, raggio, raggio}, pennello);
+        const float lato = d * 0.50f, fessura = d * 0.028f, q = (lato - fessura) / 2;
+        const float x0 = (r.left + r.right - lato) / 2, y0 = (r.top + r.bottom - lato) / 2;
+        // una sola sfumatura su tutto il logo, dall'azzurro chiaro in alto a sinistra al blu in basso a destra
+        const D2D1_GRADIENT_STOP fermate[2] = {{0, D2D1::ColorF(0.33f, 0.80f, 1.00f, alfa)}, {1, D2D1::ColorF(0.00f, 0.42f, 0.86f, alfa)}};
+        ID2D1GradientStopCollection* fc = nullptr; ID2D1LinearGradientBrush* sf = nullptr;
+        if (SUCCEEDED(dc->CreateGradientStopCollection(fermate, 2, &fc)))
+            dc->CreateLinearGradientBrush({{x0, y0}, {x0 + lato, y0 + lato}}, fc, &sf);
+        if (!sf) pennello->SetColor(D2D1::ColorF(0.10f, 0.58f, 0.95f, alfa));
+        for (int k = 0; k < 4; k++) {
+            const float x = x0 + (k % 2) * (q + fessura), y = y0 + (k / 2) * (q + fessura);
+            const D2D1_RECT_F p{x, y, x + q, y + q};
+            const float ra = d * 0.012f;
+            if (sf) dc->FillRoundedRectangle({p, ra, ra}, sf); else dc->FillRoundedRectangle({p, ra, ra}, pennello);
         }
+        if (sf) sf->Release();
+        if (fc) fc->Release();
     }
 
     // ---- notch: ora e data in alto al centro dello schermo del dock ----
