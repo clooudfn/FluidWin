@@ -161,6 +161,23 @@ public:
     double diagLente() const { return lente; }
     // riduzione a icona col genio di FluidWin (clic sull'icona dell'app gia' in primo piano); false = non possibile
     bool (*riduci)(HWND) = nullptr;
+    // il dock e' passato a uno schermo con un'altra scala: tutte le misure sono fatte con quella di prima, FluidWin
+    // si riavvia (e riparte su quello schermo: lo schermo del dock si ricorda nel registro, SchermoDock)
+    void (*riavviami)(const char*) = nullptr;
+
+    // centro dello schermo del dock, ricordato fra un avvio e l'altro
+    static void ricordaSchermo(const RECT& s) {
+        const DWORD x = (DWORD)((s.left + s.right) / 2), y = (DWORD)((s.top + s.bottom) / 2);
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"SchermoDockX", REG_DWORD, &x, sizeof(x));
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"SchermoDockY", REG_DWORD, &y, sizeof(y));
+    }
+    static HMONITOR schermoRicordato() {
+        DWORD x = 0, y = 0, n = sizeof(DWORD);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"SchermoDockX", RRF_RT_REG_DWORD, nullptr, &x, &n) != ERROR_SUCCESS) return nullptr;
+        n = sizeof(DWORD);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"SchermoDockY", RRF_RT_REG_DWORD, nullptr, &y, &n) != ERROR_SUCCESS) return nullptr;
+        return MonitorFromPoint({(LONG)(int)x, (LONG)(int)y}, MONITOR_DEFAULTTONULL);   // schermo staccato: nessuno
+    }
     void (*registro)(const char*) = nullptr;   // diagnostica (registro di FluidWin con --log)
     void scrivi(const char* s) const { if (registro) registro(s); }
 
@@ -173,7 +190,9 @@ public:
 
     bool inizializza(HINSTANCE inst) {
         gIstanza() = this;
-        const HMONITOR mon = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
+        // lo schermo dove stava il dock l'ultima volta (se c'e' ancora), altrimenti il principale
+        HMONITOR mon = schermoRicordato();
+        if (!mon) mon = MonitorFromPoint({0, 0}, MONITOR_DEFAULTTOPRIMARY);
         monitor = mon;
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
         schermo = mi.rcMonitor;
@@ -272,6 +291,16 @@ public:
         }
         MONITORINFO mi{}; mi.cbSize = sizeof(mi);
         if (!GetMonitorInfoW(verso, &mi)) return;
+        // scala diversa da quella con cui e' fatto il dock: si ricorda lo schermo e FluidWin riparte con la scala giusta
+        {
+            const float nuova = ::vetro::dpiMonitor(verso);
+            if (std::fabs(nuova - dpi) > 0.01f && riavviami) {
+                ricordaSchermo(mi.rcMonitor);
+                if (registro) { char b[96]; snprintf(b, 96, "schermo con un'altra scala (%.0f%% -> %.0f%%): riavvio", dpi * 100, nuova * 100); scrivi(b); }
+                riavviami("il dock e' passato a uno schermo con un'altra scala");
+                return;
+            }
+        }
         monitor = verso;
         schermo = mi.rcMonitor;
         ::vetro::schermoDock() = schermo; sis.schermo(schermo);
@@ -296,6 +325,7 @@ public:
         // nascondersi o no dipende dalle finestre del nuovo schermo
         controllaFinestre(true);
         notch.posto(schermo, dpi);   // il notch va in alto al centro del nuovo schermo
+        ricordaSchermo(schermo);
         dirty = true;
     }
 
@@ -482,6 +512,8 @@ public:
     }
 
     notch::Notch& ilNotch() { return notch; }
+    // scala con cui e' fatto il dock e quella di adesso del suo schermo (cambiata dalle Impostazioni: si riparte)
+    bool scalaCambiata() const { return attivo && monitor && std::fabs(::vetro::dpiMonitor(monitor) - dpi) > 0.01f; }
     // numeri delle notifiche per app (dal banner, ogni secondo e mezzo): si ridisegna solo se cambiano
     void numeriNotificheNuovi(const std::unordered_map<std::wstring, int>& c) { if (c != numeriNotifiche) { numeriNotifiche = c; dirty = true; } }   // volume e notifiche li mostra il notch (fluidwin.cpp)
 
@@ -1557,6 +1589,8 @@ private:
     void chiudiPannello();
 
     float altezzaControllo() const;
+
+    bool controlloCompatto() const;
 
     void nascondiPannello();
 

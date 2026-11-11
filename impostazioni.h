@@ -68,6 +68,7 @@ public:
     std::function<void()> cambiato;   // dopo ogni cambio (gia' salvato)
     int raggioWindhawk = 0;           // raggio della mod di Windhawk (0 = nessuna): riga informativa sugli angoli
     void (*registro)(const char*) = nullptr;
+    std::function<bool()> copiaDiagnostica;   // mette negli appunti la diagnostica (fluidwin.cpp); true se riuscito
 
     void apri() {
         if (!v.fin && !v.crea(L"FluidWin.Impostazioni", vetro::procedura<Finestra>, this, true, 2, true, false)) return;
@@ -106,6 +107,8 @@ public:
                     v.alfa(vetro::uscita(k));
                     bool ancora = k < 1;
                     if (kSez < 1) { kSez = std::min(1.0, (vetro::ms() - tSez) / 180.0); ancora = true; }
+                    if (copiataAlle && vetro::ms() - copiataAlle > 2500) copiataAlle = 0;   // "Copiata" torna "Copia"
+                    else if (copiataAlle) ancora = true;
                     for (size_t i = 0; i < voci.size(); i++) {
                         const double obj = stato(voci[i]) ? 1.0 : 0.0;
                         if (i < anim.size() && std::abs(anim[i] - obj) > 0.01) { anim[i] += (obj - anim[i]) * 0.3; ancora = true; }
@@ -172,7 +175,7 @@ private:
     IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr, *fMarchio = nullptr;
     bool aperta = false, dentro = false;
     int sopra = -1, sezione = S_GENERALE;
-    ULONGLONG t0 = 0, tSez = 0;
+    ULONGLONG t0 = 0, tSez = 0, copiataAlle = 0;
     double k = 0, kSez = 1;
     std::vector<double> anim;
     // zone: 0..n-1 le voci, 100+i la lingua, 200 chiudi, 300+i le sezioni
@@ -196,6 +199,11 @@ private:
     void clic(int id) {
         if (id < 0) return;
         if (id == 200) { chiudi(); return; }
+        if (id == 400) {   // diagnostica negli appunti
+            if (copiaDiagnostica && copiaDiagnostica()) { copiataAlle = vetro::ms(); vetro::battito(v.fin, 1); }
+            disegna();
+            return;
+        }
         if (id >= 300) { vaiASezione(id - 300); return; }
         if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
         else if (id < (int)voci.size()) { bool& b = valori().*(voci[id].campo); b = !b; }
@@ -353,6 +361,20 @@ private:
                 ? std::wstring(testi::t(L"Arrotondati a ", L"Rounded to ")) + std::to_wstring(raggioWindhawk) + testi::t(L" px dalla mod di Windhawk", L" px by the Windhawk mod")
                 : std::wstring(testi::t(L"Quelli di Windows (piu' tondi con la mod di Windhawk)", L"The Windows ones (rounder with the Windhawk mod)")));
             riga(L"FluidWin" + (ver.empty() ? std::wstring() : L" " + ver), testi::t(L"Windows reimmaginato · github.com/clooudfn/FluidWin", L"Windows reimagined · github.com/clooudfn/FluidWin"));
+            // diagnostica: versione, Windows, schermi, scheda video, impostazioni (niente dati personali), per chi
+            // segnala un problema; il pulsante "Copia" a destra
+            {
+                const float yr = y;
+                riga(testi::t(L"Diagnostica", L"Diagnostics"), testi::t(L"Sistema, schermi, scheda video e impostazioni, da incollare in una segnalazione",
+                                                                         L"System, screens, graphics card and settings, to paste into a report"));
+                const std::wstring tb = copiataAlle ? testi::t(L"Copiata", L"Copied") : testi::t(L"Copia", L"Copy");
+                const float lw = v.larghezza(tb, fCentro) + 30 * d;
+                const D2D1_RECT_F rb = {R - 16 * d - lw, yr + 12 * d, R - 16 * d, yr + 42 * d};
+                zone.push_back({rb, 400});
+                v.pen->SetColor(copiataAlle ? D2D1::ColorF(0.20f, 0.78f, 0.35f, (float)e) : D2D1::ColorF(blu.r, blu.g, blu.b, (sopra == 400 ? 1.0f : 0.88f) * (float)e));
+                v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+                v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
+            }
         }
         if (sezione == S_NOTCH)
             riga(testi::t(L"Nel notch, sempre", L"Always in the notch"),

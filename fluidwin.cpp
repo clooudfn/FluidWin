@@ -2303,6 +2303,92 @@ static ricerca::Ricerca gRicerca;
 static banner::Banner gBanner;
 static impostazioni::Finestra gImpostazioni;
 
+// ---------------------------------------------------------------------------------------------
+// Diagnostica da copiare (Impostazioni > Generale): quello che serve per capire un problema su un altro PC, senza dati
+// personali: versioni, schermi (risoluzione, scala, frequenza, posizione), scheda video, batteria, impostazioni.
+static std::wstring diagnostica() {
+    std::wstring t;
+    wchar_t b[512];
+    auto riga = [&](const wchar_t* fmt, ...) { va_list a; va_start(a, fmt); vswprintf(b, 512, fmt, a); va_end(a); t += b; t += L"\r\n"; };
+    // FluidWin
+    {
+        wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr, p, MAX_PATH);
+        DWORD h = 0, n = GetFileVersionInfoSizeW(p, &h); std::wstring ver = L"?";
+        if (n) { std::vector<BYTE> v(n); VS_FIXEDFILEINFO* f = nullptr; UINT lf = 0;
+            if (GetFileVersionInfoW(p, 0, n, v.data()) && VerQueryValueW(v.data(), L"\\", (void**)&f, &lf) && f) {
+                wchar_t s[32]; swprintf(s, 32, L"%u.%u.%u", HIWORD(f->dwFileVersionMS), LOWORD(f->dwFileVersionMS), HIWORD(f->dwFileVersionLS)); ver = s; } }
+        riga(L"FluidWin %ls", ver.c_str());
+    }
+    // Windows
+    {
+        auto leggi = [](const wchar_t* nome) { wchar_t s[128] = L""; DWORD n = sizeof(s);
+            RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", nome, RRF_RT_REG_SZ, nullptr, s, &n); return std::wstring(s); };
+        DWORD ubr = 0, n = sizeof(ubr);
+        RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion", L"UBR", RRF_RT_REG_DWORD, nullptr, &ubr, &n);
+        riga(L"Windows: %ls %ls, build %ls.%lu", leggi(L"EditionID").c_str(), leggi(L"DisplayVersion").c_str(), leggi(L"CurrentBuildNumber").c_str(), ubr);
+        riga(L"Lingua di Windows: 0x%04x, di FluidWin: %ls", GetUserDefaultUILanguage(), testi::inglese() ? L"inglese" : L"italiano");
+    }
+    // schermi
+    struct Ctx { std::wstring* t; } c{&t};
+    EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR m, HDC, LPRECT, LPARAM l) -> BOOL {
+        MONITORINFOEXW mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(m, &mi);
+        DEVMODEW dm{}; dm.dmSize = sizeof(dm); EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm);
+        wchar_t s[256];
+        swprintf(s, 256, L"Schermo%ls: %ld x %ld a %ld,%ld, scala %.0f%%, %lu Hz, area di lavoro %ld,%ld-%ld,%ld\r\n",
+                 (mi.dwFlags & MONITORINFOF_PRIMARY) ? L" principale" : L"", mi.rcMonitor.right - mi.rcMonitor.left, mi.rcMonitor.bottom - mi.rcMonitor.top,
+                 mi.rcMonitor.left, mi.rcMonitor.top, vetro::dpiMonitor(m) * 100, dm.dmDisplayFrequency,
+                 mi.rcWork.left, mi.rcWork.top, mi.rcWork.right, mi.rcWork.bottom);
+        *((Ctx*)l)->t += s;
+        return TRUE;
+    }, (LPARAM)&c);
+    { const RECT& d = vetro::schermoDock(); riga(L"Dock su: %ld,%ld-%ld,%ld", d.left, d.top, d.right, d.bottom); }
+    // scheda video
+    {
+        IDXGIFactory1* f = nullptr;
+        if (SUCCEEDED(CreateDXGIFactory1(__uuidof(IDXGIFactory1), (void**)&f)) && f) {
+            IDXGIAdapter1* a = nullptr;
+            std::vector<std::wstring> viste;   // (la stessa scheda puo' comparire due volte)
+            for (UINT i = 0; f->EnumAdapters1(i, &a) != DXGI_ERROR_NOT_FOUND; i++) {
+                DXGI_ADAPTER_DESC1 dd{}; a->GetDesc1(&dd); a->Release();
+                if (std::find(viste.begin(), viste.end(), std::wstring(dd.Description)) != viste.end()) continue;
+                viste.push_back(dd.Description);
+                if (!(dd.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) riga(L"Scheda video: %ls (%llu MB)", dd.Description, (unsigned long long)(dd.DedicatedVideoMemory / (1024 * 1024)));
+            }
+            f->Release();
+        }
+    }
+    // stato
+    const sensori::Sensori& se = sensori::Sensori::io();
+    if (se.batteria >= 0) riga(L"Batteria: %d%%%ls", se.batteria, se.inCarica ? L", in carica" : L""); else riga(L"Batteria: nessuna (PC fisso)");
+    riga(L"Dock: %d, genio: %d, effetti di animazione di Windows: %d, tema scuro: %d", (int)gDockOk, (int)gGenioOk, (int)gMovimento, (int)vetro::temaScuro());
+    riga(L"Angoli: Windhawk %d px", raggio::windhawk());
+    riga(L"Giochi riconosciuti: %zu", giochiNoti().size());
+    const impostazioni::Valori& v = impostazioni::valori();
+    riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, Win+Tab %d, Alt+Tab %d, angolo %d, tasto destro %d",
+         v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.winTab, v.winS, v.angolo, v.menuDestro);
+    riga(L"Registro: %ls", gLog ? L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
+    return t;
+}
+
+// negli appunti (e in %TEMP%\FluidWin-diagnostica.txt)
+static bool copiaDiagnostica() {
+    const std::wstring t = diagnostica();
+    bool ok = false;
+    if (OpenClipboard(gMessaggi)) {
+        EmptyClipboard();
+        if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, (t.size() + 1) * sizeof(wchar_t))) {
+            memcpy(GlobalLock(g), t.c_str(), (t.size() + 1) * sizeof(wchar_t)); GlobalUnlock(g);
+            ok = SetClipboardData(CF_UNICODETEXT, g) != nullptr; if (!ok) GlobalFree(g);
+        }
+        CloseClipboard();
+    }
+    wchar_t p[MAX_PATH]; GetTempPathW(MAX_PATH, p); wcscat(p, L"FluidWin-diagnostica.txt");
+    if (FILE* f = _wfopen(p, L"wb")) { fwrite("\xEF\xBB\xBF", 1, 3, f); const std::string u8 = [&] { int n = WideCharToMultiByte(CP_UTF8, 0, t.c_str(), -1, nullptr, 0, nullptr, nullptr);
+        std::string s(n > 0 ? n - 1 : 0, '\0'); WideCharToMultiByte(CP_UTF8, 0, t.c_str(), -1, s.data(), n, nullptr, nullptr); return s; }(); fwrite(u8.data(), 1, u8.size(), f); fclose(f); }
+    logf("diagnostica copiata negli appunti: %s", ok ? "si'" : "no");
+    return ok;
+}
+
 static void apriImpostazioni() {
     gImpostazioni.raggioWindhawk = raggio::windhawk();
     gImpostazioni.apri();
@@ -2445,6 +2531,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 KillTimer(h, 12);
                 const UINT d = dpiPrincipale();
                 if (d != gDpiAvvio) { logf("scala cambiata: %u -> %u dpi", gDpiAvvio, d); riavvia("la scala dello schermo e' cambiata"); }
+                else if (gDockOk && gDock.scalaCambiata()) riavvia("la scala dello schermo del dock e' cambiata");   // (dock su un altro schermo)
                 return 0;
             }
             if (w == 7) {
@@ -2682,8 +2769,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         if (gDockOk) gDock.ilNotch().avviso(t, s, v, a);
     };
     gImpostazioni.cambiato = applicaImpostazioni;
+    gImpostazioni.copiaDiagnostica = copiaDiagnostica;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
     gDock.impostazioni = apriImpostazioni;
+    gDock.riavviami = riavvia;
     applicaImpostazioni();
     // banner di FluidWin spenti: quelli di Windows tornano com'erano anche se l'ultima chiusura e' stata brusca
     // (FluidWin e guardiano chiusi insieme, per esempio togliendo la corrente)

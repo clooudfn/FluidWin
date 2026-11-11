@@ -241,7 +241,16 @@ inline auto Motore::chiudiPannello() -> void {
     usa(s);
 }
 
-inline auto Motore::altezzaControllo() const -> float { return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi); }
+// alto quanto serve; se sopra l'isola non c'e' tanto spazio, la versione compatta (vedi disegnaControllo)
+inline auto Motore::controlloCompatto() const -> bool {
+#ifdef PROVA_COMPATTO
+    return true;
+#endif
+    return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi) > altezzaMassimaP(); }
+inline auto Motore::altezzaControllo() const -> float {
+    if (!controlloCompatto()) return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi);
+    return std::round((430 + (sis.luminosita >= 0 ? 48 : 0)) * dpi);
+}
 
 inline auto Motore::nascondiPannello() -> void {
     if (pannello) ShowWindow(pannello, SW_HIDE);
@@ -879,44 +888,47 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
 
 // "Centro di controllo": rete, Bluetooth, volume a capsula, uscita audio, scorciatoie
 inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
-    const float m = 16 * dpi, larg = PW - 2 * m, mezzo = (larg - 10 * dpi) / 2;
+    // schermi bassi (portatili 1280x720 al 125%...): versione compatta, stesse cose un po' piu' basse
+    const bool cp = controlloCompatto();
+    const float th = (cp ? 52 : 64) * dpi, tg = (cp ? 8 : 10) * dpi, sh = (cp ? 40 : 44) * dpi;
+    const float m = (cp ? 12 : 16) * dpi, larg = PW - 2 * (16 * dpi), mezzo = (larg - 10 * dpi) / 2;
     float y = m;
     // Wi-Fi: interruttore vero se c'e' la scheda; senza (PC col cavo) lo stato della rete, e il clic apre le impostazioni
     const int wf = sis.wifi, bt = sis.bluetooth;
-    if (wf >= 0) piastrella({m, y, m + mezzo, y + 64 * dpi}, A_RETE, wf == 1, L"Wi-Fi",
+    if (wf >= 0) piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_RETE, wf == 1, L"Wi-Fi",
                             wf == 1 ? (rete == 2 ? nomeRete : testi::t(L"Acceso", L"On")) : testi::t(L"Spento", L"Off"), scuro, ink);
-    else piastrella({m, y, m + mezzo, y + 64 * dpi}, A_RETE, rete != 0, rete == 2 ? L"Wi-Fi" : rete == 1 ? L"Ethernet" : testi::t(L"Rete", L"Network"),
+    else piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_RETE, rete != 0, rete == 2 ? L"Wi-Fi" : rete == 1 ? L"Ethernet" : testi::t(L"Rete", L"Network"),
                     rete ? testi::t(L"Connessa", L"Connected") : testi::t(L"Non connessa", L"Not connected"), scuro, ink);
-    piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_BLUETOOTH, bt == 1, L"Bluetooth",
+    piastrella({16 * dpi + mezzo + 10 * dpi, y, PW - 16 * dpi, y + th}, A_BLUETOOTH, bt == 1, L"Bluetooth",
                bt < 0 ? testi::t(L"Non disponibile", L"Unavailable") : bt == 1 ? testi::t(L"Acceso", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
-    y += 64 * dpi + 10 * dpi;
+    y += th + tg;
     const bool tScuro = sistema::Sistema::temaScuro();
-    piastrella({m, y, m + mezzo, y + 64 * dpi}, A_TEMA, tScuro, testi::t(L"Tema scuro", L"Dark theme"), tScuro ? testi::t(L"Attivo", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
-    piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_FLUIDWIN, false, L"FluidWin", testi::t(L"Impostazioni", L"Settings"), scuro, ink);
+    piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_TEMA, tScuro, testi::t(L"Tema scuro", L"Dark theme"), tScuro ? testi::t(L"Attivo", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
+    piastrella({16 * dpi + mezzo + 10 * dpi, y, PW - 16 * dpi, y + th}, A_FLUIDWIN, false, L"FluidWin", testi::t(L"Impostazioni", L"Settings"), scuro, ink);
     // tieni sveglio e non disturbare (comodita.h): il clic apre il menu delle durate
-    y += 64 * dpi + 10 * dpi;
-    piastrella({m, y, m + mezzo, y + 64 * dpi}, A_SVEGLIO, comodita::sveglio(), testi::t(L"Non dormire", L"Keep awake"),
+    y += th + tg;
+    piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_SVEGLIO, comodita::sveglio(), testi::t(L"Non dormire", L"Keep awake"),
                comodita::descrivi(comodita::stato().svegliaFino), scuro, ink);
-    piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_SILENZIO, comodita::silenzio(), testi::t(L"Silenzioso", L"Silent"),
+    piastrella({16 * dpi + mezzo + 10 * dpi, y, PW - 16 * dpi, y + th}, A_SILENZIO, comodita::silenzio(), testi::t(L"Silenzioso", L"Silent"),
                comodita::descrivi(comodita::stato().silenzioFino), scuro, ink);
     // timer e microfono (sensori.h): il clic apre un menu
-    y += 64 * dpi + 10 * dpi;
+    y += th + tg;
     {
         std::wstring st = testi::t(L"Spento", L"Off");
         if (comodita::timerSuona()) st = testi::t(L"Finito", L"Done");
         else if (comodita::timerAttivo()) st = comodita::durata(comodita::timerResto()) + testi::t(L" rimasti", L" left");
-        piastrella({m, y, m + mezzo, y + 64 * dpi}, A_TIMER, comodita::timerAttivo() || comodita::timerSuona(), L"Timer", st, scuro, ink);
+        piastrella({16 * dpi, y, 16 * dpi + mezzo, y + th}, A_TIMER, comodita::timerAttivo() || comodita::timerSuona(), L"Timer", st, scuro, ink);
         const sensori::Sensori& se = sensori::Sensori::io();
         std::wstring sm = !se.micC ? std::wstring(testi::t(L"Nessuno", L"None")) : se.micMuto ? std::wstring(testi::t(L"Muto", L"Muted"))
                         : se.micApp.empty() ? std::wstring(testi::t(L"Non in uso", L"Not in use")) : se.micApp[0];
-        piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_MICROFONO, !se.micApp.empty() || !se.camApp.empty(),
+        piastrella({16 * dpi + mezzo + 10 * dpi, y, PW - 16 * dpi, y + th}, A_MICROFONO, !se.micApp.empty() || !se.camApp.empty(),
                    testi::t(L"Microfono", L"Microphone"), sm, scuro, ink);
     }
 
     // volume: capsula riempita di bianco come su iOS; si trascina, la rotella regola, l'altoparlante disattiva
-    y += 64 * dpi + 14 * dpi;
-    const D2D1_RECT_F rv = {m, y, PW - m, y + 44 * dpi};
-    const float rr = 22 * dpi, v = (audioOk && !muto) ? volume : 0.0f;
+    y += th + (cp ? 10 : 14) * dpi;
+    const D2D1_RECT_F rv = {16 * dpi, y, PW - 16 * dpi, y + sh};
+    const float rr = sh / 2, v = (audioOk && !muto) ? volume : 0.0f;
     aggiungi(rv, A_VOLUME, 0);
     pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
     dc->FillRoundedRectangle({rv, rr, rr}, pennello);
@@ -938,8 +950,8 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     // luminosita' del monitor (solo se si puo' regolare via DDC/CI)
     const int lum = sis.luminosita;
     if (lum >= 0) {
-        y += 44 * dpi + 8 * dpi;
-        const D2D1_RECT_F rl = {m, y, PW - m, y + 44 * dpi};
+        y += sh + 8 * dpi;
+        const D2D1_RECT_F rl = {16 * dpi, y, PW - 16 * dpi, y + sh};
         const float vl = lum / 100.0f;
         aggiungi(rl, A_LUMINOSITA, 0);
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
@@ -956,31 +968,31 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     }
 
     // uscita audio
-    y += 44 * dpi + 8 * dpi;
-    const D2D1_RECT_F ru = {m - 8 * dpi, y, PW - m + 8 * dpi, y + 36 * dpi};
+    y += sh + (cp ? 4 : 8) * dpi;
+    const D2D1_RECT_F ru = {8 * dpi, y, PW - 8 * dpi, y + 36 * dpi};
     evidenzia(aggiungi(ru, A_AUDIO, 0), ru, scuro, 6 * dpi);
     pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.62f});
-    scrivi(testi::t(L"Uscita", L"Output"), fmtSotto, {m, y, m + 60 * dpi, y + 36 * dpi});
+    scrivi(testi::t(L"Uscita", L"Output"), fmtSotto, {16 * dpi, y, 76 * dpi, y + 36 * dpi});
     pennello->SetColor(ink);
-    scrivi(nomeUscita.empty() ? std::wstring(testi::t(L"Nessun dispositivo", L"No device")) : nomeUscita, fmtVoce, {m + 52 * dpi, y, PW - m - 20 * dpi, y + 36 * dpi});
-    chevronDestra(PW - m - 4 * dpi, y + 18 * dpi);
+    scrivi(nomeUscita.empty() ? std::wstring(testi::t(L"Nessun dispositivo", L"No device")) : nomeUscita, fmtVoce, {68 * dpi, y, PW - 36 * dpi, y + 36 * dpi});
+    chevronDestra(PW - 20 * dpi, y + 18 * dpi);
 
     // scorciatoie tonde
-    y += 36 * dpi + 16 * dpi;
+    y += 36 * dpi + (cp ? 8 : 16) * dpi;
     const wchar_t* nomi[4] = {L"Widget", L"In background", testi::t(L"Notifiche", L"Notifications"), testi::t(L"Appunti", L"Clipboard")};
     const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_APPUNTI};
     for (int i = 0; i < 4; i++) {
-        const float cx = m + larg * (i + 0.5f) / 4, cy = y + 26 * dpi;
+        const float rc = (cp ? 22 : 26) * dpi, cx = 16 * dpi + larg * (i + 0.5f) / 4, cy = y + rc;
         const D2D1_RECT_F r = {cx - 36 * dpi, y - 4 * dpi, cx + 36 * dpi, y + 76 * dpi};
         const int e = aggiungi(r, az[i], 0);
         const double h = evidenzia(e, {0, 0, 0, 0}, scuro, 0);   // solo il valore: l'evidenziazione e' il cerchio
         const float s = (e == pPremuto) ? 0.9f : 1.0f;
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f + 0.06f * (float)h) : D2D1::ColorF(0, 0, 0, 0.06f + 0.05f * (float)h));
-        dc->FillEllipse({{cx, cy}, 26 * dpi * s, 26 * dpi * s}, pennello);
+        dc->FillEllipse({{cx, cy}, rc * s, rc * s}, pennello);
         pennello->SetColor(ink);
         if (i == 0) simboloWidget(cx, cy); else if (i == 1) simboloFreccia(cx, cy); else if (i == 2) simboloCampana(cx, cy); else simboloAppunti(cx, cy);
         pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.75f});
-        scrivi(nomi[i], fmtNome, {cx - 40 * dpi, cy + 30 * dpi, cx + 40 * dpi, cy + 48 * dpi});
+        scrivi(nomi[i], fmtNome, {cx - 40 * dpi, cy + rc + 4 * dpi, cx + 40 * dpi, cy + rc + 22 * dpi});
     }
 }
 
