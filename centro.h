@@ -94,6 +94,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     }
     if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
     pannelloTipo = tipo; pChiusura = false; pT0 = adesso(); pK = -1;
+    dirty = true;   // il dock risale subito con il pannello (aperto anche dal notch o da Win+N: senza, aspettava il suo timer)
     pSopra = pPremuto = -1; evidP.clear(); trascinaVolume = false; pMouseDentro = false;
     PW = PWMAX;
     // spazio vero sopra l'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
@@ -258,6 +259,7 @@ inline auto Motore::nascondiPannello() -> void {
     if (pannelloTipo != P_NESSUNO) { pannelloChiuso = pannelloTipo; pChiusoT = adesso(); }
     if (registro && pannelloTipo != P_NESSUNO) { char b[80]; snprintf(b, 80, "pannello %d nascosto%s", pannelloTipo, pChiusura ? " (fine chiusura)" : ""); scrivi(b); }
     pannelloTipo = P_NESSUNO; pChiusura = false; pAnimazione = false; pDirty = false;
+    dirty = true;   // pannello chiuso: il dock puo' tornare giu' (se deve)
     phVis = 0; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO;
     posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
 }
