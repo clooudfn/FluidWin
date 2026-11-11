@@ -2130,7 +2130,7 @@ static HHOOK gHookTasti = nullptr;
 static DWORD gThreadTasti = 0;
 static bool gWinGiu = false, gWinConAltro = false, gWinMaschera = false, gAltMaschera = false, gF4Preso = false;
 static const UINT WM_VOLUME = WM_APP + 6, WM_PANORAMICA = WM_APP + 7, WM_RICERCA = WM_APP + 8, WM_IMPOSTAZIONI = WM_APP + 9, WM_PANNELLO = WM_APP + 10, WM_CHIUDI_FG = WM_APP + 11;
-// scorciatoie di FluidWin (dalle impostazioni): tasti del volume, Win+Tab (panoramica), Alt+Tab (ricerca)
+// scorciatoie di FluidWin (dalle impostazioni): tasti del volume, Alt+Tab (panoramica), Win+Tab (ricerca)
 static std::atomic<bool> gTastiVolume{false}, gTastoPanoramica{false}, gTastoRicerca{false};
 
 // Battito del thread principale: lo aggiorna un timer ogni 250 ms (e ogni fotogramma). Se e' fermo da piu' di un
@@ -2145,6 +2145,7 @@ static bool uiViva() { return GetTickCount64() - gBattito.load() < 1000; }
 // (SendInput) portano la firma FIRMA_DESTRO e il gancio li lascia passare. Gli altri clic "iniettati" si prendono:
 // i programmi dei mouse (Logitech G HUB e simili) rimandano cosi' TUTTI i clic veri (visto sul PC dell'utente).
 static const UINT WM_TASTO_DESTRO = WM_APP + 13;
+static const UINT WM_ALT_LASCIATO = WM_APP + 18;   // Alt lasciato dopo Alt+Tab (panoramica: si va sulla finestra scelta)
 static const ULONG_PTR FIRMA_DESTRO = 0x464C5744;   // "FLWD": clic destro rimandato da FluidWin
 static std::atomic<bool> gMenuDestro{false};
 static bool gDestroPreso = false;
@@ -2209,19 +2210,24 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
                 if (giu) PostMessageW(gMessaggi, WM_VOLUME, k->vkCode == VK_VOLUME_UP ? 1 : k->vkCode == VK_VOLUME_DOWN ? 2 : 0, 0);
                 return 1;
             }
-            // Win+Tab: panoramica di FluidWin. Al rilascio di Win serve la "maschera" (sotto), altrimenti Windows vedrebbe
+            // Win+Tab: la ricerca di FluidWin. Al rilascio di Win serve la "maschera" (sotto), altrimenti Windows vedrebbe
             // Win premuto e rilasciato da solo e aprirebbe lo Start. (Win+S e Win+Maiusc+S restano di Windows)
-            if (gWinGiu && gLauncherTasto && k->vkCode == VK_TAB && gTastoPanoramica && viva) {
-                if (giu) PostMessageW(gMessaggi, WM_PANORAMICA, 0, 0);
+            if (gWinGiu && gLauncherTasto && k->vkCode == VK_TAB && gTastoRicerca && viva) {
+                if (giu) PostMessageW(gMessaggi, WM_RICERCA, 0, 0);
                 gWinConAltro = true; gWinMaschera = true;
                 return 1;
             }
-            // Alt+Tab: la ricerca di FluidWin al posto del selettore di Windows (una volta per pressione di Alt). Anche qui
-            // al rilascio di Alt va la maschera: Alt premuto e rilasciato da solo aprirebbe i menu delle app.
-            // Sempre, finche' FluidWin gira (anche con un'app a schermo intero o senza dock): il selettore di Windows
-            // non deve comparire mai. (Con Alt+Maiusc+Tab e Ctrl+Alt+Tab lo stesso: hanno Alt premuto)
-            if (!gWinGiu && gTastoRicerca && k->vkCode == VK_TAB && (viva || gAltMaschera) && ((k->flags & LLKHF_ALTDOWN) || gAltMaschera)) {
-                if (giu && !gAltMaschera) PostMessageW(gMessaggi, WM_RICERCA, 0, 0);
+            // Alt+Tab: la panoramica di FluidWin al posto del selettore di Windows, e si usa come lui: aperta con la
+            // finestra di prima gia' scelta, ogni altro Tab (con Alt sempre premuto) va avanti, Maiusc+Tab indietro,
+            // lasciando Alt si va sulla finestra scelta. Al rilascio di Alt va anche la maschera: Alt premuto e
+            // rilasciato da solo aprirebbe i menu delle app. Con un'app a schermo intero (un gioco) resta il selettore
+            // di Windows. (Con Ctrl+Alt+Tab lo stesso: ha Alt premuto)
+            if (!gWinGiu && gTastoPanoramica && k->vkCode == VK_TAB && (gAltMaschera || (viva && gLauncherTasto)) && ((k->flags & LLKHF_ALTDOWN) || gAltMaschera)) {
+                if (giu) {
+                    if (!gAltMaschera) PostMessageW(gMessaggi, WM_PANORAMICA, 1, 0);
+                    else if (HWND p = FindWindowW(L"FluidWin.Panoramica", nullptr); p && IsWindowVisible(p))
+                        PostMessageW(p, WM_KEYDOWN, (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? VK_LEFT : VK_TAB, 0);
+                }
                 gAltMaschera = true;
                 return 1;
             }
@@ -2237,6 +2243,9 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
             }
             if (gAltMaschera && !giu && (k->vkCode == VK_LMENU || k->vkCode == VK_RMENU || k->vkCode == VK_MENU)) {
                 gAltMaschera = false;
+                // panoramica aperta con Alt+Tab: lasciando Alt si va sulla finestra scelta (come il selettore di Windows).
+                // Lo decide il thread principale: con un Alt+Tab veloce la panoramica puo' non essere ancora aperta
+                PostMessageW(gMessaggi, WM_ALT_LASCIATO, 0, 0);
                 INPUT in[3]{};
                 for (auto& i : in) i.type = INPUT_KEYBOARD;
                 in[0].ki.wVk = 0xE8; in[1].ki.wVk = 0xE8; in[1].ki.dwFlags = KEYEVENTF_KEYUP;
@@ -2364,7 +2373,7 @@ static std::wstring diagnostica() {
     riga(L"Angoli: Windhawk %d px", raggio::windhawk());
     riga(L"Giochi riconosciuti: %zu", giochiNoti().size());
     const impostazioni::Valori& v = impostazioni::valori();
-    riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, Win+Tab %d, Alt+Tab %d, angolo %d, tasto destro %d",
+    riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d",
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.winTab, v.winS, v.angolo, v.menuDestro);
     riga(L"Registro: %ls", gLog ? L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
     return t;
@@ -2513,10 +2522,12 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 if (!nelNotch && gOsdOk) gOsd.mostra(liv, muto);
             }
             return 0;
+        // (arriva anche mentre la panoramica e' aperta: il suo ciclo dei messaggi lo consegna qui)
+        case WM_ALT_LASCIATO: if (gPanoramica.aperta()) gPanoramica.scegliSelezionata(); return 0;
         case WM_PANORAMICA:
             if (gRicerca.aperta()) gRicerca.chiudi(false);
             logf("panoramica");
-            gPanoramica.apri();   // ha un suo ciclo dei messaggi finche' resta aperta
+            gPanoramica.apri(w == 1);   // ha un suo ciclo dei messaggi finche' resta aperta (w = 1: da Alt+Tab)
             return 0;
         case WM_RICERCA: logf("ricerca"); gRicerca.apri(); return 0;
         case WM_IMPOSTAZIONI: apriImpostazioni(); return 0;

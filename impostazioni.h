@@ -18,8 +18,8 @@ struct Valori {
     bool onda = true;             // onda di luce multicolore sui bordi dello schermo quando si apre la ricerca
     bool volume = true;           // indicatore del volume di FluidWin al posto di quello di Windows
     bool angolo = true;           // panoramica col mouse nell'angolo in alto a sinistra
-    bool winTab = true;           // Win+Tab apre la panoramica di FluidWin
-    bool winS = true;             // Alt+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
+    bool winTab = true;           // Alt+Tab apre la panoramica di FluidWin (fino alla 1.2.0 era Win+Tab: il nome e' rimasto)
+    bool winS = true;             // Win+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
@@ -162,10 +162,10 @@ private:
          L"Escono dal notch, con il numero sulle icone del dock", L"They come out of the notch, with badges on the dock", &Valori::banner, S_NOTCH},
         {L"Volume nel notch", L"Volume in the notch",
          L"I tasti del volume mostrano il livello nel notch", L"The volume keys show the level in the notch", &Valori::volume, S_NOTCH},
-        {L"Win+Tab apre la panoramica", L"Win+Tab opens the overview",
-         L"Al posto della Visualizzazione attività", L"Instead of Task View", &Valori::winTab, S_TASTIERA},
-        {L"Alt+Tab apre la ricerca", L"Alt+Tab opens search",
-         L"App, file, impostazioni e calcoli (al posto del selettore)", L"Apps, files, settings and math (instead of the switcher)", &Valori::winS, S_TASTIERA},
+        {L"Alt+Tab apre la panoramica", L"Alt+Tab opens the overview",
+         L"Tieni Alt e premi Tab per scegliere la finestra, come prima", L"Hold Alt and press Tab to pick a window, as always", &Valori::winTab, S_TASTIERA},
+        {L"Win+Tab apre la ricerca", L"Win+Tab opens search",
+         L"App, file, impostazioni e calcoli (al posto della Visualizzazione attività)", L"Apps, files, settings and math (instead of Task View)", &Valori::winS, S_TASTIERA},
         {L"Panoramica dall'angolo", L"Overview from the corner",
          L"Mouse nell'angolo in alto a sinistra", L"Move the mouse to the top-left corner", &Valori::angolo, S_TASTIERA},
         {L"Menu del tasto destro", L"Right-click menu",

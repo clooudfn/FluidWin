@@ -1,4 +1,4 @@
-// Panoramica delle finestre (come Mission Control): Win+Tab o il mouse nell'angolo in alto a sinistra, e tutte le
+// Panoramica delle finestre (come Mission Control): Alt+Tab o il mouse nell'angolo in alto a sinistra, e tutte le
 // finestre aperte si dispongono a griglia sopra lo sfondo sfocato. Clic su una finestra per portarla in primo piano,
 // Esc o clic fuori per tornare com'era. Le finestre sono miniature dal vivo di DWM (DwmRegisterThumbnail): nessuna
 // finestra vera viene spostata o toccata.
@@ -15,9 +15,13 @@ class Panoramica {
 public:
     std::function<bool(HWND)> idonea;   // finestra d'app normale
     bool aperta() const { return inCorso; }
+    // va sulla finestra scelta (Alt lasciato dopo Alt+Tab)
+    void scegliSelezionata() { if (inCorso && !chiudendo && sopra >= 0 && sopra < (int)el.size()) { chiudendo = true; scelta = el[sopra].h; } }
 
     // Apre la panoramica e ne gestisce i messaggi finche' non si chiude (come un menu). Se e' gia' aperta la chiude.
-    void apri() {
+    // daAltTab: aperta con Alt+Tab, parte con la finestra di prima gia' scelta (come il selettore di Windows: Tab va
+    // avanti, lasciando Alt si va su quella scelta; il gancio della tastiera manda Tab e Invio)
+    void apri(bool daAltTab = false) {
         if (inCorso) { chiudendo = true; scelta = nullptr; return; }
         if (!v.fin && !v.crea(L"FluidWin.Panoramica", vetro::procedura<Panoramica>, this, true, 1)) return;
         raccogli();
@@ -33,6 +37,11 @@ public:
         for (Elemento* e : perZ) if (FAILED(DwmRegisterThumbnail(v.fin, e->h, &e->th))) e->th = nullptr;
         prima = GetForegroundWindow();
         inCorso = true; chiudendo = false; scelta = nullptr; sopra = -1; k = 0;
+        if (daAltTab) {   // la seconda dall'alto nell'ordine di sovrapposizione (la prima e' quella in primo piano)
+            std::vector<int> ord(el.size()); for (size_t i = 0; i < el.size(); i++) ord[i] = (int)i;
+            std::sort(ord.begin(), ord.end(), [this](int a, int b) { return el[a].z < el[b].z; });
+            sopra = ord.size() > 1 ? ord[1] : ord[0];
+        }
         v.alfa(1);
         SetForegroundWindow(v.fin);
         ciclo();
@@ -65,9 +74,9 @@ public:
             case WM_RBUTTONUP: chiudendo = true; scelta = nullptr; return true;
             case WM_KEYDOWN:
                 if (w == VK_ESCAPE) { chiudendo = true; scelta = nullptr; }
-                else if (w == VK_RETURN && sopra >= 0) { chiudendo = true; scelta = el[sopra].h; }
-                else if (w == VK_RIGHT || w == VK_TAB || w == VK_DOWN) { sopra = (sopra + 1) % (int)el.size(); disegna(); }
-                else if (w == VK_LEFT || w == VK_UP) { sopra = (sopra - 1 + (int)el.size()) % (int)el.size(); disegna(); }
+                else if (w == VK_RETURN && sopra >= 0 && sopra < (int)el.size()) { chiudendo = true; scelta = el[sopra].h; }
+                else if (!el.empty() && (w == VK_RIGHT || w == VK_TAB || w == VK_DOWN)) { sopra = (sopra + 1) % (int)el.size(); disegna(); }
+                else if (!el.empty() && (w == VK_LEFT || w == VK_UP)) { sopra = (sopra - 1 + (int)el.size()) % (int)el.size(); disegna(); }
                 return true;
             case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && inCorso) { chiudendo = true; scelta = nullptr; } return true;
             case WM_CLOSE: if (inCorso) { chiudendo = true; scelta = nullptr; } return true;

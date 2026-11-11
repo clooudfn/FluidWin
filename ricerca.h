@@ -1,4 +1,4 @@
-// Ricerca rapida (come Spotlight): Alt+Tab apre una barra di vetro al centro dello schermo. Mentre si scrive mostra
+// Ricerca rapida (come Spotlight): Win+Tab apre una barra di vetro al centro dello schermo. Mentre si scrive mostra
 // app, pagine delle impostazioni, file (dall'indice di ricerca di Windows, in un thread a parte), il risultato dei
 // calcoli e la ricerca sul web. Frecce e Invio per scegliere, Esc per chiudere.
 #pragma once
