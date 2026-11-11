@@ -2424,7 +2424,10 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             // GPU persa anche senza niente da disegnare (si scopre al primo Present, ma si controlla anche qui)
             if ((gGenioOk && gGenio.gpuPersa()) || (gDockOk && gDock.gpuPersa())) riavvia("la GPU e' stata persa");
             controlloSicurezza(); if (gDockOk) { const bool si = schermoInteroAttivo(); gLauncherTasto = !si; gDock.schermoIntero(si); gDock.controllaFinestre(); gDock.timer(); if (gLog) logf("dock: mosse=%ld fotogrammi=%ld lente=%.2f", gDock.diagMosse, gDock.diagFotogrammi, gDock.diagLente()); } return 0;
-        case WM_ENDSESSION: if (w) { impostaPausa(true); ripristinaTutte(); } return 0;
+        // spegnimento o disconnessione: Windows chiude il processo appena si torna da qui, e chiude anche il guardiano,
+        // quindi i banner di Windows vanno rimessi adesso (senza, restavano spenti finche' FluidWin non veniva
+        // riavviato e chiuso normalmente)
+        case WM_ENDSESSION: if (w) { impostaPausa(true); ripristinaTutte(); banner::ripristinaBannerWindows(); } return 0;
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -2469,7 +2472,7 @@ static void riavvia(const char* perche) {
     PostQuitMessage(0);
 }
 
-static LONG WINAPI suCrash(EXCEPTION_POINTERS*) { ripristinaTutte(); return EXCEPTION_CONTINUE_SEARCH; }
+static LONG WINAPI suCrash(EXCEPTION_POINTERS*) { ripristinaTutte(); banner::ripristinaBannerWindows(); return EXCEPTION_CONTINUE_SEARCH; }
 
 // ---------------------------------------------------------------------------------------------
 // Un fotogramma: animazioni e dock
