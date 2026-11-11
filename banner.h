@@ -83,11 +83,48 @@ inline void ripristinaBannerWindows() {
     RegDeleteTreeW(HKEY_CURRENT_USER, COPIA);
 }
 
+// icona dell'app (64 px) in pixel BGRA premoltiplicati; false se non c'e'
+inline bool iconaApp(const std::wstring& aumid, std::vector<UINT>& px, int& w, int& h) {
+    px.clear(); w = h = 0;
+    if (aumid.empty()) return false;
+    IShellItemImageFactory* fab = nullptr;
+    if (FAILED(SHCreateItemFromParsingName((L"shell:AppsFolder\\" + aumid).c_str(), nullptr, IID_PPV_ARGS(&fab)))) return false;
+    HBITMAP hb = nullptr;
+    if (SUCCEEDED(fab->GetImage({64, 64}, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hb)) && hb) {
+        BITMAP bm{}; GetObject(hb, sizeof(bm), &bm);
+        if (bm.bmWidth > 0 && bm.bmHeight > 0 && bm.bmWidth <= 1024 && bm.bmHeight <= 1024) {
+            px.resize((size_t)bm.bmWidth * bm.bmHeight);
+            BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), bm.bmWidth, -bm.bmHeight, 1, 32, BI_RGB};
+            HDC scr = GetDC(nullptr); GetDIBits(scr, hb, 0, bm.bmHeight, px.data(), &bi, DIB_RGB_COLORS); ReleaseDC(nullptr, scr);
+            bool alfa = false; for (UINT p : px) if (p >> 24) { alfa = true; break; }
+            for (UINT& p : px) {
+                const UINT a = alfa ? (p >> 24) : 255;
+                p = (a << 24) | ((((p >> 16) & 255) * a / 255) << 16) | ((((p >> 8) & 255) * a / 255) << 8) | ((p & 255) * a / 255);
+            }
+            w = bm.bmWidth; h = bm.bmHeight;
+        }
+        DeleteObject(hb);
+    }
+    fab->Release();
+    return !px.empty();
+}
+
 class Banner {
 public:
     std::function<RECT()> isola;              // dove sta l'isola (il banner sale da sopra di lei)
     std::function<bool()> silenzio;           // vero con un gioco o un video a tutto schermo: niente banner sopra
+    // mostra la notifica nel notch (false se il notch non c'e': allora il banner di vetro); quando il notch ha
+    // finito chiama notchFinito()
+    std::function<bool(const notifiche::Notifica&, const std::vector<UINT>&, int, int)> nelNotch;
     bool attivo = false;
+
+    // dal notch: la notifica mostrata e' sparita (si passa alla prossima), clic per aprirla, x per toglierla
+    void notchFinito() { if (stato == 4) { stato = 0; if (attivo && !coda.empty()) entra(); } }
+    void apriAttuale() {
+        if (!attuale.aumid.empty()) ShellExecuteW(nullptr, L"open", (L"shell:AppsFolder\\" + attuale.aumid).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        lettore.rimuovi(attuale.id);
+    }
+    void togliAttuale() { lettore.rimuovi(attuale.id); }
 
     ~Banner() { fermaLettura(); }
 
@@ -147,7 +184,7 @@ private:
     ID2D1Bitmap* icona = nullptr;
     IDWriteTextFormat *fApp = nullptr, *fTitolo = nullptr, *fTesto = nullptr;
     bool primaLettura = true, dentro = false, sopraX = false;
-    int stato = 0;   // 0 nascosto, 1 entra, 2 fermo, 3 esce
+    int stato = 0;   // 0 nascosto, 1 entra, 2 fermo, 3 esce, 4 la mostra il notch
     ULONGLONG t0 = 0, tFine = 0;
     double k = 0;
     int x = 0, y = 0;
@@ -206,12 +243,17 @@ private:
         }
         viste = std::move(ora);
         primaLettura = false;
-        if (zitto) { coda.clear(); if (stato != 0) nascondi(); return; }
+        if (zitto) { coda.clear(); if (stato != 0 && stato != 4) nascondi(); return; }
         if (stato == 0 && !coda.empty()) entra();
     }
 
     void entra() {
         attuale = coda.front(); coda.pop_front();
+        if (nelNotch) {   // dal notch, se si vede
+            std::vector<UINT> px; int iw = 0, ih = 0;
+            iconaApp(attuale.aumid, px, iw, ih);
+            if (nelNotch(attuale, px, iw, ih)) { stato = 4; return; }
+        }
         v.aggiornaTema();
         const RECT is = isola ? isola() : vetro::areaPrincipale(true);
         v.dpi = vetro::dpiMonitor(MonitorFromPoint({is.left, is.top}, MONITOR_DEFAULTTOPRIMARY));
@@ -233,7 +275,7 @@ private:
 
     void esci() { if (stato == 1 || stato == 2) { stato = 3; t0 = vetro::ms(); } }
 
-    void nascondi() { stato = 0; vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
+    void nascondi() { if (stato == 4) return; stato = 0; vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
 
     void passo() {
         const ULONGLONG ora = vetro::ms();
@@ -251,25 +293,11 @@ private:
     bool sullaX(int px, int py) const { const float d = v.dpi; return px > v.W - 34 * d && py < 34 * d; }
 
     void caricaIcona() {
-        if (attuale.aumid.empty() || !v.rt) return;
-        IShellItemImageFactory* fab = nullptr;
-        if (FAILED(SHCreateItemFromParsingName((L"shell:AppsFolder\\" + attuale.aumid).c_str(), nullptr, IID_PPV_ARGS(&fab)))) return;
-        HBITMAP hb = nullptr;
-        if (SUCCEEDED(fab->GetImage({64, 64}, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hb)) && hb) {
-            BITMAP bm{}; GetObject(hb, sizeof(bm), &bm);
-            std::vector<UINT> px((size_t)bm.bmWidth * bm.bmHeight);
-            BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), bm.bmWidth, -bm.bmHeight, 1, 32, BI_RGB};
-            HDC scr = GetDC(nullptr); GetDIBits(scr, hb, 0, bm.bmHeight, px.data(), &bi, DIB_RGB_COLORS); ReleaseDC(nullptr, scr);
-            bool alfa = false; for (UINT p : px) if (p >> 24) { alfa = true; break; }
-            for (UINT& p : px) {
-                const UINT a = alfa ? (p >> 24) : 255;
-                p = (a << 24) | ((((p >> 16) & 255) * a / 255) << 16) | ((((p >> 8) & 255) * a / 255) << 8) | ((p & 255) * a / 255);
-            }
-            v.rt->CreateBitmap(D2D1::SizeU(bm.bmWidth, bm.bmHeight), px.data(), bm.bmWidth * 4,
-                               D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &icona);
-            DeleteObject(hb);
-        }
-        fab->Release();
+        if (!v.rt) return;
+        std::vector<UINT> px; int w = 0, h = 0;
+        if (!iconaApp(attuale.aumid, px, w, h)) return;
+        v.rt->CreateBitmap(D2D1::SizeU(w, h), px.data(), w * 4,
+                           D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &icona);
     }
 
     void disegna() {

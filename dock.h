@@ -431,14 +431,18 @@ public:
         if (!nI) { rivelatoI = false; fuoriDalI = -1; }
     }
 
-    void schermoIntero(bool si) {
+    // tipo: 0 niente, 1 app a schermo intero (video, presentazione), 2 gioco
+    void schermoIntero(int tipo) {
+        notch.modo(tipo == 0 ? notch::NORMALE : tipo == 2 ? notch::NASCOSTO : notch::SFUMATO);   // app: sfuma col mouse; gioco: via
+        const bool si = tipo != 0;
         if (si == nascostoSchermoIntero) return;
         nascostoSchermoIntero = si;
         for (HWND h : {icone, vetro}) ShowWindow(h, si ? SW_HIDE : SW_SHOWNOACTIVATE);
-        notch.mostra(!si);
         if (si) { nascondiSchede(); nascondiLauncher(); }
         if (!si) dirty = true;
     }
+
+    notch::Notch& ilNotch() { return notch; }   // volume e notifiche li mostra il notch (fluidwin.cpp)
 
 private:
     static Motore*& gIstanza() { static Motore* m = nullptr; return m; }

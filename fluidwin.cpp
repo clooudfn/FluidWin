@@ -26,6 +26,7 @@
 #include <unordered_set>
 #include <algorithm>
 #include <atomic>
+#include <tlhelp32.h>
 #include "genio.h"
 #include "viva.h"
 #include <memory>
@@ -514,6 +515,62 @@ static bool schermoInteroAttivo() {
     if (finestraApp(fg) || !tuttoSchermo) return false;
     gPercheSchermoIntero = "finestra senza bordi grande quanto lo schermo";
     return true;
+}
+
+// A schermo intero c'e' un gioco? Lo dice Windows per i giochi Direct3D esclusivi; per gli altri (quasi tutti oggi
+// sono finestre senza bordi) si guarda il nome dell'eseguibile nell'elenco dei giochi che Windows ha riconosciuto
+// (Game Bar: HKCU\System\GameConfigStore\Children\*\MatchedExeFullPath) e in quello dell'utente
+// (HKCU\Software\FluidWin\Giochi, piu' righe: nomi come "gioco.exe"). Il nome si legge dall'istantanea dei processi
+// di Windows, senza aprire il processo del gioco (gli anti-cheat controllano chi lo apre).
+static std::wstring minuscolo(std::wstring s) { for (auto& c : s) c = towlower(c); return s; }
+
+static const std::unordered_set<std::wstring>& giochiNoti() {
+    static std::unordered_set<std::wstring> el;
+    static ULONGLONG letto = 0;
+    if (letto && GetTickCount64() - letto < 60000) return el;   // si rilegge ogni minuto (giochi installati nel frattempo)
+    letto = GetTickCount64();
+    el.clear();
+    HKEY c = nullptr;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"System\\GameConfigStore\\Children", 0, KEY_READ, &c) == ERROR_SUCCESS) {
+        for (DWORD i = 0; i < 2000; i++) {
+            wchar_t nome[128]; DWORD ln = 128;
+            if (RegEnumKeyExW(c, i, nome, &ln, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
+            wchar_t p[MAX_PATH * 2] = L""; DWORD n = sizeof(p) - sizeof(wchar_t);
+            if (RegGetValueW(c, nome, L"MatchedExeFullPath", RRF_RT_REG_SZ, nullptr, p, &n) == ERROR_SUCCESS) {
+                const wchar_t* b = wcsrchr(p, L'\\');
+                el.insert(minuscolo(b ? b + 1 : p));
+            }
+        }
+        RegCloseKey(c);
+    }
+    std::vector<wchar_t> b(8192); DWORD n = (DWORD)(b.size() * sizeof(wchar_t)) - 4;
+    if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"Giochi", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &n) == ERROR_SUCCESS)
+        for (const wchar_t* p = b.data(); *p; p += wcslen(p) + 1) el.insert(minuscolo(p));
+    static size_t prima = (size_t)-1;
+    if (el.size() != prima) { prima = el.size(); logf("giochi riconosciuti (Game Bar e lista dell'utente): %zu", prima); }
+    return el;
+}
+
+static std::wstring nomeProcesso(DWORD pid) {
+    static DWORD ultimo = 0; static std::wstring nome;
+    if (pid == ultimo) return nome;
+    ultimo = pid; nome.clear();
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (s == INVALID_HANDLE_VALUE) return nome;
+    PROCESSENTRY32W pe{}; pe.dwSize = sizeof(pe);
+    for (BOOL ok = Process32FirstW(s, &pe); ok; ok = Process32NextW(s, &pe))
+        if (pe.th32ProcessID == pid) { nome = minuscolo(pe.szExeFile); break; }
+    CloseHandle(s);
+    return nome;
+}
+
+// da chiamare quando schermoInteroAttivo() ha appena detto si'
+static bool giocoASchermoIntero() {
+    if (!strcmp(gPercheSchermoIntero, "gioco Direct3D a schermo intero")) return true;
+    DWORD pid = 0; GetWindowThreadProcessId(GetForegroundWindow(), &pid);
+    if (!pid) return false;
+    const std::wstring n = nomeProcesso(pid);
+    return !n.empty() && giochiNoti().count(n) > 0;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2259,7 +2316,10 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (gDockOk) {
                 float liv = 0; bool muto = false;
                 gDock.volumeTasto(w == 1 ? 1 : w == 2 ? -1 : 0, liv, muto);
-                if (gOsdOk) gOsd.mostra(liv, muto);
+                // nel notch; se non si vede (gioco a schermo intero) l'indicatore di vetro
+                const bool nelNotch = gDock.ilNotch().volume(liv, muto);
+                if (gLog) logf("volume %.2f%s: %s", liv, muto ? " muto" : "", nelNotch ? "notch" : "indicatore di vetro");
+                if (!nelNotch && gOsdOk) gOsd.mostra(liv, muto);
             }
             return 0;
         case WM_PANORAMICA:
@@ -2325,7 +2385,13 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             // GPU persa anche senza niente da disegnare (si scopre al primo Present, ma si controlla anche qui)
             if ((gGenioOk && gGenio.gpuPersa()) || (gDockOk && gDock.gpuPersa())) riavvia("la GPU e' stata persa");
-            controlloSicurezza(); if (gDockOk) { const bool si = schermoInteroAttivo(); gLauncherTasto = !si; gDock.schermoIntero(si); gDock.controllaFinestre(); gDock.timer(); if (gLog) logf("dock: mosse=%ld fotogrammi=%ld lente=%.2f", gDock.diagMosse, gDock.diagFotogrammi, gDock.diagLente()); } return 0;
+            controlloSicurezza(); if (gDockOk) {
+                const bool si = schermoInteroAttivo(); gLauncherTasto = !si;
+                const int tipo = si ? (giocoASchermoIntero() ? 2 : 1) : 0;
+                static int tipoPrima = 0;
+                if (gLog && tipo != tipoPrima) logf("notch: %s", tipo == 2 ? "gioco a schermo intero, nascosto" : tipo == 1 ? "app a schermo intero, sfuma col mouse" : "normale");
+                tipoPrima = tipo;
+                gDock.schermoIntero(tipo); gDock.controllaFinestre(); gDock.timer(); if (gLog) logf("dock: mosse=%ld fotogrammi=%ld lente=%.2f", gDock.diagMosse, gDock.diagFotogrammi, gDock.diagLente()); } return 0;
         // spegnimento o disconnessione: Windows chiude il processo appena si torna da qui, e chiude anche il guardiano,
         // quindi i banner di Windows vanno rimessi adesso (senza, restavano spenti finche' FluidWin non veniva
         // riavviato e chiuso normalmente)
@@ -2483,6 +2549,14 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gRicerca.registro = [](const char* s) { logf("%s", s); };
     gBanner.isola = []() { return gDockOk ? gDock.rettIsolaSchermo() : vetro::areaPrincipale(true); };
     gBanner.silenzio = []() { return schermoInteroAttivo(); };
+    // le notifiche escono dal notch (se si vede; altrimenti il banner di vetro)
+    gBanner.nelNotch = [](const notifiche::Notifica& n, const std::vector<UINT>& px, int w, int h) {
+        return gDockOk && gDock.ilNotch().notifica(n.app, n.titolo, n.testo, px, w, h);
+    };
+    gDock.ilNotch().clicNotifica = []() { gBanner.apriAttuale(); };
+    gDock.ilNotch().chiudiNotifica = []() { gBanner.togliAttuale(); };
+    gDock.ilNotch().notificaFinita = []() { gBanner.notchFinito(); };
+    giochiNoti();   // (nel registro: quanti giochi conosce)
     gImpostazioni.cambiato = applicaImpostazioni;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
     gDock.impostazioni = apriImpostazioni;
