@@ -132,6 +132,54 @@ inline int pulsante(const std::wstring& verbo, const std::wstring& testo) {
     return 0;
 }
 
+// icona piccola della voce (menu::Icona), dal verbo o dal testo
+inline int simbolo(const std::wstring& verbo, const std::wstring& testo) {
+    const std::wstring v = minuscolo(verbo), t = pulito(testo);
+    auto inizia = [&](std::initializer_list<const wchar_t*> l) { for (auto x : l) if (t.rfind(x, 0) == 0) return true; return false; };
+    auto contiene = [&](std::initializer_list<const wchar_t*> l) { for (auto x : l) if (t.find(x) != std::wstring::npos) return true; return false; };
+    if (v == L"properties" || t == L"proprietà" || t == L"properties") return menu::I_PROPRIETA;
+    if (v == L"runas" || v == L"runasuser" || inizia({L"esegui come", L"run as"})) return menu::I_ADMIN;
+    if (inizia({L"apri nel terminale", L"open in terminal"})) return menu::I_TERMINALE;
+    if (inizia({L"apri con", L"open with"})) return menu::I_APRI_CON;
+    if (inizia({L"apri percorso", L"open file location", L"apri cartella", L"open folder"})) return menu::I_CARTELLA;
+    if (v == L"open" || v == L"opennew" || v == L"explore" || inizia({L"apri", L"open"})) return menu::I_APRI;
+    if (inizia({L"aggiungi a preferiti", L"add to favorites", L"rimuovi da preferiti", L"remove from favorites", L"aggiungi ad accesso rapido", L"pin to quick access"})) return menu::I_PREFERITI;
+    if (inizia({L"aggiungi a start", L"pin to start", L"rimuovi da start", L"unpin from start"})) return menu::I_START;
+    if (inizia({L"aggiungi alla barra", L"pin to taskbar", L"rimuovi dalla barra", L"unpin from taskbar"})) return menu::I_BARRA;
+    if (v == L"copyaspath" || inizia({L"copia come percorso", L"copy as path"})) return menu::I_PERCORSO;
+    if (contiene({L"copilot"})) return menu::I_COPILOT;
+    if (v == L"edit" || inizia({L"modifica", L"edit"})) return menu::I_MODIFICA;
+    if (contiene({L"zip", L"comprimi", L"compress", L"estrai", L"extract", L"winrar", L"7-zip"})) return menu::I_ZIP;
+    if (v == L"view" || inizia({L"visualizza", L"view"})) return menu::I_VISTA;
+    if (v == L"arrange" || inizia({L"ordina", L"sort"})) return menu::I_ORDINA;
+    if (v == L"groupby" || inizia({L"raggruppa", L"group"})) return menu::I_GRUPPI;
+    if (v == L"refresh" || inizia({L"aggiorna", L"refresh"})) return menu::I_AGGIORNA;
+    if (v == L"undo" || v == L"redo" || inizia({L"annulla", L"ripeti", L"undo", L"redo"})) return menu::I_ANNULLA;
+    if (inizia({L"nuovo", L"new"})) return menu::I_NUOVO;
+    if (inizia({L"impostazioni schermo", L"display settings"})) return menu::I_SCHERMO;
+    if (inizia({L"personalizza", L"personalize"})) return menu::I_PERSONALIZZA;
+    if (inizia({L"invia a", L"send to", L"dare accesso", L"concedi accesso", L"give access"})) return menu::I_INVIA;
+    if (v == L"link" || inizia({L"crea collegamento", L"create shortcut"})) return menu::I_COLLEGAMENTO;
+    if (v == L"print" || inizia({L"stampa", L"print"})) return menu::I_STAMPA;
+    if (contiene({L"defender", L"analizza", L"scan"})) return menu::I_SCUDO;
+    if (inizia({L"imposta come sfondo", L"set as desktop background"})) return menu::I_SCHERMO;
+    if (inizia({L"ripristina versioni", L"restore previous"})) return menu::I_ANNULLA;
+    return 0;
+}
+
+// percorso del file selezionato, se e' uno solo
+inline std::wstring percorsoSelezionato(IFolderView2* fv) {
+    std::wstring r;
+    IShellItemArray* a = nullptr; DWORD n = 0;
+    if (fv && SUCCEEDED(fv->GetSelection(FALSE, &a)) && a && SUCCEEDED(a->GetCount(&n)) && n == 1) {
+        IShellItem* it = nullptr; LPWSTR s = nullptr;
+        if (SUCCEEDED(a->GetItemAt(0, &it)) && it && SUCCEEDED(it->GetDisplayName(SIGDN_FILESYSPATH, &s)) && s) { r = s; CoTaskMemFree(s); }
+        if (it) it->Release();
+    }
+    if (a) a->Release();
+    return r;
+}
+
 // voce del menu compatto di Windows 11? (file: Apri, Apri con, Copia come percorso, Aggiungi a Preferiti, Modifica con,
 // Apri nel Terminale...; sfondo: Visualizza, Ordina per, Raggruppa per, Aggiorna, Annulla, Nuovo, Impostazioni
 // schermo, Personalizza...). Il resto va sotto la freccia
@@ -234,7 +282,7 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
     sv->GetItemObject(cosa == 1 ? SVGIO_SELECTION : SVGIO_BACKGROUND, IID_PPV_ARGS(&cm));
     if (cm) {
         HMENU m = CreatePopupMenu();
-        if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, 0x7FFF, CMF_NORMAL | CMF_CANRENAME))) {
+        if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, 0x7EFF, CMF_NORMAL | CMF_CANRENAME))) {
             IContextMenu2* cm2 = nullptr; IContextMenu3* cm3 = nullptr;
             cm->QueryInterface(IID_PPV_ARGS(&cm2)); cm->QueryInterface(IID_PPV_ARGS(&cm3));
             // come il menu di Windows 11: pulsanti in cima, voci principali (Proprieta' per ultima), poi sotto la
@@ -246,11 +294,33 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
                 wchar_t verbo[128] = L"";
                 if (v.id > 0 && !v.sotto && FAILED(cm->GetCommandString(v.id - 1, GCS_VERBW, nullptr, (LPSTR)verbo, 128))) verbo[0] = 0;
                 if (const int q = pulsante(verbo, v.testo)) { v.pulsante = q; pulsanti.push_back(v); continue; }
+                v.simbolo = simbolo(verbo, v.testo);
                 if (!wcscmp(verbo, L"properties") || pulito(v.testo) == L"propriet\u00e0" || pulito(v.testo) == L"properties") { proprieta.push_back(v); continue; }
                 if (principale(verbo, v.testo, cosa == 1)) principali.push_back(v);
                 else { v.extra = true; altre.push_back(v); }
             }
             while (!altre.empty() && altre.back().separatore) altre.pop_back();
+            // "Esegui come amministratore" sempre, per programmi, script e collegamenti (Windows a volte lo mette solo
+            // fra le altre opzioni, a volte per niente): se c'e' sotto la freccia sale fra le principali, se manca lo
+            // aggiunge FluidWin (ShellExecute "runas" sul file)
+            const UINT ID_ADMIN = 0x7F00;
+            std::wstring file = cosa == 1 ? percorsoSelezionato(fv) : L"";
+            if (!file.empty()) {
+                std::wstring est = file.substr(file.find_last_of(L'.') == std::wstring::npos ? file.size() : file.find_last_of(L'.'));
+                est = minuscolo(est);
+                const bool programma = est == L".exe" || est == L".lnk" || est == L".bat" || est == L".cmd" || est == L".msi" || est == L".com";
+                bool c = false;
+                for (auto& x : principali) if (x.simbolo == menu::I_ADMIN) c = true;
+                for (size_t k = 0; k < altre.size() && !c; k++) if (altre[k].simbolo == menu::I_ADMIN) {
+                    menu::Voce x = altre[k]; x.extra = false; altre.erase(altre.begin() + k); c = true;
+                    principali.insert(principali.begin() + std::min<size_t>(1, principali.size()), x);
+                }
+                if (programma && !c) {
+                    menu::Voce x = menu::voce(testi::t(L"Esegui come amministratore", L"Run as administrator"), ID_ADMIN);
+                    x.simbolo = menu::I_ADMIN;
+                    principali.insert(principali.begin() + std::min<size_t>(1, principali.size()), x);
+                }
+            } else file.clear();
             for (auto& x : altre) x.extra = true;
             // l'ordine dei pulsanti come in Windows 11
             std::stable_sort(pulsanti.begin(), pulsanti.end(), [](const menu::Voce& x, const menu::Voce& y) {
@@ -270,7 +340,8 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
                 if (registro) registro(cosa == 1 ? "tasto destro: menu di FluidWin (file)" : "tasto destro: menu di FluidWin (sfondo)");
                 SetForegroundWindow(proprietario);
                 const UINT cmd = menu::mostra(voci, pt, proprietario, false, prepara);
-                if (cmd > 0) {
+                if (cmd == ID_ADMIN) ShellExecuteW(radice, L"runas", file.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                else if (cmd > 0) {
                     SetForegroundWindow(radice);   // (rinomina, incolla... agiscono sulla vista)
                     CMINVOKECOMMANDINFOEX ci{}; ci.cbSize = sizeof(ci); ci.fMask = CMIC_MASK_UNICODE | CMIC_MASK_PTINVOKE;
                     ci.hwnd = radice; ci.lpVerb = MAKEINTRESOURCEA(cmd - 1); ci.lpVerbW = MAKEINTRESOURCEW(cmd - 1);

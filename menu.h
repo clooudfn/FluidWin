@@ -37,8 +37,12 @@ struct Voce {
     HMENU sotto = nullptr;   // sottomenu (preso da un HMENU)
     int pulsante = 0;        // != 0: pulsante con icona nella riga in cima (vedi Icona), come nel menu di Windows 11
     bool extra = false;      // nascosta finche' non si passa sulla freccia in fondo (le "altre opzioni")
+    int simbolo = 0;         // icona piccola a sinistra del testo (Icona), 0 nessuna
 };
-enum Icona { I_NIENTE, I_TAGLIA, I_COPIA, I_INCOLLA, I_RINOMINA, I_CONDIVIDI, I_ELIMINA };
+enum Icona { I_NIENTE, I_TAGLIA, I_COPIA, I_INCOLLA, I_RINOMINA, I_CONDIVIDI, I_ELIMINA,
+             I_APRI, I_APRI_CON, I_ADMIN, I_PREFERITI, I_START, I_BARRA, I_PERCORSO, I_PROPRIETA, I_TERMINALE, I_COPILOT,
+             I_MODIFICA, I_ZIP, I_VISTA, I_ORDINA, I_GRUPPI, I_AGGIORNA, I_ANNULLA, I_NUOVO, I_SCHERMO, I_PERSONALIZZA,
+             I_INVIA, I_COLLEGAMENTO, I_STAMPA, I_CARTELLA, I_SCUDO };
 
 static Voce voce(const std::wstring& t, UINT id) { Voce v; v.testo = t; v.id = id; return v; }
 static Voce separatore() { Voce v; v.separatore = true; return v; }
@@ -105,6 +109,7 @@ private:
     int x0 = 0, y0 = 0;
     ULONGLONG tEsp = 0; double kEsp = 0;
     bool premutoPrima = true, escPrima = true;
+    bool conSimboli = false, versoAltoM = false;   // qualche voce ha l'icona (il testo si sposta); il menu si apre verso l'alto
 
     Menu(const std::vector<Voce>& v, HWND p, std::function<void(HMENU)> pr) : voci(v), proprietario(p), prepara(pr) {}
     ~Menu() {
@@ -181,6 +186,8 @@ private:
         }
         if (pulsanti) { largo = std::max(largo, (pulsanti * (LATO_PULSANTE + 4) + 12) * dpi); }
         conFreccia = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.extra; });
+        conSimboli = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.simbolo != 0; });
+        if (conSimboli) largo += 14 * dpi;
         W = (int)std::ceil(std::min(largo, 420 * dpi));
         // rettangoli: pulsanti in riga in cima, poi le voci, poi la freccia, poi le voci extra
         {
@@ -229,6 +236,7 @@ private:
         const int h = (int)std::ceil(hCompatto + (hPieno - hCompatto) * e);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), &mi);
         const int y = std::max((int)mi.rcWork.top, std::min(y0, (int)mi.rcWork.bottom - h));
+        if (alfa < 255) posa(1);   // (se l'apertura non era finita, la si chiude qui)
         SetWindowPos(fin, HWND_TOPMOST, x0, y, W, h, SWP_NOACTIVATE);
         H = h;
         if (rt) rt->Resize(D2D1::SizeU(W, H));
@@ -294,7 +302,13 @@ private:
             if (v.disattivata && !v.titolo) c.a *= 0.4f;
             if (v.titolo) c.a *= 0.55f;
             pen->SetColor(c);
-            const D2D1_RECT_F rtxt = {r.left + 24 * dpi, r.top, r.right - 24 * dpi, r.bottom};
+            const D2D1_RECT_F rtxt = {r.left + (conSimboli ? 36 : 24) * dpi, r.top, r.right - 24 * dpi, r.bottom};
+            if (v.simbolo && !v.titolo) {   // icona piccola a sinistra, un po' piu' leggera del testo
+                D2D1_COLOR_F ci = c; if (!evid) ci.a *= 0.8f;
+                pen->SetColor(ci);
+                icona(v.simbolo, r.left + 18 * dpi, (r.top + r.bottom) / 2, 0.82f);
+                pen->SetColor(c);
+            }
             rt->DrawText(v.testo.c_str(), (UINT32)v.testo.size(), v.titolo ? fmtTitolo : fmt, v.titolo ? D2D1_RECT_F{r.left + 10 * dpi, r.top, r.right, r.bottom} : rtxt,
                          pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
             if (v.spuntata) {   // segno di spunta a sinistra
@@ -313,9 +327,31 @@ private:
     }
 
     // icone della riga in cima, disegnate a linee
-    void icona(int q, float cx, float cy) {
-        const float d = dpi, s = 1.5f * d;
+    void icona(int q, float cx, float cy, float scala = 1) {
+        const float d = dpi * scala, s = 1.5f * dpi;
         auto l = [&](float x1, float y1, float x2, float y2) { rt->DrawLine({cx + x1 * d, cy + y1 * d}, {cx + x2 * d, cy + y2 * d}, pen, s); };
+        auto rr = [&](float x1, float y1, float x2, float y2, float r) { rt->DrawRoundedRectangle({{cx + x1 * d, cy + y1 * d, cx + x2 * d, cy + y2 * d}, r * d, r * d}, pen, s); };
+        auto cerchio = [&](float x, float y, float r) { rt->DrawEllipse({{cx + x * d, cy + y * d}, r * d, r * d}, pen, s); };
+        auto pieno = [&](float x, float y, float r) { rt->FillEllipse({{cx + x * d, cy + y * d}, r * d, r * d}, pen); };
+        // arco da a0 ad a1 (gradi, 0 = destra, in senso orario)
+        auto arco = [&](float r, float a0, float a1) {
+            ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* k = nullptr;
+            if (FAILED(f2d->CreatePathGeometry(&g)) || FAILED(g->Open(&k))) { if (g) g->Release(); return; }
+            const float p0 = a0 * 3.14159265f / 180, p1 = a1 * 3.14159265f / 180;
+            k->BeginFigure({cx + r * d * std::cos(p0), cy + r * d * std::sin(p0)}, D2D1_FIGURE_BEGIN_HOLLOW);
+            k->AddArc(D2D1::ArcSegment({cx + r * d * std::cos(p1), cy + r * d * std::sin(p1)}, {r * d, r * d}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                       (a1 - a0) > 180 ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+            k->EndFigure(D2D1_FIGURE_END_OPEN); k->Close(); k->Release();
+            rt->DrawGeometry(g, pen, s); g->Release();
+        };
+        auto spezzata = [&](std::initializer_list<D2D1_POINT_2F> p, bool chiusa) {
+            ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* k = nullptr;
+            if (FAILED(f2d->CreatePathGeometry(&g)) || FAILED(g->Open(&k))) { if (g) g->Release(); return; }
+            bool primo = true;
+            for (auto x : p) { const D2D1_POINT_2F q2 = {cx + x.x * d, cy + x.y * d}; if (primo) { k->BeginFigure(q2, D2D1_FIGURE_BEGIN_HOLLOW); primo = false; } else k->AddLine(q2); }
+            k->EndFigure(chiusa ? D2D1_FIGURE_END_CLOSED : D2D1_FIGURE_END_OPEN); k->Close(); k->Release();
+            rt->DrawGeometry(g, pen, s); g->Release();
+        };
         switch (q) {
             case I_TAGLIA:   // forbici
                 rt->DrawEllipse({{cx - 4 * d, cy + 5 * d}, 2.6f * d, 2.6f * d}, pen, s);
@@ -336,6 +372,62 @@ private:
             case I_ELIMINA:  // cestino
                 l(-6, -4.5f, 6, -4.5f); l(-2, -6.5f, 2, -6.5f);
                 l(-4.5f, -4.5f, -3.5f, 7); l(-3.5f, 7, 3.5f, 7); l(3.5f, 7, 4.5f, -4.5f); break;
+            case I_APRI:          // finestra con la freccia che esce
+                spezzata({{1, -6}, {-6, -6}, {-6, 6}, {6, 6}, {6, -1}}, false); l(0, 0, 7, -7); l(2, -7, 7, -7); l(7, -7, 7, -2); break;
+            case I_APRI_CON:      // finestra di un'app
+                rr(-7, -6, 7, 6, 1.5f); l(-7, -2.5f, 7, -2.5f); pieno(-5, -4.2f, 0.7f); pieno(-3, -4.2f, 0.7f); break;
+            case I_ADMIN: case I_SCUDO:   // scudo (con la spunta per Defender)
+                spezzata({{0, -7.5f}, {6, -5}, {6, 0}, {0, 7.5f}, {-6, 0}, {-6, -5}}, true);
+                if (q == I_SCUDO) { l(-2.5f, 0, -0.5f, 2.5f); l(-0.5f, 2.5f, 3, -2.5f); } break;
+            case I_PREFERITI: {   // stella
+                std::vector<D2D1_POINT_2F> p;
+                for (int i = 0; i < 10; i++) { const float a = (-90 + i * 36) * 3.14159265f / 180, r = (i % 2) ? 3.2f : 7.2f; p.push_back({r * std::cos(a), r * std::sin(a) + 0.6f}); }
+                spezzata({p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]}, true); break;
+            }
+            case I_START:         // quattro quadrati pieni (il logo di Start)
+                for (float x : {-6.5f, 0.8f}) for (float y : {-6.5f, 0.8f})
+                    rt->FillRoundedRectangle({{cx + x * d, cy + y * d, cx + (x + 5.7f) * d, cy + (y + 5.7f) * d}, 1.2f * d, 1.2f * d}, pen);
+                break;
+            case I_BARRA:         // puntina
+                cerchio(1.5f, -3, 3.5f); l(-0.8f, -0.6f, -6.5f, 6.5f); l(-2, -6, 5, 1); break;
+            case I_PERCORSO:      // catena (percorso)
+                rt->SetTransform(D2D1::Matrix3x2F::Rotation(-40, {cx, cy}));
+                rr(-7, -2.5f, 0.5f, 2.5f, 2.5f); rr(-0.5f, -2.5f, 7, 2.5f, 2.5f);
+                rt->SetTransform(D2D1::Matrix3x2F::Identity()); break;
+            case I_PROPRIETA:     // "i" nel cerchio
+                cerchio(0, 0, 7); l(0, -0.5f, 0, 4); pieno(0, -3.3f, 1); break;
+            case I_TERMINALE:     // >_
+                rr(-7, -6, 7, 6, 1.5f); l(-4, -2.5f, -1.5f, 0); l(-1.5f, 0, -4, 2.5f); l(0.5f, 3, 4, 3); break;
+            case I_COPILOT:       // scintilla a quattro punte
+                spezzata({{0, -7}, {1.6f, -1.6f}, {7, 0}, {1.6f, 1.6f}, {0, 7}, {-1.6f, 1.6f}, {-7, 0}, {-1.6f, -1.6f}}, true); break;
+            case I_MODIFICA:      // matita
+                spezzata({{-6, 6}, {-5.4f, 2.8f}, {3.6f, -6.2f}, {6.2f, -3.6f}, {-2.8f, 5.4f}}, true); l(1.6f, -4.2f, 4.2f, -1.6f); break;
+            case I_ZIP:           // scatola con la cerniera
+                rr(-6, -7, 6, 7, 1.5f); for (int i = 0; i < 4; i++) l(-1, -5.5f + i * 2.4f, 1, -5.5f + i * 2.4f); rr(-1.6f, 2.5f, 1.6f, 5.5f, 0.6f); break;
+            case I_VISTA:         // griglia
+                rr(-6.5f, -6.5f, -1, -1, 1); rr(1, -6.5f, 6.5f, -1, 1); rr(-6.5f, 1, -1, 6.5f, 1); rr(1, 1, 6.5f, 6.5f, 1); break;
+            case I_ORDINA:        // frecce su e giu'
+                l(-3, 6, -3, -6); l(-6, -3, -3, -6); l(-3, -6, 0, -3); l(3, -6, 3, 6); l(0, 3, 3, 6); l(3, 6, 6, 3); break;
+            case I_GRUPPI:        // righe raggruppate
+                pieno(-5.5f, -5, 1); l(-3, -5, 6, -5); pieno(-5.5f, 0, 1); l(-3, 0, 6, 0); pieno(-5.5f, 5, 1); l(-3, 5, 6, 5); break;
+            case I_AGGIORNA:      // freccia circolare
+                arco(6, -60, 230); l(6 * std::cos(-1.047f), 6 * std::sin(-1.047f), 6 * std::cos(-1.047f) + 0.5f, -8.5f); l(6 * std::cos(-1.047f), 6 * std::sin(-1.047f), 6.5f, -3); break;
+            case I_ANNULLA:       // freccia che torna indietro
+                arco(5, 180, 360); l(5, 0, 5, 4); l(-5, 0, -7.5f, -2.5f); l(-5, 0, -2.5f, -2.5f); break;
+            case I_NUOVO:         // piu'
+                cerchio(0, 0, 7); l(-3.5f, 0, 3.5f, 0); l(0, -3.5f, 0, 3.5f); break;
+            case I_SCHERMO:       // monitor
+                rr(-7.5f, -6, 7.5f, 3.5f, 1.5f); l(0, 3.5f, 0, 6.5f); l(-3.5f, 6.5f, 3.5f, 6.5f); break;
+            case I_PERSONALIZZA:  // tavolozza
+                arco(7, 20, 320); l(7 * std::cos(0.35f), 7 * std::sin(0.35f), 2.5f, 2.5f); pieno(-3, -2.5f, 1.1f); pieno(1, -4, 1.1f); pieno(-3.5f, 2, 1.1f); break;
+            case I_INVIA:         // aeroplanino di carta
+                spezzata({{-7, -1}, {7, -6}, {2, 7}, {-0.5f, 1.5f}}, true); l(-0.5f, 1.5f, 7, -6); break;
+            case I_COLLEGAMENTO:  // freccia curva del collegamento
+                rr(-7, -1, 1, 7, 1.5f); arco(4.5f, 180, 270); l(-0.5f, -4.5f, 6, -4.5f); l(3.5f, -7, 6, -4.5f); l(6, -4.5f, 3.5f, -2); break;
+            case I_STAMPA:        // stampante
+                rr(-7, -2.5f, 7, 4, 1.5f); spezzata({{-4, -2.5f}, {-4, -7}, {4, -7}, {4, -2.5f}}, false); rr(-4, 1.5f, 4, 7, 0.8f); break;
+            case I_CARTELLA:      // cartella
+                spezzata({{-7, -5.5f}, {-2.5f, -5.5f}, {-1, -3.5f}, {7, -3.5f}, {7, 6}, {-7, 6}}, true); break;
         }
     }
 
@@ -363,8 +455,32 @@ private:
         else { SetCapture(fin); disegna(); }
     }
 
+    // posizione durante le animazioni: k 0..1 (1 = al suo posto), alfa insieme
+    void posa(double k) {
+        const double e = 1 - std::pow(1 - std::clamp(k, 0.0, 1.0), 3);
+        const int off = (int)std::lround((1 - e) * 8 * dpi) * (versoAltoM ? 1 : -1);
+        SetWindowPos(fin, HWND_TOPMOST, x0, y0 + off, 0, 0, SWP_NOACTIVATE | SWP_NOSIZE);
+        alfa = (BYTE)std::lround(255 * std::clamp(k, 0.0, 1.0));
+        SetLayeredWindowAttributes(fin, 0, alfa, LWA_ALPHA);
+    }
+
+    // chiusura: dissolvenza e scivolata indietro (110 ms), poi via
+    void chiudiAnimato() {
+        RECT r; GetWindowRect(fin, &r); y0 = r.top; x0 = r.left;
+        const ULONGLONG t = GetTickCount64();
+        const double da = alfa / 255.0;
+        for (;;) {
+            const double k = std::min(1.0, (GetTickCount64() - t) / 110.0);
+            posa(da * (1 - k));
+            if (k >= 1) break;
+            if (animazioni()) passoAnimazioni(); else Sleep(8);
+        }
+        ShowWindow(fin, SW_HIDE);
+    }
+
     UINT esegui(POINT pt, bool versoAlto, Menu* p) {
         padre = p;
+        versoAltoM = versoAlto;
         crea(pt, versoAlto);
         if (!fin || !rt) return 0;   // (grafica non disponibile: niente menu, come se fosse stato annullato)
         ShowWindow(fin, SW_SHOWNOACTIVATE);
@@ -380,10 +496,9 @@ private:
             fuoriOEsc();
             if (fine) break;
             if (espanso && kEsp < 1) { passoEspansione(); if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue; }
-            // dissolvenza d'apertura (120 ms)
+            // apertura: dissolvenza e scivolata (150 ms)
             if (alfa < 255) {
-                alfa = (BYTE)std::min<ULONGLONG>(255, (GetTickCount64() - t0) * 255 / 120);
-                SetLayeredWindowAttributes(fin, 0, alfa, LWA_ALPHA);
+                posa((GetTickCount64() - t0) / 150.0);
                 if (!animazioni() && MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue;
             }
             // animazioni di FluidWin in corso: prima i messaggi in coda, poi un fotogramma (che aspetta il vblank)
@@ -394,7 +509,7 @@ private:
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         ReleaseCapture();
-        ShowWindow(fin, SW_HIDE);
+        chiudiAnimato();
         return scelta;
     }
 
