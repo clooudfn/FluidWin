@@ -20,6 +20,7 @@ struct Valori {
     bool winTab = true;           // Win+Tab apre la panoramica di FluidWin
     bool winS = true;             // Alt+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
+    bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
 };
 
@@ -42,7 +43,7 @@ inline void carica() {
     v.gelatina = leggiDword(L"Gelatina", 1); v.genio = leggiDword(L"Genio", 1); v.chiusura = leggiDword(L"Chiusura", 1);
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
-    v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0);
+    v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
     testi::lingua() = v.lingua;
     // la capsula dei tasti non c'e' piu' (1.1.1): via i suoi valori rimasti dalle versioni prima
@@ -55,7 +56,7 @@ inline void salva() {
     scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
     scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
-    scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"Lingua", (DWORD)v.lingua);
+    scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
 }
 
 // ---- la finestra ----
@@ -153,8 +154,10 @@ private:
          L"App, file, impostazioni e calcoli (al posto del selettore)", L"Apps, files, settings and math (instead of the switcher)", &Valori::winS},
         {L"Onda di luce della ricerca", L"Search light wave",
          L"I bordi dello schermo si accendono di colori", L"The edges of the screen light up with color", &Valori::onda},
-        {L"Banner delle notifiche FluidWin", L"FluidWin notification banners",
-         L"Escono dall'isola; quelli di Windows si spengono", L"They come out of the island; the Windows ones are turned off", &Valori::banner},
+        {L"Notifiche di FluidWin", L"FluidWin notifications",
+         L"Escono dal notch; i banner di Windows si spengono", L"They come out of the notch; the Windows banners are turned off", &Valori::banner},
+        {L"Menu del tasto destro", L"Right-click menu",
+         L"Su desktop ed Esplora file, diviso per categorie (Maiusc+destro: quello di Windows)", L"On the desktop and in File Explorer, by category (Shift+right-click: the Windows one)", &Valori::menuDestro},
     };
     vetro::Finestra v;
     IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr;

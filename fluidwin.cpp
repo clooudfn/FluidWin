@@ -38,6 +38,7 @@
 #include "panoramica.h"
 #include "ricerca.h"
 #include "banner.h"
+#include "destro.h"
 
 // ---------------------------------------------------------------------------------------------
 // Parametri
@@ -2138,6 +2139,56 @@ static std::atomic<bool> gTastiVolume{false}, gTastoPanoramica{false}, gTastoRic
 static std::atomic<ULONGLONG> gBattito{0};
 static bool uiViva() { return GetTickCount64() - gBattito.load() < 1000; }
 
+// ---- tasto destro sul desktop e in Esplora file: il menu di FluidWin (destro.h) ----
+// Il gancio del mouse trattiene pressione e rilascio del tasto destro solo sopra quelle viste (non con Maiusc, non
+// se FluidWin e' bloccato) e al rilascio chiede il menu al thread principale. I clic rimandati da FluidWin a Windows
+// (SendInput) sono "iniettati" e il gancio li lascia passare.
+static const UINT WM_TASTO_DESTRO = WM_APP + 13;
+static std::atomic<bool> gMenuDestro{false};
+static bool gDestroPreso = false;
+static HHOOK gHookMouse = nullptr;
+static DWORD gThreadMouse = 0;
+
+static LRESULT CALLBACK suMouse(int code, WPARAM w, LPARAM l) {
+    if (code == HC_ACTION && (w == WM_RBUTTONDOWN || w == WM_RBUTTONUP)) {
+        const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)l;
+        if (!(m->flags & LLMHF_INJECTED)) {
+            if (w == WM_RBUTTONDOWN) {
+                gDestroPreso = gMenuDestro && uiViva() && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) && destro::vistaShell(m->pt);
+                if (gDestroPreso) return 1;
+            } else if (gDestroPreso) {
+                gDestroPreso = false;
+                PostMessageW(gMessaggi, WM_TASTO_DESTRO, 0, MAKELPARAM((short)m->pt.x, (short)m->pt.y));
+                return 1;
+            }
+        }
+    }
+    return CallNextHookEx(nullptr, code, w, l);
+}
+
+static DWORD WINAPI threadMouse(LPVOID) {
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+    gHookMouse = SetWindowsHookExW(WH_MOUSE_LL, suMouse, GetModuleHandleW(nullptr), 0);
+    SetTimer(nullptr, 0, 15000, nullptr);
+    MSG m;
+    while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+        // (come per la tastiera: ogni tanto il gancio si rimette, Windows toglie quelli che una volta sono stati lenti)
+        if (m.message == WM_TIMER && !gDestroPreso) {
+            if (gHookMouse) UnhookWindowsHookEx(gHookMouse);
+            gHookMouse = SetWindowsHookExW(WH_MOUSE_LL, suMouse, GetModuleHandleW(nullptr), 0);
+        }
+    }
+    if (gHookMouse) UnhookWindowsHookEx(gHookMouse);
+    return 0;
+}
+
+// il clic destro torna a Windows (il menu di FluidWin non si e' potuto mostrare)
+static void destroAWindows() {
+    INPUT in[2]{}; in[0].type = in[1].type = INPUT_MOUSE;
+    in[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; in[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    SendInput(2, in, sizeof(INPUT));
+}
+
 static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
     if (code == HC_ACTION) {
         const KBDLLHOOKSTRUCT* k = (const KBDLLHOOKSTRUCT*)l;
@@ -2257,6 +2308,7 @@ static void applicaImpostazioni() {
     gTastoPanoramica = v.winTab;
     gTastoRicerca = v.winS;
     gBanner.accendi(v.banner);
+    gMenuDestro = v.menuDestro;
     aggiornaTransizioni();
     // lingua cambiata: i testi si leggono al momento di disegnare, basta ridisegnare (date e nomi del dock si rifanno)
     static int linguaPrima = -1;
@@ -2343,6 +2395,11 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_APRI_LAUNCHER: if (gDockOk) gDock.apriLauncher(); return 0;
         case WM_HOTKEY: if (w == TASTO_PRIMO_PIANO) primoPiano(); return 0;
         case WM_CLIPBOARDUPDATE: appunti::Cronologia::io().cambiato(); return 0;   // cronologia degli appunti
+        case WM_TASTO_DESTRO: {
+            const POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+            if (!destro::mostra(pt, gMessaggi, [](const char* s) { logf("%s", s); })) destroAWindows();
+            return 0;
+        }
         case WM_VOLUME:
             if (gDockOk) {
                 float liv = 0; bool muto = false;
@@ -2622,6 +2679,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         gLauncherTasto = !schermoInteroAttivo();
         CloseHandle(CreateThread(nullptr, 0, threadTasti, nullptr, 0, &gThreadTasti));
     }
+    CloseHandle(CreateThread(nullptr, 0, threadMouse, nullptr, 0, &gThreadMouse));   // tasto destro (menu di FluidWin)
 
     // finestre gia' aperte; quelle gia' ridotte a icona (prima dell'avvio, o rimesse a posto da ripristinaTutte)
     // si preparano subito come le nostre: anche il loro primo ripristino sara' col genio
@@ -2674,6 +2732,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
 
     for (auto h : hooks) if (h) UnhookWinEvent(h);
     if (gThreadTasti) PostThreadMessageW(gThreadTasti, WM_QUIT, 0, 0);
+    if (gThreadMouse) PostThreadMessageW(gThreadMouse, WM_QUIT, 0, 0);
     impostaPausa(true);
     if (gDockOk) gDock.chiudi();
     banner::ripristinaBannerWindows();   // senza FluidWin tornano i banner di Windows (alla prossima apertura si rispengono)
