@@ -1224,6 +1224,10 @@ static void suNuovaFinestra(HWND h) {
     if (!dalDock && (GetAsyncKeyState(VK_LBUTTON) & 0x8000)) return rinuncia();   // scheda staccata trascinando
     if (!MonitorFromWindow(h, MONITOR_DEFAULTTONULL)) return rinuncia();   // fuori da tutti gli schermi: non si vedrebbe
     if (schermoInteroAttivo() || (!inAttesa && !nascondibile(h))) return rinuncia();
+    // non resa trasparente alla creazione (non vista nascere, come Proprieta' aperta da Esplora file): alla comparsa
+    // DWM ha gia' avviato la sua dissolvenza, che continua anche rendendola trasparente, e sotto la crescita si
+    // vedevano due finestre sovrapposte. Si lascia la comparsa di Windows (dal dock invece vale l'animazione)
+    if (!inAttesa && !dalDock) return rinuncia();
     // (in corso: trasparente la rende il thread; l'apertura aspetta la sua risposta)
     if (!inCorso) {
         spegniTransizioniNative(h);   // niente comparsa nativa: la anima FluidWin
@@ -1266,7 +1270,27 @@ static void passoAperture(double t) {
             const bool presa = stampa::prendi(ap.lavoro, px) && EqualRect(&wr, &ap.wr);
             ap.lavoro = nullptr;
             liberaFoto(h);
-            if (presa && gGenio.carica(h, i->visibile, wr, px.data(), gFoto[h])) {
+            // ritaglio della foto: di solito la parte visibile (senza i bordi invisibili). Ma alcune finestre (i
+            // dialoghi a misura fissa, come Proprieta') nella foto vengono disegnate con una cornice nera piu' larga dei
+            // loro bordi veri: la cornice va tolta, altrimenti nell'animazione la finestra ha attorno una fascia nera
+            RECT taglio = i->visibile;
+            if (presa) {
+                const int ww = wr.right - wr.left, wh = wr.bottom - wr.top;
+                auto nero = [&](int x, int y) { return (px[(size_t)y * ww + x] & 0xFFFFFF) == 0; };
+                int sx = 0, dx = 0, su = 0, giu = 0;
+                while (sx < 24 && sx < ww / 2 && nero(sx, wh / 2)) sx++;
+                while (dx < 24 && dx < ww / 2 && nero(ww - 1 - dx, wh / 2)) dx++;
+                while (su < 24 && su < wh / 2 && nero(ww / 2, su)) su++;
+                while (giu < 24 && giu < wh / 2 && nero(ww / 2, wh - 1 - giu)) giu++;
+                // (sotto i 24 pixel: oltre e' contenuto scuro dell'app, non cornice; il pixel del bordo DWM resta)
+                if (sx < 24) taglio.left = std::max(taglio.left, wr.left + std::max(0, sx - 1));
+                if (dx < 24) taglio.right = std::min(taglio.right, wr.right - std::max(0, dx - 1));
+                if (su < 24) taglio.top = std::max(taglio.top, wr.top + std::max(0, su - 1));
+                if (giu < 24) taglio.bottom = std::min(taglio.bottom, wr.bottom - std::max(0, giu - 1));
+                if (!EqualRect(&taglio, &i->visibile))
+                    logf("apertura %p: foto con cornice nera (%d %d %d %d), ritagliata", h, sx, su, dx, giu);
+            }
+            if (presa && gGenio.carica(h, taglio, wr, px.data(), gFoto[h])) {
                 Anim n;
                 n.hwnd = h; n.tipo = Tipo::Ripristina; n.genio = true;
                 n.da = i->visibile; n.t0 = n.tFase = t;
