@@ -94,6 +94,7 @@ inline auto Motore::raccogliIcone() -> bool {
         } else if (ip.lato == 64) {    // notifiche
             const std::wstring pre = L"shell:AppsFolder\\";
             if (ip.percorso.rfind(pre, 0) == 0) { iconeN[ip.percorso.substr(pre.size())] = b; presa = true; }
+            else if (auto it = iconeNDaExe.find(ip.percorso); it != iconeNDaExe.end()) { iconeN[it->second] = b; presa = true; }
             pDirty = true; altra.pDirty = true;
         }
         if (b && !presa) b->Release();

@@ -25,6 +25,7 @@ struct Stato {
     bool sveglioApplicato = false;
     ULONGLONG timerFino = 0, timerDurata = 0;      // timer in corso
     bool timerSuona = false; ULONGLONG suonaFino = 0;   // timer finito: suona
+    bool senzaSuono = false;                             // (solo per le prove: finisce senza la sveglia)
 };
 inline Stato& stato() { static Stato s; return s; }
 
@@ -63,6 +64,7 @@ inline void silenziaTimer() {
 }
 inline void avviaTimer(ULONGLONG ms) { silenziaTimer(); stato().timerDurata = ms; stato().timerFino = ms ? GetTickCount64() + ms : 0; }
 inline void fermaTimer() { stato().timerFino = 0; silenziaTimer(); }
+inline void aggiungiTimer(ULONGLONG ms) { if (stato().timerFino) { stato().timerFino += ms; stato().timerDurata += ms; } }
 
 // "4:32" o "1:04:32"
 inline std::wstring durata(ULONGLONG ms) {
@@ -80,7 +82,8 @@ inline void controlla() {
     if (s.timerFino && t >= s.timerFino) {   // fine del timer: suona
         s.timerFino = 0; s.timerSuona = true; s.suonaFino = t + 30000;
         wchar_t p[MAX_PATH]; GetWindowsDirectoryW(p, MAX_PATH); wcscat(p, L"\\Media\\Alarm01.wav");
-        if (GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES || !PlaySoundW(p, nullptr, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT))
+        if (s.senzaSuono) s.senzaSuono = false;
+        else if (GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES || !PlaySoundW(p, nullptr, SND_FILENAME | SND_ASYNC | SND_LOOP | SND_NODEFAULT))
             MessageBeep(MB_ICONASTERISK);
     }
     if (s.timerSuona && t >= s.suonaFino) silenziaTimer();

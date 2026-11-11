@@ -2495,6 +2495,8 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             logf("tasto destro giu' %ld,%ld: opzione %d, viva %d, vista %d (%ls in %ls, finestra %ls)", pt.x, pt.y, (int)(w & 1), (int)((w >> 1) & 1), (int)((w >> 2) & 1), c, p, r);
             return 0;
         }
+        // (prove, solo col registro acceso: timer di w ms che finisce senza suono)
+        case WM_APP + 17: if (gLog) { comodita::avviaTimer(w); comodita::stato().senzaSuono = true; logf("prova: timer di %llu ms", (unsigned long long)w); } return 0;
         case WM_APP + 15: logf("gancio del mouse: %s (errore %lu)", w ? "messo" : "NON messo", (unsigned long)l); return 0;
         case WM_TASTO_DESTRO: {
             const POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
@@ -2761,6 +2763,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gDock.ilNotch().clicNotifica = []() { gBanner.apriAttuale(); };
     gDock.ilNotch().chiudiNotifica = []() { gBanner.togliAttuale(); };
     gDock.ilNotch().notificaFinita = []() { gBanner.notchFinito(); };
+    gBanner.exeApp = [](const std::wstring& a, const std::wstring& n) { return gDockOk ? gDock.exeDiApp(a, n) : std::wstring(); };
     gBanner.conteggi = [](const std::unordered_map<std::wstring, int>& c) { if (gDockOk) gDock.numeriNotificheNuovi(c); };
     giochiNoti();   // (nel registro: quanti giochi conosce)
     // batteria e cuffie Bluetooth: un avviso nel notch

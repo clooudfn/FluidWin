@@ -335,47 +335,60 @@ inline auto Motore::renderPannello() -> bool {
     dc->PushAxisAlignedClip({0, 0, PW, hv}, D2D1_ANTIALIAS_MODE_ALIASED);
     if (tVista < 0) disegnaVista(pannelloTipo, PH, scuro, ink, D2D1::Matrix3x2F::Identity());
     else {
-        const float E = (float)e;
+        // Cambio di vista: il pulsante toccato cresce davvero e diventa il pannello. Un solo movimento da seguire con
+        // l'occhio: la vista di prima se ne va subito (solo dissolvenza), il cerchio del pulsante si allarga fino ai
+        // bordi del pannello con il suo simbolo che si ingrandisce e svanisce, poi dentro compare la vista nuova.
+        // Tornando indietro e' lo stesso movimento al contrario (il pannello rientra nel suo pulsante).
         const D2D1_POINT_2F o = origineVista;
-        // il cerchio deve arrivare all'angolo piu' lontano della finestra, alla sua altezza piu' grande
-        const float hm = std::max(phPrima, PH);
-        float rMax = 0;
-        for (D2D1_POINT_2F c : {D2D1_POINT_2F{0, 0}, D2D1_POINT_2F{PW, 0}, D2D1_POINT_2F{0, hm}, D2D1_POINT_2F{PW, hm}})
-            rMax = std::max(rMax, std::hypot(c.x - o.x, c.y - o.y));
-        rMax += 8 * dpi;
-        const D2D1_POINT_2F centro = {PW / 2, hv * 0.35f};
-        // sotto: quella che resta indietro (andando avanti la vecchia si allontana; tornando, il centro di controllo
-        // torna avanti); sopra: quella nel cerchio, che si apre (avanti) o si richiude verso il suo pulsante (indietro)
-        const int sotto = vistaAvanti ? vistaPrima : pannelloTipo, sopra = vistaAvanti ? pannelloTipo : vistaPrima;
-        const float hSotto = vistaAvanti ? phPrima : PH, hSopra = vistaAvanti ? PH : phPrima;
-        const float lontano = vistaAvanti ? E : 1 - E;   // 0 = davanti, 1 = lontano
-        const float rCerchio = rMax * (vistaAvanti ? E : 1 - E);
-        {
-            const float s = 1 - 0.07f * lontano;
+        const int interna = vistaAvanti ? pannelloTipo : vistaPrima, controllo = vistaAvanti ? vistaPrima : pannelloTipo;
+        const float hInterna = vistaAvanti ? PH : phPrima, hControllo = vistaAvanti ? phPrima : PH;
+        const float u = (float)(vistaAvanti ? e : 1 - e);   // 0 = pulsante, 1 = vista interna aperta
+        auto tratto01 = [](float x, float a, float b) { return std::clamp((x - a) / (b - a), 0.0f, 1.0f); };
+        auto liscio = [](float x) { return x * x * (3 - 2 * x); };
+        // 1) la vista del centro di controllo: c'e' solo all'inizio (avanti) o alla fine (indietro)
+        const float aControllo = 1 - tratto01(u, 0.0f, 0.28f);
+        if (aControllo > 0.01f) {
             ID2D1Layer* l = nullptr;
-            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                 D2D1::IdentityMatrix(), 1 - 0.82f * lontano), l);
-            disegnaVista(sotto, hSotto, scuro, ink, D2D1::Matrix3x2F::Scale(s, s, centro));
+            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), aControllo), l);
+            disegnaVista(controllo, hControllo, scuro, ink, D2D1::Matrix3x2F::Identity());
             dc->PopLayer();
         }
-        ID2D1EllipseGeometry* cerchio = nullptr;
-        f2d->CreateEllipseGeometry({o, rCerchio, rCerchio}, &cerchio);
-        if (cerchio && rCerchio > 0.5f) {
-            // il contenuto nel cerchio arriva appena piu' grande e si posa (come se emergesse dal punto toccato)
-            const float s = 1 + 0.05f * (1 - (vistaAvanti ? E : 1 - E));
-            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), cerchio, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
-                                                 D2D1::IdentityMatrix(), 1.0f), nullptr);
-            disegnaFondo({0.5f, 0.5f, PW - 0.5f, hv - 0.5f}, scuro);   // il vetro del cerchio copre la vista sotto
-            disegnaVista(sopra, hSopra, scuro, ink, D2D1::Matrix3x2F::Scale(s, s, o));
-            dc->PopLayer();
-            // il bordo del cerchio: un anello di luce che si spegne mentre si allarga
-            const float a = 0.28f * (1 - E);
-            if (a > 0.01f) {
-                pennello->SetColor(D2D1::ColorF(0.35f, 0.62f, 1.0f, a));
-                dc->DrawEllipse({o, rCerchio, rCerchio}, pennello, 2.0f * dpi);
+        // 2) il pulsante che cresce: da cerchio (raggio del pulsante) al rettangolo del pannello
+        const float g = liscio(tratto01(u, 0.0f, 0.62f));
+        const float r0 = (controlloCompatto() ? 22 : 26) * dpi, rf = std::max(6.0f, raggio::vetro() - 6.0f) * dpi;
+        const D2D1_RECT_F da = {o.x - r0, o.y - r0, o.x + r0, o.y + r0}, a2 = {6 * dpi, 6 * dpi, PW - 6 * dpi, hv - 6 * dpi};
+        const D2D1_RECT_F rc = {da.left + (a2.left - da.left) * g, da.top + (a2.top - da.top) * g, da.right + (a2.right - da.right) * g, da.bottom + (a2.bottom - da.bottom) * g};
+        const float rr = r0 + (rf - r0) * g;
+        const float aForma = 1 - tratto01(u, 0.55f, 1.0f);   // la forma si scioglie mentre la vista nuova e' gia' li'
+        if (aForma > 0.01f) {
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * aForma) : D2D1::ColorF(0, 0, 0, 0.06f * aForma));
+            dc->FillRoundedRectangle({rc, rr, rr}, pennello);
+            // il simbolo del pulsante, al centro della forma: cresce e svanisce
+            const float aSimbolo = 1 - tratto01(u, 0.0f, 0.42f);
+            if (aSimbolo > 0.01f) {
+                const D2D1_POINT_2F c = {(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
+                const float sc = 1 + 1.6f * g;
+                dc->SetTransform(D2D1::Matrix3x2F::Scale(sc, sc, c) * D2D1::Matrix3x2F::Identity());
+                baseVista = D2D1::Matrix3x2F::Scale(sc, sc, c);
+                pennello->SetColor({ink.r, ink.g, ink.b, ink.a * aSimbolo});
+                if (interna == P_WIDGET) simboloWidget(c.x, c.y);
+                else if (interna == P_SFONDO) simboloFreccia(c.x, c.y);
+                else if (interna == P_NOTIFICHE) simboloCampana(c.x, c.y);
+                else if (interna == P_APPUNTI) simboloAppunti(c.x, c.y);
+                else if (interna == P_MIXER) simboloVolume(c.x, c.y);
+                baseVista = D2D1::Matrix3x2F::Identity();
+                dc->SetTransform(baseVista);
             }
         }
-        if (cerchio) cerchio->Release();
+        // 3) la vista interna: compare dentro la forma quando e' quasi grande come il pannello
+        const float aInterna = tratto01(u, 0.38f, 0.9f);
+        if (aInterna > 0.01f) {
+            const float sv = 0.97f + 0.03f * liscio(aInterna);
+            ID2D1Layer* l = nullptr;
+            dc->PushLayer(D2D1::LayerParameters1(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1::IdentityMatrix(), aInterna), l);
+            disegnaVista(interna, hInterna, scuro, ink, D2D1::Matrix3x2F::Scale(sv, sv, {PW / 2, hv / 2}));
+            dc->PopLayer();
+        }
         elementi.clear();   // durante il cambio niente clic: le zone si ricalcolano a fine animazione
         pDirty = true;
     }
@@ -834,7 +847,10 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
             auto it = iconeN.find(n.aumid);
             if (it == iconeN.end()) {
                 it = iconeN.emplace(n.aumid, nullptr).first;
-                if (!n.aumid.empty()) chiediIcona(L"shell:AppsFolder\\" + n.aumid, 64);
+                // l'icona dall'eseguibile se il dock conosce l'app (quella vera), altrimenti dall'AppUserModelID
+                const std::wstring exe = exeDiApp(n.aumid, n.app);
+                if (!exe.empty()) { iconeNDaExe[exe] = n.aumid; chiediIcona(exe, 64); }
+                else if (!n.aumid.empty()) chiediIcona(L"shell:AppsFolder\\" + n.aumid, 64);
             }
             const D2D1_RECT_F ri = {r.left + 12 * dpi, r.top + 12 * dpi, r.left + 40 * dpi, r.top + 40 * dpi};
             if (it != iconeN.end() && it->second) dc->DrawBitmap(it->second, ri, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);

@@ -83,12 +83,12 @@ inline void ripristinaBannerWindows() {
     RegDeleteTreeW(HKEY_CURRENT_USER, COPIA);
 }
 
-// icona dell'app (64 px) in pixel BGRA premoltiplicati; false se non c'e'
-inline bool iconaApp(const std::wstring& aumid, std::vector<UINT>& px, int& w, int& h) {
+// icona (64 px) in pixel BGRA premoltiplicati di un elemento della shell (un .exe, shell:AppsFolder\...); false se non c'e'
+inline bool iconaDa(const std::wstring& nome, std::vector<UINT>& px, int& w, int& h) {
     px.clear(); w = h = 0;
-    if (aumid.empty()) return false;
+    if (nome.empty()) return false;
     IShellItemImageFactory* fab = nullptr;
-    if (FAILED(SHCreateItemFromParsingName((L"shell:AppsFolder\\" + aumid).c_str(), nullptr, IID_PPV_ARGS(&fab)))) return false;
+    if (FAILED(SHCreateItemFromParsingName(nome.c_str(), nullptr, IID_PPV_ARGS(&fab)))) return false;
     HBITMAP hb = nullptr;
     if (SUCCEEDED(fab->GetImage({64, 64}, SIIGBF_ICONONLY | SIIGBF_BIGGERSIZEOK, &hb)) && hb) {
         BITMAP bm{}; GetObject(hb, sizeof(bm), &bm);
@@ -109,8 +109,20 @@ inline bool iconaApp(const std::wstring& aumid, std::vector<UINT>& px, int& w, i
     return !px.empty();
 }
 
+// icona dell'app di una notifica dal suo AppUserModelID
+inline bool iconaApp(const std::wstring& aumid, std::vector<UINT>& px, int& w, int& h) {
+    return !aumid.empty() && iconaDa(L"shell:AppsFolder\\" + aumid, px, w, h);
+}
+
 class Banner {
 public:
+    // eseguibile dell'app di una notifica, se il dock la conosce (aumid, nome): da li' l'icona vera. Discord e altre
+    // app installate "a mano" hanno un AppUserModelID che la shell non sa risolvere: l'icona era quella generica
+    std::function<std::wstring(const std::wstring&, const std::wstring&)> exeApp;
+    bool iconaPer(const notifiche::Notifica& n, std::vector<UINT>& px, int& w, int& h) {
+        const std::wstring exe = exeApp ? exeApp(n.aumid, n.app) : L"";
+        return (!exe.empty() && iconaDa(exe, px, w, h)) || iconaApp(n.aumid, px, w, h);
+    }
     std::function<RECT()> isola;              // dove sta l'isola (il banner sale da sopra di lei)
     std::function<bool()> silenzio;           // vero con un gioco o un video a tutto schermo: niente banner sopra
     // mostra la notifica nel notch (false se il notch non c'e': allora il banner di vetro); quando il notch ha
@@ -258,7 +270,7 @@ private:
         attuale = coda.front(); coda.pop_front();
         if (nelNotch) {   // dal notch, se si vede
             std::vector<UINT> px; int iw = 0, ih = 0;
-            iconaApp(attuale.aumid, px, iw, ih);
+            iconaPer(attuale, px, iw, ih);
             if (nelNotch(attuale, px, iw, ih)) { stato = 4; return; }
         }
         v.aggiornaTema();
@@ -302,7 +314,7 @@ private:
     void caricaIcona() {
         if (!v.rt) return;
         std::vector<UINT> px; int w = 0, h = 0;
-        if (!iconaApp(attuale.aumid, px, w, h)) return;
+        if (!iconaPer(attuale, px, w, h)) return;
         v.rt->CreateBitmap(D2D1::SizeU(w, h), px.data(), w * 4,
                            D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &icona);
     }

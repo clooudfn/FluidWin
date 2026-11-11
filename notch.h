@@ -142,7 +142,7 @@ public:
     }
 
 private:
-    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO, TIMER, SUONA, SCAFFALE };
+    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO, TIMER, SUONA, SCAFFALE, TIMER_APERTO };
 
     HWND fin = nullptr;
     bool acceso = false, visibile = false;
@@ -151,7 +151,7 @@ private:
     float dpi = 1, fDpi = 0;
     std::wstring testoOra, testoGiorno;
     const wchar_t *fontTesto = L"Segoe UI Variable Text", *fontTitoli = L"Segoe UI Variable Display";
-    IDWriteTextFormat *fOra = nullptr, *fGiorno = nullptr, *fTitolo = nullptr, *fPiccolo = nullptr, *fTesto = nullptr, *fNumero = nullptr;
+    IDWriteTextFormat *fOra = nullptr, *fGiorno = nullptr, *fTitolo = nullptr, *fPiccolo = nullptr, *fTesto = nullptr, *fNumero = nullptr, *fGrande = nullptr;
     float lo = 0, lg = 0, largoOra = 0;   // larghezze di ora, giorno e del notch a riposo
 
     // superficie: DIB fisso con il suo render target software
@@ -183,6 +183,8 @@ private:
     int simboloAvviso = 0, valoreAvviso = -1;
     ULONGLONG secondoTimer = 0; UINT versioneSensori = 0;
     bool segnoSilenzio = false, segnoSveglio = false;   // lunetta e tazzina accanto all'ora (comodita.h)
+    double tSegnoSilenzio = -10, tSegnoSveglio = -10;   // quando sono comparse o sparite (dissolvenza)
+    float alfaSegno(bool acceso, double t0) const { const float k = (float)std::clamp((adesso() - t0) / 0.3, 0.0, 1.0); const float e = k * k * (3 - 2 * k); return acceso ? e : 1 - e; }
     bool notificaAttiva = false; double fineNotifica = 0;
     std::wstring nApp, nTitolo, nTesto; std::vector<UINT> nPx; int nW = 0, nH = 0; bool iconaNuova = false;
     musica::Lettore lettore; musica::Brano brano; UINT versioneBrano = 0xFFFFFFFF; bool copertinaNuova = false;
@@ -193,7 +195,7 @@ private:
     bool sopraX = false, mouseDentro = false;
     ULONGLONG tCima = 0;
 
-    std::vector<IDWriteTextFormat*> formati() const { return {fOra, fGiorno, fTitolo, fPiccolo, fTesto, fNumero}; }
+    std::vector<IDWriteTextFormat*> formati() const { return {fOra, fGiorno, fTitolo, fPiccolo, fTesto, fNumero, fGrande}; }
 
     static double adesso() { return vetro::ms() / 1000.0; }
 
@@ -235,7 +237,9 @@ private:
         if (t < fineAvviso) return AVVISO;
         if (comodita::timerSuona()) return SUONA;
         if (notificaAttiva) return NOTIFICA;
-        if (trascinoSopra || t < fineScaffale || (sopra && !scaffale.empty())) return SCAFFALE;
+        if (trascinoSopra || t < fineScaffale) return SCAFFALE;
+        if (sopra && comodita::timerAttivo()) return TIMER_APERTO;   // col mouse sopra: il timer grande, +1 min e stop
+        if (sopra && !scaffale.empty()) return SCAFFALE;
         if (sopra && brano.c) return APERTO;
         if (comodita::timerAttivo()) return TIMER;
         if (brano.c && brano.suona) return MUSICA;
@@ -252,9 +256,13 @@ private:
             case SCAFFALE: w = 372 * d; h = 96 * d; R = 26 * d; break;
             case AVVISO:   w = std::clamp(larghezzaAvviso + 76 * d, 220 * d, 372 * d); h = 32 * d; R = 14 * d; break;
             case TIMER:    w = largoOra + 104 * d; h = 22 * d; R = 9 * d; break;
+            case TIMER_APERTO: w = 312 * d; h = 60 * d; R = 24 * d; break;
             case SUONA:    w = 300 * d; h = 42 * d; R = 20 * d; break;
             default:       w = largoOra; h = 22 * d; R = 9 * d;
-                           if (!scaffale.empty()) w += 40 * d;                     // posto per il segno dello scaffale
+                           {   // posto per scaffale e tazzina (a sinistra) e luna (a destra), uguale ai due lati: l'ora resta al centro
+                               const float sx = (!scaffale.empty() ? 36 * d : 0) + (segnoSveglio ? 22 * d : 0), dx = segnoSilenzio ? 22 * d : 0;
+                               w += 2 * std::max(sx, dx);
+                           }
                            if (sopra) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
         }
         w = std::round(w); h = std::round(h); R = std::round(R);
@@ -287,6 +295,8 @@ private:
         if (std::fabs(livelloVis - livello) > 0.002f) { livelloVis += (livello - livelloVis) * (float)std::min(1.0, dt * 18); ancora = true; }
         else livelloVis = livello;
         if (scenaPrima != scena) { if (t - tScena < 0.30) ancora = true; else scenaPrima = scena; }
+        if ((scena == TIMER || scena == TIMER_APERTO) && t - tScena < 0.45) ancora = true;   // comparsa del timer
+        if (t - tSegnoSveglio < 0.32 || t - tSegnoSilenzio < 0.32) ancora = true;           // tazzina e luna
         ridisegna();
         if (!ancora) { animando = false; vetro::fermaBattito(fin, 1); }
     }
@@ -321,9 +331,8 @@ private:
         // microfono e webcam (pallini fuori dal notch)
         if (sensori::Sensori::io().versione != versioneSensori) { versioneSensori = sensori::Sensori::io().versione; ridisegnare = true; }
         // lunetta (non disturbare) e tazzina (tieni sveglio)
-        if (comodita::silenzio() != segnoSilenzio || comodita::sveglio() != segnoSveglio) {
-            segnoSilenzio = comodita::silenzio(); segnoSveglio = comodita::sveglio(); ridisegnare = true;
-        }
+        if (comodita::silenzio() != segnoSilenzio) { segnoSilenzio = comodita::silenzio(); tSegnoSilenzio = t; bersagli(); anima(); }
+        if (comodita::sveglio() != segnoSveglio) { segnoSveglio = comodita::sveglio(); tSegnoSveglio = t; bersagli(); anima(); }
         // mouse
         POINT p; GetCursorPos(&p);
         RECT c = corpo();
@@ -350,7 +359,7 @@ private:
         }
         // tasto sotto il mouse (aperto) e x della notifica
         const POINT pc = {p.x - posX(), p.y - schermo.top};
-        const int ps = scena == APERTO ? pulsante(pc.x, pc.y) : -1;
+        const int ps = scena == APERTO ? pulsante(pc.x, pc.y) : scena == TIMER_APERTO ? tastoTimerIn(pc.x, pc.y) : -1;
         const bool sx = scena == NOTIFICA && dentro && sullaX(pc.x, pc.y);
         if (ps != pulsanteSopra || sx != sopraX || dentro != mouseDentro) { pulsanteSopra = ps; sopraX = sx; mouseDentro = dentro; ridisegnare = true; }
         // scadenze: volume e notifica (ferma finche' c'e' sopra il mouse)
@@ -379,6 +388,18 @@ private:
         const float a = L + 100 * d, b = L + w - 22 * d, cx = (a + b) / 2;
         return {cx + (i - 1) * 46 * d, 72 * d};
     }
+    // timer aperto: 0 +1 min, 1 stop
+    D2D1_RECT_F tastoTimer(int i) const {
+        float w, h, R; misura(TIMER_APERTO, w, h, R);
+        const float L = sinistra(TIMER_APERTO), d = dpi, cy = h / 2;
+        if (i == 1) return {L + w - 54 * d, cy - 17 * d, L + w - 20 * d, cy + 17 * d};
+        return {L + w - 124 * d, cy - 15 * d, L + w - 62 * d, cy + 15 * d};
+    }
+    int tastoTimerIn(int x, int y) const {
+        for (int i = 0; i < 2; i++) { const D2D1_RECT_F r = tastoTimer(i); if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return i; }
+        return -1;
+    }
+
     int pulsante(int x, int y) const {
         for (int i = 0; i < 3; i++) {
             const D2D1_POINT_2F c = centroTasto(i);
@@ -400,6 +421,14 @@ private:
             return;
         }
         if (scena == SUONA) { comodita::silenziaTimer(); bersagli(); return; }   // clic: la sveglia smette
+        if (scena == TIMER_APERTO) {   // +1 min o stop; altrove sul timer non succede niente (prima apriva le notifiche)
+            const int b = tastoTimerIn(x, y);
+            if (b == 0) comodita::aggiungiTimer(60000);
+            else if (b == 1) { comodita::fermaTimer(); sopra = false; }
+            bersagli(); ridisegna();
+            return;
+        }
+        if (scena == TIMER) return;
         if (scena == NOTIFICA) {
             if (sullaX(x, y)) { if (chiudiNotifica) chiudiNotifica(); }
             else if (clicNotifica) clicNotifica();
@@ -458,7 +487,7 @@ private:
         IDWriteFactory* fdw = fabbriche::testo();
         if (!fdw || fDpi == dpi) return;
         for (IDWriteTextFormat* f : formati()) if (f) f->Release();
-        fOra = fGiorno = fTitolo = fPiccolo = fTesto = fNumero = nullptr;
+        fOra = fGiorno = fTitolo = fPiccolo = fTesto = fNumero = fGrande = nullptr;
         const float d = dpi;
         auto crea = [&](const wchar_t* fam, DWRITE_FONT_WEIGHT p, float px, IDWriteTextFormat** f, bool taglia, DWRITE_TEXT_ALIGNMENT al = DWRITE_TEXT_ALIGNMENT_LEADING) {
             if (FAILED(fdw->CreateTextFormat(fam, nullptr, p, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px * d, L"it-it", f)) || !*f) return;
@@ -475,6 +504,7 @@ private:
         crea(fontTesto, DWRITE_FONT_WEIGHT_MEDIUM, 11.0f, &fPiccolo, true);
         crea(fontTesto, DWRITE_FONT_WEIGHT_NORMAL, 12.0f, &fTesto, true);
         crea(fontTitoli, DWRITE_FONT_WEIGHT_SEMI_BOLD, 12.0f, &fNumero, false, DWRITE_TEXT_ALIGNMENT_TRAILING);
+        crea(fontTitoli, DWRITE_FONT_WEIGHT_SEMI_BOLD, 24.0f, &fGrande, false);
         fDpi = dpi;
     }
 
@@ -618,8 +648,21 @@ private:
             case ORA:
                 ora(L, w, h, a);
                 if (!scaffale.empty()) segnoScaffale(L + 18 * d, h / 2, a);
-                if (segnoSveglio) tazzina(L + (scaffale.empty() ? 15 : 44) * d, h / 2, 0.75f * a);
-                if (segnoSilenzio) lunetta(L + w - 15 * d, h / 2, 0.75f * a);
+                {   // tazzina e luna: compaiono e spariscono con una dissolvenza e crescendo un poco
+                    const float as = alfaSegno(segnoSveglio, tSegnoSveglio), al = alfaSegno(segnoSilenzio, tSegnoSilenzio);
+                    if (as > 0.01f) {
+                        const D2D1_POINT_2F c = {L + (scaffale.empty() ? 17 : 46) * d, h / 2};
+                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * as, 0.6f + 0.4f * as, c));
+                        tazzina(c.x, c.y, 0.8f * a * as);
+                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                    }
+                    if (al > 0.01f) {
+                        const D2D1_POINT_2F c = {L + w - 17 * d, h / 2};
+                        rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * al, 0.6f + 0.4f * al, c));
+                        lunetta(c.x, c.y, 0.8f * a * al);
+                        rt->SetTransform(D2D1::Matrix3x2F::Identity());
+                    }
+                }
                 break;
             case AVVISO: {
                 const float cx = L + 24 * d, cy = h / 2;
@@ -641,10 +684,32 @@ private:
             case SCAFFALE: scaffaleScena(L, w, h, a); break;
             case TIMER: {   // ora al centro, anello del timer a sinistra e il tempo che resta a destra, in arancio
                 ora(L, w, h, a);
-                anello(L + 20 * d, h / 2, 6.5f * d, (float)comodita::timerAvanzamento(), a);
+                // comparsa: l'anello cresce dal centro e il tempo entra scivolando da destra
+                const float ka = (float)std::clamp((adesso() - tScena - 0.08) / 0.32, 0.0, 1.0), e = ka * ka * (3 - 2 * ka);
+                if (e > 0.01f) anello(L + 20 * d, h / 2, 6.5f * d * e, (float)comodita::timerAvanzamento(), a * e);
+                colore(1.0f, 0.62f, 0.04f, a * e);
+                const std::wstring r = comodita::durata(comodita::timerResto());
+                rt->DrawText(r.c_str(), (UINT32)r.size(), fNumero, {L + w - 70 * d + (1 - e) * 12 * d, 0, L + w - 14 * d + (1 - e) * 12 * d, h}, pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                break;
+            }
+            case TIMER_APERTO: {   // timer grande: anello, tempo che resta, +1 min, stop
+                const float cy = h / 2, ka = (float)std::clamp((adesso() - tScena - 0.06) / 0.3, 0.0, 1.0);
+                const float e = ka * ka * (3 - 2 * ka);
+                anello(L + 34 * d, cy, (8 + 6 * e) * d, (float)comodita::timerAvanzamento(), a);
                 colore(1.0f, 0.62f, 0.04f, a);
                 const std::wstring r = comodita::durata(comodita::timerResto());
-                rt->DrawText(r.c_str(), (UINT32)r.size(), fNumero, {L + w - 70 * d, 0, L + w - 14 * d, h}, pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                rt->DrawText(r.c_str(), (UINT32)r.size(), fGrande, {L + 60 * d + (1 - e) * 10 * d, 0, L + w - 126 * d, h}, pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                const D2D1_RECT_F rp = tastoTimer(0), rs = tastoTimer(1);
+                colore(1, 1, 1, (pulsanteSopra == 0 ? 0.24f : 0.14f) * a);
+                rt->FillRoundedRectangle({rp, 15 * d, 15 * d}, pen);
+                const DWRITE_TEXT_ALIGNMENT al = fPiccolo->GetTextAlignment();
+                fPiccolo->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                scrivi(testi::t(L"+1 min", L"+1 min"), fPiccolo, rp, a);
+                fPiccolo->SetTextAlignment(al);
+                colore(1.0f, 0.42f, 0.32f, (pulsanteSopra == 1 ? 1.0f : 0.85f) * a);
+                rt->FillEllipse({{(rs.left + rs.right) / 2, cy}, 17 * d, 17 * d}, pen);
+                colore(1, 1, 1, a);
+                rt->FillRoundedRectangle({{(rs.left + rs.right) / 2 - 5 * d, cy - 5 * d, (rs.left + rs.right) / 2 + 5 * d, cy + 5 * d}, 1.5f * d, 1.5f * d}, pen);
                 break;
             }
             case SUONA: {   // timer finito: cerchio arancio che pulsa

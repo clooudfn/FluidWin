@@ -512,6 +512,16 @@ public:
     }
 
     notch::Notch& ilNotch() { return notch; }
+    // eseguibile di un'app che il dock conosce (per AppUserModelID o per nome): l'icona vera delle sue notifiche
+    std::wstring exeDiApp(const std::wstring& aumid, const std::wstring& nome) const {
+        for (const auto& v : voci) {
+            if (v.exe.empty() || v.avvio.empty() || v.avvio[0] == L'*') continue;
+            if ((!aumid.empty() && !_wcsicmp(v.aumid.c_str(), aumid.c_str())) || (!nome.empty() && !_wcsicmp(v.nome.c_str(), nome.c_str()))) return v.exe;
+        }
+        for (const auto& a : tutteApp)   // (anche le app del launcher che non sono nel dock)
+            if (!nome.empty() && !_wcsicmp(a.nome.c_str(), nome.c_str()) && a.avvio.size() > 4 && !_wcsicmp(a.avvio.c_str() + a.avvio.size() - 4, L".exe")) return a.avvio;
+        return L"";
+    }
     // scala con cui e' fatto il dock e quella di adesso del suo schermo (cambiata dalle Impostazioni: si riparte)
     bool scalaCambiata() const { return attivo && monitor && std::fabs(::vetro::dpiMonitor(monitor) - dpi) > 0.01f; }
     // numeri delle notifiche per app (dal banner, ogni secondo e mezzo): si ridisegna solo se cambiano
@@ -966,7 +976,7 @@ private:
             // "sopra al dock" dalla posizione vera del mouse (mouseDentro puo' restare vero se Windows non avvisa dell'uscita)
             const bool sopraIcone = WindowFromPoint(pt) == icone;
             const bool vicino = (sopraIcone && mouseSulDock) || (alto && x >= zonaDockL - 40 * dpi && x <= zonaDockR + 40 * dpi);
-            if (vicino || lAperto) fuoriDal = -1;
+            if (vicino || lAperto || !nessunaScheda()) fuoriDal = -1;   // (pannello aperto: il dock resta su con lui)
             else if (fuoriDal < 0) fuoriDal = adesso();
             else if (adesso() - fuoriDal > 0.35) { rivelato = false; fuoriDal = -1; dirty = true; }
         }
@@ -1072,7 +1082,8 @@ private:
             rivelato = true; fuoriDal = -1;   // risale anche se sul nuovo schermo dovrebbe stare nascosto (il mouse e' li')
             movimento = true;
         }
-        const bool giu = spostamento || (vuoleNascondersi && !rivelato && t > rivelaFino && !lAperto);
+        // con un pannello del centro di controllo aperto (anche dal notch) il dock resta su; scende quando si chiude
+        const bool giu = spostamento || (vuoleNascondersi && !rivelato && t > rivelaFino && !lAperto && nessunaScheda());
         if (giu) movimento |= molla(yNascosto, velNascosto, fuori, 260, 0.9);
         else movimento |= molla(yNascosto, velNascosto, 0, 340, 0.42);
         const bool giuI = spostamento || (vuoleNascondersiI && !rivelatoI && nessunaScheda());
@@ -1499,6 +1510,7 @@ private:
     std::vector<notifiche::Notifica> listaN;
     bool permessoN = false;
     std::unordered_map<std::wstring, ID2D1Bitmap1*> iconeN;   // per AppUserModelID (nullptr = provata, nessuna icona)
+    std::unordered_map<std::wstring, std::wstring> iconeNDaExe;   // eseguibile chiesto al posto dell'AppUserModelID -> AppUserModelID
     IDWriteTextFormat* fmtGrande = nullptr;
     struct AppSfondo { std::wstring nome, exe, avvio, chiaveReg; ID2D1Bitmap* icona = nullptr; };
     struct Elemento { D2D1_RECT_F r; Azione azione; int indice; };
