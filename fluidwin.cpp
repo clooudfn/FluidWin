@@ -2507,7 +2507,7 @@ static void unFotogramma() {
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
-    CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);   // icone e collegamenti del dock passano dalla shell
+    OleInitialize(nullptr);   // COM a thread singolo + trascinamento OLE (file sul cestino del dock, pila dei Download)   // icone e collegamenti del dock passano dalla shell
     LARGE_INTEGER f; QueryPerformanceFrequency(&f); gFreq = (double)f.QuadPart;
 
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
@@ -2600,6 +2600,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gDock.ilNotch().clicNotifica = []() { gBanner.apriAttuale(); };
     gDock.ilNotch().chiudiNotifica = []() { gBanner.togliAttuale(); };
     gDock.ilNotch().notificaFinita = []() { gBanner.notchFinito(); };
+    gBanner.conteggi = [](const std::unordered_map<std::wstring, int>& c) { if (gDockOk) gDock.numeriNotificheNuovi(c); };
     giochiNoti();   // (nel registro: quanti giochi conosce)
     // batteria e cuffie Bluetooth: un avviso nel notch
     sensori::Sensori::io().avviso = [](const std::wstring& t, int s, int v, bool a) {

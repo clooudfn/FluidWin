@@ -55,6 +55,9 @@
 #include "notch.h"
 #include "comodita.h"
 #include "mixer.h"
+#include "pila.h"
+#include <ole2.h>
+#include <knownfolders.h>
 #include "testi.h"
 
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
@@ -69,6 +72,17 @@ static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse
 static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
 static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" del dock
 static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
+static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
+static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
+// voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
+static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || a == AVVIO_CESTINO || a == AVVIO_CONTROLLO; }
+
+static std::wstring cartellaDownload() {
+    PWSTR p = nullptr; std::wstring r;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Downloads, 0, nullptr, &p)) && p) r = p;
+    CoTaskMemFree(p);
+    return r;
+}
 
 struct Voce {
     std::wstring nome;
@@ -197,6 +211,9 @@ public:
         if (!creaLauncher(inst)) return false;
         notch.clic = [this] { apriCentro(P_NOTIFICHE); };   // un clic sul notch: le notifiche
         notch.crea(inst);
+        bersaglioDrop.d = this;
+        { const HRESULT hr = RegisterDragDrop(icone, &bersaglioDrop);   // file trascinati sul cestino (serve OleInitialize)
+          if (registro) { char b[64]; snprintf(b, 64, "trascinamento sul dock: 0x%08lx", (unsigned long)hr); scrivi(b); } }
         notch.font(fontTesto, fontTitoli);
 
         // nessuno spazio riservato: le finestre ingrandite prendono tutto lo schermo e il dock si nasconde sotto il bordo
@@ -330,6 +347,12 @@ public:
         if (appDaAggiornare) { aggiornaApp(); dirty = true; }
         if (vetroDaRiposizionare) posizionaVetri();
         aggiornaStato(false);
+        // cestino pieno o vuoto (ogni 2 s)
+        if (giroCestino++ % 4 == 0) {
+            SHQUERYRBINFO q{}; q.cbSize = sizeof(q);
+            const bool p = SUCCEEDED(SHQueryRecycleBinW(nullptr, &q)) && q.i64NumItems > 0;
+            if (p != cestinoPieno) { cestinoPieno = p; dirty = true; }
+        }
         // mixer aperto: si rilegge ogni secondo (app che iniziano o smettono di suonare, volumi cambiati da fuori)
         if (pannelloTipo == P_MIXER && !pChiusura && trascinaMixer < 0 && ++giroMixer % 2 == 0) rileggiMixer();
         // centro di controllo aperto: il tempo del timer e lo stato del microfono si aggiornano
@@ -450,7 +473,9 @@ public:
         if (!si) dirty = true;
     }
 
-    notch::Notch& ilNotch() { return notch; }   // volume e notifiche li mostra il notch (fluidwin.cpp)
+    notch::Notch& ilNotch() { return notch; }
+    // numeri delle notifiche per app (dal banner, ogni secondo e mezzo): si ridisegna solo se cambiano
+    void numeriNotificheNuovi(const std::unordered_map<std::wstring, int>& c) { if (c != numeriNotifiche) { numeriNotifiche = c; dirty = true; } }   // volume e notifiche li mostra il notch (fluidwin.cpp)
 
 private:
     static Motore*& gIstanza() { static Motore* m = nullptr; return m; }
@@ -480,6 +505,7 @@ private:
     // ---- stato ----
     std::vector<Voce> voci;
     size_t primaNonFissata = 0;      // indice della prima app aperta ma non aggiunta alla barra (separatore)
+    size_t primaFine = 0;            // indice della prima voce di fondo (pila, cestino, centro di controllo): altro separatore
     std::vector<std::wstring> ordineAperte;   // le app aperte restano nel posto in cui sono comparse la prima volta
     bool dirty = true, inMovimento = false, appDaAggiornare = true, nascostoSchermoIntero = false, vetroDaRiposizionare = false;
     double ultimoAggiornamento = -10, ultimoT = 0, dtFotogramma = 1.0 / 180;
@@ -787,7 +813,9 @@ private:
         std::stable_sort(nuove.begin() + fissate, nuove.end(), [&](const Voce& a, const Voce& b) {
             return std::find(ordineAperte.begin(), ordineAperte.end(), chiave(a)) < std::find(ordineAperte.begin(), ordineAperte.end(), chiave(b));
         });
-        // ultima icona: il centro di controllo (sempre in fondo, come il Cestino su macOS; disegnata dal dock)
+        // in fondo, come su macOS: la pila dei Download, il cestino e per ultimo il centro di controllo (disegnati dal dock)
+        { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
+        { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
         const bool primaVolta = voci.empty();
@@ -805,7 +833,7 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
@@ -825,9 +853,10 @@ private:
             Voce u = std::move(vecchia); vecchia.icona = nullptr;   // l'icona passa alla voce uscente: non va liberata qui sotto
             nuove.insert(nuove.begin() + pos, std::move(u));
         }
-        // (un'app che si chiude puo' essere finita dopo il centro di controllo: lui resta l'ultimo)
-        for (size_t i = 0; i + 1 < nuove.size(); i++)
-            if (nuove[i].avvio == AVVIO_CONTROLLO) { std::rotate(nuove.begin() + i, nuove.begin() + i + 1, nuove.end()); break; }
+        // (un'app che si chiude puo' essere finita dopo le voci di fondo: loro restano in fondo, nel loro ordine)
+        std::stable_partition(nuove.begin(), nuove.end(), [](const Voce& v) { return !voceDiFondo(v.avvio); });
+        primaFine = nuove.size();
+        for (size_t i = 0; i < nuove.size(); i++) if (voceDiFondo(nuove[i].avvio)) { primaFine = i; break; }
         for (auto& vecchia : voci) if (vecchia.icona) vecchia.icona->Release();
         voci = std::move(nuove);
         primaNonFissata = fissateTot;
@@ -916,6 +945,14 @@ private:
         return (float)((GAP * 2 + 1) * k);
     }
 
+    // separatore prima dell'icona i: fra fissate e aperte, e prima delle voci di fondo (uno solo se coincidono)
+    float sepPrima(size_t i) const {
+        if (i == 0) return 0;
+        if (i == primaNonFissata) return larghezzaSeparatore();
+        if (i == primaFine) return (float)(GAP * 2 + 1);
+        return 0;
+    }
+
     // x di ogni icona a riposo; lo spazio prima di un'icona cresce e cala con lei
     std::vector<float> posizioniRiposo() const { return disponi(std::vector<float>(voci.size(), S)); }
 
@@ -925,13 +962,13 @@ private:
         float tot = 0;
         for (size_t i = 0; i < voci.size(); i++) {
             if (i > 0) tot += GAP * (float)voci[i].scala;
-            if (i == primaNonFissata && i > 0) tot += larghezzaSeparatore();
+            tot += sepPrima(i);
             tot += lato[i] * (float)voci[i].scala;
         }
         float cur = W / 2.0f - tot / 2.0f;
         for (size_t i = 0; i < voci.size(); i++) {
             if (i > 0) cur += GAP * (float)voci[i].scala;
-            if (i == primaNonFissata && i > 0) cur += larghezzaSeparatore();
+            cur += sepPrima(i);
             x[i] = cur; cur += lato[i] * (float)voci[i].scala;
         }
         if (totale) *totale = tot;
@@ -973,6 +1010,7 @@ private:
                 if (voci[i].icona) voci[i].icona->Release();
                 voci.erase(voci.begin() + i);
                 if (i < primaNonFissata) primaNonFissata--;
+                if (i < primaFine) primaFine--;
                 premuta = -1; sopra = -1;
             } else i++;
         }
@@ -1036,8 +1074,8 @@ private:
         for (size_t i = 0; i < voci.size(); i++) {
             Voce& v = voci[i];
             const float sc = (float)v.scala, d = dim[i] * sc, x = xs[i];
-            if (i == primaNonFissata && i > 0) {
-                const float sep = larghezzaSeparatore(), sx = x - (sep + GAP * sc) / 2;
+            if (sepPrima(i) > 0) {
+                const float sep = sepPrima(i), sx = x - (sep + GAP * sc) / 2;
                 pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.22f * sep / (GAP * 2 + 1)));
                 dc->DrawLine({sx, yb - S * 0.85f}, {sx, yb - S * 0.15f}, pennello, 1.0f);
             }
@@ -1056,9 +1094,20 @@ private:
             if (v.icona) dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
             else if (v.avvio == AVVIO_CONTROLLO) disegnaIconaControllo(r, alfa, scuro);
+            else if (v.avvio == AVVIO_CESTINO) disegnaIconaCestino(r, alfa, scuro, dropSopra == (int)i);
             else {
                 pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f * alfa));
                 dc->FillRoundedRectangle({r, dd * 0.22f, dd * 0.22f}, pennello);
+            }
+            // numero delle notifiche (come su Mac e iPhone): pallino rosso in alto a destra
+            if (const int n = numeroDi(v); n > 0 && dd > 4) {
+                wchar_t b[8]; if (n > 99) wcscpy(b, L"99+"); else swprintf(b, 8, L"%d", n);
+                const float rb = std::max(9.0f * dpi, dd * 0.17f), lb = std::max(rb * 2, larghezzaTesto(b, fmtNome) + 9 * dpi);
+                const float bx = r.right - lb * 0.72f, by = r.top - rb * 0.25f;
+                pennello->SetColor(D2D1::ColorF(1.0f, 0.23f, 0.19f, alfa));
+                dc->FillRoundedRectangle({{bx, by, bx + lb, by + 2 * rb}, rb, rb}, pennello);
+                pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
+                scrivi(b, fmtNome, {bx, by, bx + lb, by + 2 * rb});
             }
             // pallino delle app aperte
             // (anche sotto App e il centro di controllo mentre sono aperti)
@@ -1580,6 +1629,76 @@ private:
 
     void simboloMicrofono(float cx, float cy, bool acceso);
     UINT versioneSensoriCentro = 0;   // per ridisegnare il riquadro del microfono quando cambia
+    // ---- numeri delle notifiche, cestino, pila ----
+    std::unordered_map<std::wstring, int> numeriNotifiche;   // AppUserModelID (minuscolo) -> quante
+    bool cestinoPieno = false; int giroCestino = 0;
+    int dropSopra = -1;                                      // icona sotto un trascinamento di file (il cestino)
+    pila::Pila pilaDownload;
+    int numeroDi(const Voce& v) const {
+        if (numeriNotifiche.empty() || v.avvio.empty() || v.avvio[0] == L'*') return 0;
+        const std::wstring a = minuscolo(v.aumid);
+        int n = 0;
+        for (const auto& [k, c] : numeriNotifiche) if ((!a.empty() && k == a) || (!v.exe.empty() && k == v.exe)) n += c;
+        return n;
+    }
+    void apriPila(const Voce& v) {
+        if (pilaDownload.aperta()) { pilaDownload.chiudi(); return; }
+        const RECT r = {schermo.left + (LONG)v.rett.left, schermo.bottom - H + (LONG)v.rett.top, schermo.left + (LONG)v.rett.right, schermo.bottom - H + (LONG)v.rett.bottom};
+        pilaDownload.apri(r, cartellaDownload(), v.nome);
+    }
+    // trascinamento di file sul dock: sul cestino si spostano nel Cestino di Windows (come trascinarli sull'icona del desktop)
+    struct Bersaglio : IDropTarget {
+        Motore* d = nullptr; bool file = false;
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** p) override { if (r == IID_IUnknown || r == IID_IDropTarget) { *p = this; return S_OK; } *p = nullptr; return E_NOINTERFACE; }
+        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* o, DWORD, POINTL pt, DWORD* e) override {
+            FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+            file = o && o->QueryGetData(&f) == S_OK;
+            return DragOver(0, pt, e);
+        }
+        HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL pt, DWORD* e) override {
+            const float x = (float)(pt.x - d->schermo.left), y = (float)(pt.y - (d->schermo.bottom - d->H));
+            d->mouseDentro = true; d->mouseSulDock = true; d->mouseX = x; d->mouseY = y;   // la lente segue il trascinamento
+            const int i = d->iconaInPunto(x, y);
+            const int s = (file && i >= 0 && d->voci[i].avvio == AVVIO_CESTINO) ? i : -1;
+            if (s != d->dropSopra) d->dropSopra = s;
+            d->dirty = true;
+            *e = s >= 0 ? DROPEFFECT_MOVE : DROPEFFECT_NONE;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE DragLeave() override { d->dropSopra = -1; d->mouseDentro = false; d->mouseSulDock = false; d->sopra = -1; d->dirty = true; return S_OK; }
+        HRESULT STDMETHODCALLTYPE Drop(IDataObject* o, DWORD k, POINTL pt, DWORD* e) override {
+            DragOver(k, pt, e);
+            const bool cestino = d->dropSopra >= 0;
+            DragLeave();
+            if (!cestino || !o) { *e = DROPEFFECT_NONE; return S_OK; }
+            FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM m{};
+            if (FAILED(o->GetData(&f, &m))) { *e = DROPEFFECT_NONE; return S_OK; }
+            std::wstring lista;   // percorsi separati da \0, con \0\0 in fondo (come vuole SHFileOperation)
+            if (HDROP hd = (HDROP)GlobalLock(m.hGlobal)) {
+                const UINT n = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
+                for (UINT i = 0; i < n; i++) { wchar_t p[MAX_PATH * 4]; if (DragQueryFileW(hd, i, p, MAX_PATH * 4)) { lista += p; lista.push_back(L'\0'); } }
+                GlobalUnlock(m.hGlobal);
+            }
+            ReleaseStgMedium(&m);
+            if (lista.empty()) { *e = DROPEFFECT_NONE; return S_OK; }
+            lista.push_back(L'\0');
+            if (d->registro) d->scrivi("file trascinati sul cestino: nel Cestino di Windows");
+            // nel Cestino (FOF_ALLOWUNDO: si possono ripristinare), in un thread a parte per non fermare il dock
+            auto* copia = new std::wstring(std::move(lista));
+            CloseHandle(CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
+                std::wstring* l = (std::wstring*)p;
+                CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+                SHFILEOPSTRUCTW op{}; op.wFunc = FO_DELETE; op.pFrom = l->c_str(); op.fFlags = FOF_ALLOWUNDO;
+                SHFileOperationW(&op);
+                CoUninitialize(); delete l; return 0;
+            }, copia, 0, nullptr));
+            d->giroCestino = 0;
+            *e = DROPEFFECT_MOVE;
+            return S_OK;
+        }
+    } bersaglioDrop;
     // mixer del volume (vista P_MIXER, mixer.h): indice delle righe = uscita * 1000 + app + 1 (0 = l'uscita)
     mixer::Mixer mix;
     int trascinaMixer = -1;
@@ -1812,6 +1931,39 @@ private:
 
     // l'icona del centro di controllo: la stessa piastrella di vetro di "App", con i due interruttori di iOS (quello in
     // alto acceso, azzurro; quello in basso spento)
+    // cestino: stesso fondo dell'icona del centro di controllo, secchio con coperchio; pieno: fogli che spuntano.
+    // Con dei file trascinati sopra il coperchio si alza un poco
+    void disegnaIconaCestino(const D2D1_RECT_F& r, float alfa, bool scuro, bool sopraDrop) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.9f * alfa) : D2D1::ColorF(0.25f, 0.25f, 0.3f, alfa);
+        const float bw = d * 0.20f, top = cy - d * 0.12f, bot = cy + d * 0.27f, sp = std::max(1.2f, d * 0.035f);
+        if (cestinoPieno) {   // fogli
+            pennello->SetColor(scuro ? D2D1::ColorF(0.85f, 0.88f, 0.95f, alfa) : D2D1::ColorF(0.55f, 0.62f, 0.75f, alfa));
+            dc->FillRoundedRectangle({{cx - bw * 0.75f, top - d * 0.08f, cx + bw * 0.05f, top + d * 0.08f}, sp, sp}, pennello);
+            dc->FillRoundedRectangle({{cx - bw * 0.05f, top - d * 0.11f, cx + bw * 0.7f, top + d * 0.08f}, sp, sp}, pennello);
+        }
+        pennello->SetColor(ink);
+        ID2D1PathGeometry* g = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {   // secchio un poco piu' stretto in basso
+            ID2D1GeometrySink* s = nullptr; g->Open(&s);
+            s->BeginFigure({cx - bw, top}, D2D1_FIGURE_BEGIN_HOLLOW);
+            const D2D1_POINT_2F p[] = {{cx - bw * 0.8f, bot}, {cx + bw * 0.8f, bot}, {cx + bw, top}};
+            s->AddLines(p, 3); s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
+            dc->DrawGeometry(g, pennello, sp * 1.4f, tratto); g->Release();
+        }
+        for (int k = -1; k <= 1; k++) dc->DrawLine({cx + k * bw * 0.42f, top + d * 0.07f}, {cx + k * bw * 0.34f, bot - d * 0.06f}, pennello, sp, tratto);
+        const float alza = sopraDrop ? d * 0.07f : 0;
+        dc->SetTransform(D2D1::Matrix3x2F::Rotation(sopraDrop ? -14.0f : 0.0f, {cx - bw * 1.2f, top - d * 0.04f}) * D2D1::Matrix3x2F::Translation(0, -alza));
+        dc->DrawLine({cx - bw * 1.2f, top - d * 0.04f}, {cx + bw * 1.2f, top - d * 0.04f}, pennello, sp * 1.5f, tratto);
+        dc->DrawLine({cx - bw * 0.3f, top - d * 0.10f}, {cx + bw * 0.3f, top - d * 0.10f}, pennello, sp * 1.5f, tratto);
+        dc->SetTransform(D2D1::Matrix3x2F::Identity());
+    }
+
     void disegnaIconaControllo(const D2D1_RECT_F& r, float alfa, bool scuro) {
         const float d = r.right - r.left;
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
@@ -1891,6 +2043,8 @@ private:
         Voce& v = voci[i];
         if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(); return; }
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
+        if (v.avvio == AVVIO_PILA) { apriPila(v); return; }
+        if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
             segnaLancio(v);   // la sua prima finestra uscira' dall'icona col genio
             ShellExecuteW(nullptr, L"open", v.avvio.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
@@ -1929,6 +2083,16 @@ private:
         // capo, e un riferimento a voci[i] resterebbe a puntare a memoria liberata
         const Voce v = voci[i];
         if (v.avvio == AVVIO_LAUNCHER || v.avvio == AVVIO_CONTROLLO) return;
+        if (v.avvio == AVVIO_CESTINO || v.avvio == AVVIO_PILA) {   // cestino e pila: menu loro
+            const bool c = v.avvio == AVVIO_CESTINO;
+            std::vector<menu::Voce> vv = {menu::titolo(v.nome), menu::voce(c ? testi::t(L"Apri", L"Open") : testi::t(L"Apri la cartella", L"Open folder"), 1)};
+            if (c) { auto x = menu::voce(testi::t(L"Svuota il cestino…", L"Empty Recycle Bin…"), 2); x.disattivata = !cestinoPieno; vv.push_back(menu::separatore()); vv.push_back(x); }
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            if (s == 1) ShellExecuteW(nullptr, L"open", c ? L"shell:RecycleBinFolder" : cartellaDownload().c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            if (s == 2) { SHEmptyRecycleBinW(icone, nullptr, 0); cestinoPieno = false; giroCestino = 0; dirty = true; }   // (chiede conferma Windows)
+            return;
+        }
         // eseguibile vero sul disco (non quelli protetti delle app dello Store)
         const bool exeVero = !v.exe.empty() && v.exe.find(L"\\windowsapps\\") == std::wstring::npos &&
                              GetFileAttributesW(v.exe.c_str()) != INVALID_FILE_ATTRIBUTES;

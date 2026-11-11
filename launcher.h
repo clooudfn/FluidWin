@@ -67,6 +67,7 @@ inline auto Motore::fermaIcone() -> void {
 }
 
 inline auto Motore::sorgenteIcona(const Voce& v) -> std::wstring {
+    if (v.avvio == AVVIO_PILA) return cartellaDownload();   // l'icona della cartella Download
     return v.fissata ? v.avvio : (v.avvio.rfind(L"shell:AppsFolder\\", 0) == 0 ? v.avvio : v.exe);
 }
 

@@ -116,6 +116,8 @@ public:
     // mostra la notifica nel notch (false se il notch non c'e': allora il banner di vetro); quando il notch ha
     // finito chiama notchFinito()
     std::function<bool(const notifiche::Notifica&, const std::vector<UINT>&, int, int)> nelNotch;
+    // quante notifiche ha ogni app (AppUserModelID minuscolo), a ogni lettura: i numeri sulle icone del dock
+    std::function<void(const std::unordered_map<std::wstring, int>&)> conteggi;
     bool attivo = false;
 
     // dal notch: la notifica mostrata e' sparita (si passa alla prossima), clic per aprirla, x per toglierla
@@ -233,6 +235,11 @@ private:
         // sopra un gioco o un video a tutto schermo un banner in primo piano lo fa uscire dal tutto schermo (o lo
         // riduce a icona): li' le notifiche non compaiono, restano nel centro notifiche come fa Windows
         const bool zitto = silenzio && silenzio();
+        if (conteggi) {
+            std::unordered_map<std::wstring, int> c;
+            for (const auto& n : lista) if (!n.aumid.empty()) { std::wstring k = n.aumid; for (auto& ch : k) ch = (wchar_t)towlower(ch); c[k]++; }
+            conteggi(c);
+        }
         std::unordered_set<UINT32> ora;
         for (const auto& n : lista) {
             ora.insert(n.id);
