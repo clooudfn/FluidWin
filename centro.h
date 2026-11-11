@@ -125,6 +125,7 @@ inline auto Motore::preparaVista(int tipo) -> void {
     else if (tipo == P_WIDGET) { widD.aggiorna(); wid = widD.copia(); }
     else if (tipo == P_NOTIFICHE) { Cronometro cr(this, "notifiche"); permessoN = lettoreN.leggi(listaN); }
     else if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
+    else if (tipo == P_MIXER) mix.leggi();
 }
 
 // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
@@ -134,6 +135,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     if (tipo == P_SFONDO) h = altezzaSfondo() + testa;
     else if (tipo == P_WIDGET) h = std::round(560 * dpi) + testa;
     else if (tipo == P_NOTIFICHE) h = altezzaNotifiche() + testa;
+    else if (tipo == P_MIXER) h = altezzaMixer() + testa;
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
 }
@@ -149,7 +151,7 @@ inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     pannelloTipo = tipo;
     PH = altezzaVista(tipo);
     tVista = adesso();
-    if (trascinaVolume || trascinaLum) { trascinaVolume = trascinaLum = false; ReleaseCapture(); }
+    if (trascinaVolume || trascinaLum || trascinaMixer >= 0) { trascinaVolume = trascinaLum = false; trascinaMixer = -1; ReleaseCapture(); }
     pSopra = pPremuto = -1; evidP.clear();
     pAnimazione = true; pDirty = true;
 }
@@ -226,7 +228,7 @@ inline auto Motore::chiudiPannello() -> void {
     // (tutte le viste crescono dall'icona del centro di controllo e ci rientrano)
     const double k = std::clamp(pK < 0 ? 0.0 : pK, 0.0, 1.0);
     pChiusura = true; pT0 = adesso() - std::sqrt(1 - k) * 0.17; pDirty = true; chiudiAlle = -1;
-    if (trascinaVolume || trascinaLum) { trascinaVolume = trascinaLum = false; ReleaseCapture(); }
+    if (trascinaVolume || trascinaLum || trascinaMixer >= 0) { trascinaVolume = trascinaLum = false; trascinaMixer = -1; ReleaseCapture(); }
     // si chiude quella davanti e l'altra resta: torna davanti al suo posto (senza giro)
     const int s = slotCorrente;
     usa(1 - s);
@@ -389,6 +391,7 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
         if (tipo == P_SFONDO) disegnaSfondo(scuro, ink);
         else if (tipo == P_NOTIFICHE) disegnaNotifiche(scuro, ink);
         else if (tipo == P_WIDGET) disegnaWidget(scuro, ink);
+        else if (tipo == P_MIXER) disegnaMixer(scuro, ink);
         for (size_t i = n; i < elementi.size(); i++) { elementi[i].r.top += testa; elementi[i].r.bottom += testa; }
     }
     baseVista = D2D1::Matrix3x2F::Identity(); dc->SetTransform(baseVista);
@@ -411,7 +414,8 @@ inline auto Motore::disegnaTesta(int tipo, bool scuro, D2D1_COLOR_F ink) -> void
     scrivi(testi::t(L"Controllo", L"Control"), fmtVoce, {cx + 12 * dpi, ri.top, ri.right, ri.bottom});
     dc->SetTransform(baseVista);
     // titolo al centro vero della testata (il formato dei titoli e' allineato a sinistra: si misura)
-    const std::wstring titolo = tipo == P_SFONDO ? testi::t(L"In background", L"In background") : tipo == P_WIDGET ? L"Widget" : testi::t(L"Notifiche", L"Notifications");
+    const std::wstring titolo = tipo == P_SFONDO ? testi::t(L"In background", L"In background") : tipo == P_WIDGET ? L"Widget"
+                              : tipo == P_MIXER ? testi::t(L"Mixer", L"Mixer") : testi::t(L"Notifiche", L"Notifications");
     const float lt = larghezzaTesto(titolo, fmtTitolo);
     pennello->SetColor(ink);
     scrivi(titolo, fmtTitolo, {std::max(110 * dpi, PW / 2 - lt / 2), ri.top, PW - m, ri.bottom});
@@ -449,6 +453,137 @@ inline auto Motore::scrivi(const std::wstring& s, IDWriteTextFormat* f, const D2
 }
 
 inline auto Motore::chevronDestra(float x, float cy) -> void { linea(-2, -4, 2, 0, x, cy, 1.8f); linea(2, 0, -2, 4, x, cy, 1.8f); }
+
+// ---- mixer del volume (riga "Uscita" del centro di controllo) ----
+// Per ogni uscita (la predefinita in cima, le altre solo se ci suona un'app): titolo, la riga dell'uscita e le righe
+// delle app. Ogni riga: simbolo o icona (clic = muto), nome, cursore sottile con il pallino, percentuale.
+static constexpr float MIX_TESTA = 30, MIX_RIGA = 46, MIX_SPAZIO = 12, MIX_PIEDE = 52;
+
+inline auto Motore::altezzaMixer() const -> float {
+    float h = 8;
+    for (const auto& u : mix.uscite) h += MIX_TESTA + MIX_RIGA * (1 + u.app.size()) + MIX_SPAZIO;
+    h += MIX_PIEDE;
+    return std::min(altezzaMassimaP() - std::round(TESTA * dpi), std::round(h * dpi));
+}
+
+inline auto Motore::rileggiMixer() -> void {
+    mix.leggi();
+    const int s = slotCorrente;
+    usa(0);
+    if (pannelloTipo == P_MIXER && !pChiusura) {
+        const float nuova = altezzaVista(P_MIXER);
+        if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        pDirty = true;
+    }
+    usa(s);
+}
+
+inline auto Motore::mixerDaMouse(float x) -> void {
+    for (auto& e : elementi) if (e.azione == A_MIXER_VOL && e.indice == trascinaMixer) {
+        const float l = e.r.left + 36 * dpi, r = e.r.right - 44 * dpi;   // il binario dentro la riga
+        mix.volume(e.indice / 1000, e.indice % 1000 - 1, (x - l) / std::max(1.0f, r - l));
+        if (e.indice % 1000 == 0) leggiVolume();   // l'uscita: anche il volume del dock e del centro di controllo
+        pDirty = true; dirty = true;
+        return;
+    }
+}
+
+// le uscite in un menu (si sceglie la predefinita) e le impostazioni audio
+inline auto Motore::menuUscite(const D2D1_RECT_F& r) -> void {
+    const auto lista = sistema::Sistema::uscite();
+    std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Uscita audio", L"Sound output"))};
+    for (size_t i = 0; i < lista.size(); i++) { auto x = menu::voce(lista[i].nome, (UINT)(i + 1)); x.spuntata = lista[i].predefinita; voci.push_back(x); }
+    voci.push_back(menu::separatore());
+    voci.push_back(menu::voce(testi::t(L"Mixer di Windows", L"Windows volume mixer"), 1001));
+    voci.push_back(menu::voce(testi::t(L"Impostazioni audio", L"Sound settings"), 1000));
+    POINT pt = {(LONG)r.left, (LONG)r.top}; ClientToScreen(pannello, &pt);
+    const UINT s = menuScheda(voci, pt, pannello);
+    if (s == 1000) { chiudiPannello(); apriPagina(L"ms-settings:sound"); }
+    else if (s == 1001) { chiudiPannello(); apriPagina(L"ms-settings:apps-volume"); }
+    else if (s >= 1 && s <= lista.size()) { sistema::Sistema::impostaUscita(lista[s - 1].id); leggiUscita(); leggiVolume(); rileggiMixer(); dirty = true; }
+}
+
+inline auto Motore::disegnaMixer(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi, limite = PH - MIX_PIEDE * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F blu = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
+    float y = 8 * dpi;
+    auto riga = [&](size_t u, int a, const std::wstring& nome, float vol, bool muto, ID2D1Bitmap* icona, bool uscita, bool sistema) {
+        const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + MIX_RIGA * dpi};
+        const int indice = (int)u * 1000 + a + 1;
+        const int ev = aggiungi(r, A_MIXER_VOL, indice);
+        evidenzia(ev, r, scuro, 10 * dpi);
+        // simbolo o icona: clic = muto
+        const float cx = m + 12 * dpi, cy = y + MIX_RIGA * dpi / 2;
+        const D2D1_RECT_F ri = {cx - 15 * dpi, cy - 15 * dpi, cx + 15 * dpi, cy + 15 * dpi};
+        const int em = aggiungi(ri, A_MIXER_MUTO, indice);
+        evidenzia(em, ri, scuro, 15 * dpi);
+        const float op = muto ? 0.4f : 1.0f;
+        if (icona) dc->DrawBitmap(icona, {cx - 11 * dpi, cy - 11 * dpi, cx + 11 * dpi, cy + 11 * dpi}, op, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+        else if (uscita) { pennello->SetColor({ink.r, ink.g, ink.b, ink.a * op}); simboloVolume(cx, cy); }
+        else if (sistema) { pennello->SetColor({ink.r, ink.g, ink.b, ink.a * op}); simboloCampana(cx, cy); }
+        else {
+            pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.6f * op));
+            dc->FillRoundedRectangle({{cx - 11 * dpi, cy - 11 * dpi, cx + 11 * dpi, cy + 11 * dpi}, 5 * dpi, 5 * dpi}, pennello);
+            pennello->SetColor(D2D1::ColorF(1, 1, 1, op));
+            scrivi(std::wstring(1, nome.empty() ? L'?' : (wchar_t)towupper(nome[0])), fmtNome, {cx - 11 * dpi, cy - 11 * dpi, cx + 11 * dpi, cy + 11 * dpi});
+        }
+        if (muto) { pennello->SetColor(D2D1::ColorF(1.0f, 0.27f, 0.23f, 1)); linea(-10, -10, 10, 10, cx, cy, 1.8f); }
+        // nome sopra, binario sotto
+        const float l = r.left + 36 * dpi, rr = r.right - 44 * dpi;
+        pennello->SetColor(muto ? tenue : ink);
+        scrivi(nome, uscita ? fmtVoce : fmtSotto, {l, y + 4 * dpi, rr + 40 * dpi, y + 22 * dpi});
+        const float ty = y + 32 * dpi, v = muto ? 0.0f : std::clamp(vol, 0.0f, 1.0f);
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f) : D2D1::ColorF(0, 0, 0, 0.10f));
+        dc->FillRoundedRectangle({{l, ty - 2 * dpi, rr, ty + 2 * dpi}, 2 * dpi, 2 * dpi}, pennello);
+        pennello->SetColor(blu);
+        if (v > 0) dc->FillRoundedRectangle({{l, ty - 2 * dpi, l + (rr - l) * v, ty + 2 * dpi}, 2 * dpi, 2 * dpi}, pennello);
+        const float kx = l + (rr - l) * v;
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, 1));
+        dc->FillEllipse({{kx, ty}, 7 * dpi, 7 * dpi}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, 0.18f));
+        dc->DrawEllipse({{kx, ty}, 7 * dpi, 7 * dpi}, pennello, 1.0f);
+        wchar_t pc[16]; swprintf(pc, 16, L"%d", (int)std::lround(vol * 100));
+        pennello->SetColor(tenue);
+        scrivi(pc, fmtNome, {rr + 8 * dpi, ty - 9 * dpi, r.right, ty + 9 * dpi});
+        y += MIX_RIGA * dpi;
+    };
+    for (size_t u = 0; u < mix.uscite.size() && y < limite; u++) {
+        const mixer::Uscita& x = mix.uscite[u];
+        // titolo dell'uscita: "Predefinita" oppure il pulsante per renderla predefinita
+        pennello->SetColor(tenue);
+        scrivi(x.predefinita ? testi::t(L"USCITA PREDEFINITA", L"DEFAULT OUTPUT") : testi::t(L"ALTRA USCITA", L"OTHER OUTPUT"), fmtSotto, {m, y, PW / 2, y + MIX_TESTA * dpi});
+        if (!x.predefinita) {
+            const std::wstring t = testi::t(L"Rendi predefinita", L"Make default");
+            const float lw = larghezzaTesto(t, fmtSotto) + 16 * dpi;
+            const D2D1_RECT_F rp = {PW - m - lw, y + 4 * dpi, PW - m, y + MIX_TESTA * dpi - 4 * dpi};
+            evidenzia(aggiungi(rp, A_MIXER_PRED, (int)u * 1000), rp, scuro, 10 * dpi);
+            pennello->SetColor(blu);
+            scrivi(t, fmtSotto, {rp.left + 8 * dpi, rp.top, rp.right, rp.bottom});
+        }
+        y += MIX_TESTA * dpi;
+        riga(u, -1, x.nome, x.volume, x.muto, nullptr, true, false);
+        for (size_t a = 0; a < x.app.size() && y < limite; a++) {
+            const mixer::App& p = x.app[a];
+            ID2D1Bitmap* ic = p.exe.empty() ? nullptr : iconaSfondo(p.exe, nullptr, L"");
+            riga(u, (int)a, p.nome, p.volume, p.muto, ic, false, p.sistema);
+        }
+        y += MIX_SPAZIO * dpi;
+    }
+    if (mix.uscite.empty()) {
+        pennello->SetColor(tenue);
+        scrivi(testi::t(L"Nessuna uscita audio", L"No audio output"), fmtSotto, {m, y, PW - m, y + 40 * dpi});
+    }
+    // piede: le altre uscite e le impostazioni
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rp = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rp, A_ALTRE_USCITE, 0), rp, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    scrivi(testi::t(L"Uscite e impostazioni audio", L"Outputs and sound settings"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
+}
 
 // "App in background": icone di notifica delle app in esecuzione, in una griglia come su iOS
 inline auto Motore::disegnaSfondo(bool scuro, D2D1_COLOR_F ink) -> void {
@@ -1328,16 +1463,14 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         case A_INDIETRO:     tornaIndietro(); break;
         case A_NOTIZIA:      if (e.indice < (int)wid.notizie.size()) { chiudiPannello(); apriPagina(wid.notizie[e.indice].link.c_str()); } break;
         case A_LUMINOSITA:   break;
-        case A_AUDIO: {   // le uscite audio in un menu: si sceglie quella predefinita
-            const auto lista = sistema::Sistema::uscite();
-            std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Uscita audio", L"Sound output"))};
-            for (size_t i = 0; i < lista.size(); i++) { auto x = menu::voce(lista[i].nome, (UINT)(i + 1)); x.spuntata = lista[i].predefinita; voci.push_back(x); }
-            voci.push_back(menu::separatore());
-            voci.push_back(menu::voce(testi::t(L"Impostazioni audio", L"Sound settings"), 1000));
-            POINT pt = {(LONG)e.r.left, (LONG)e.r.bottom}; ClientToScreen(pannello, &pt);
-            const UINT s = menuScheda(voci, pt, pannello);
-            if (s == 1000) { chiudiPannello(); apriPagina(L"ms-settings:sound"); }
-            else if (s >= 1 && s <= lista.size()) { sistema::Sistema::impostaUscita(lista[s - 1].id); leggiUscita(); leggiVolume(); pDirty = true; dirty = true; }
+        case A_MIXER_VOL:    break;   // si trascina (procPannello)
+        // la riga dell'uscita apre il mixer (volume per uscita e per app)
+        case A_AUDIO:        cambiaVista(P_MIXER, {(e.r.left + e.r.right) / 2, (e.r.top + e.r.bottom) / 2}); break;
+        case A_ALTRE_USCITE: menuUscite(e.r); break;
+        case A_MIXER_MUTO:   mix.muto(e.indice / 1000, e.indice % 1000 - 1); leggiVolume(); pDirty = true; dirty = true; break;
+        case A_MIXER_PRED: {
+            const size_t u = e.indice / 1000;
+            if (u < mix.uscite.size()) { sistema::Sistema::impostaUscita(mix.uscite[u].id); leggiUscita(); leggiVolume(); rileggiMixer(); dirty = true; }
             break;
         }
         case A_SCHERMO:      chiudiPannello(); apriPagina(L"ms-settings:display"); break;
@@ -1392,7 +1525,8 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
     switch (m) {
         case WM_MOUSEMOVE:
             if (!d->pMouseDentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, h, 0}; TrackMouseEvent(&tm); d->pMouseDentro = true; }
-            if (d->trascinaVolume) d->volumeDaMouse(x);
+            if (d->trascinaMixer >= 0) d->mixerDaMouse(x);
+            else if (d->trascinaVolume) d->volumeDaMouse(x);
             else if (d->trascinaLum) d->luminositaDaMouse(x);
             else { const int s = d->elementoIn(x, y); if (s != d->pSopra) { d->pSopra = s; d->pDirty = true; } }
             return 0;
@@ -1402,10 +1536,11 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
             d->pPremuto = e; d->pDirty = true;
             if (e >= 0 && d->elementi[e].azione == A_VOLUME) { d->trascinaVolume = true; SetCapture(h); d->volumeDaMouse(x); }
             if (e >= 0 && d->elementi[e].azione == A_LUMINOSITA) { d->trascinaLum = true; SetCapture(h); d->luminositaDaMouse(x); }
+            if (e >= 0 && d->elementi[e].azione == A_MIXER_VOL) { d->trascinaMixer = d->elementi[e].indice; SetCapture(h); d->mixerDaMouse(x); }
             return 0;
         }
         case WM_LBUTTONUP: {
-            if (d->trascinaVolume || d->trascinaLum) { d->trascinaVolume = d->trascinaLum = false; ReleaseCapture(); }
+            if (d->trascinaVolume || d->trascinaLum || d->trascinaMixer >= 0) { d->trascinaVolume = d->trascinaLum = false; d->trascinaMixer = -1; ReleaseCapture(); }
             else { const int e = d->elementoIn(x, y); if (e >= 0 && e == d->pPremuto) d->eseguiPannello(d->elementi[e]); }
             d->pPremuto = -1; d->pDirty = true;
             return 0;
@@ -1495,7 +1630,7 @@ inline auto Motore::rettIsolaSchermo() const -> RECT {
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }
 
 // apre il centro di controllo da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
-inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_WIDGET) apriCentro(tipo); }
+inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_MIXER) apriCentro(tipo); }
 
 // Il centro di controllo (icona a destra nel dock, notch, Win+N...): si apre sulla vista chiesta. Gia' aperto: la
 // stessa vista lo chiude, un'altra ci passa dentro la stessa finestra. Col launcher aperto prima si chiude lui

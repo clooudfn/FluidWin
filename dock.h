@@ -54,6 +54,7 @@
 #include "menu.h"
 #include "notch.h"
 #include "comodita.h"
+#include "mixer.h"
 #include "testi.h"
 
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
@@ -329,6 +330,8 @@ public:
         if (appDaAggiornare) { aggiornaApp(); dirty = true; }
         if (vetroDaRiposizionare) posizionaVetri();
         aggiornaStato(false);
+        // mixer aperto: si rilegge ogni secondo (app che iniziano o smettono di suonare, volumi cambiati da fuori)
+        if (pannelloTipo == P_MIXER && !pChiusura && trascinaMixer < 0 && ++giroMixer % 2 == 0) rileggiMixer();
         // centro di controllo aperto: il tempo del timer e lo stato del microfono si aggiornano
         if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro)) {
             versioneSensoriCentro = sensori::Sensori::io().versione; pDirty = true;
@@ -1390,13 +1393,14 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER };
     widget::Dati widD;                   // meteo e notizie (scaricati in un thread a parte)
     widget::Istantanea wid;              // l'ultima copia, per il disegno
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
-                  A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO };
+                  A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
+                  A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE };
     sistema::Sistema sis;                // Wi-Fi, Bluetooth e luminosita' (letti e cambiati in un thread a parte)
     double temaK = -1;                   // simbolo del tema: 0 sole (chiaro) .. 1 luna (scuro), animato
     bool trascinaLum = false;
@@ -1576,6 +1580,15 @@ private:
 
     void simboloMicrofono(float cx, float cy, bool acceso);
     UINT versioneSensoriCentro = 0;   // per ridisegnare il riquadro del microfono quando cambia
+    // mixer del volume (vista P_MIXER, mixer.h): indice delle righe = uscita * 1000 + app + 1 (0 = l'uscita)
+    mixer::Mixer mix;
+    int trascinaMixer = -1;
+    int giroMixer = 0;
+    float altezzaMixer() const;
+    void disegnaMixer(bool scuro, D2D1_COLOR_F ink);
+    void mixerDaMouse(float x);
+    void rileggiMixer();
+    void menuUscite(const D2D1_RECT_F& r);
 
     void simboloGoccia(float cx, float cy);
 
