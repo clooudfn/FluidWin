@@ -108,7 +108,7 @@ private:
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.95f) : D2D1::ColorF(0.1f, 0.1f, 0.12f, 0.85f));
             v.rt->FillRoundedRectangle({{b.left, b.top, b.left + std::max(8 * d, (b.right - b.left) * liv), b.bottom}, 4 * d, 4 * d}, v.pen);
         }
-        wchar_t t[16]; swprintf(t, 16, muto ? L"Muto" : L"%d", (int)std::lround(livelloObj * 100));
+        wchar_t t[16]; swprintf(t, 16, muto ? testi::t(L"Muto", L"Muted") : L"%d", (int)std::lround(livelloObj * 100));
         v.testo(t, fmt, {W - 60 * d, 0, W - 18 * d, H}, ink);
         v.finisci();
     }

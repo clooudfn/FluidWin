@@ -408,10 +408,10 @@ inline auto Motore::disegnaTesta(int tipo, bool scuro, D2D1_COLOR_F ink) -> void
     const float cy = (ri.top + ri.bottom) / 2, cx = m + 6 * dpi;
     dc->DrawLine({cx + 4 * dpi, cy - 7 * dpi}, {cx - 3 * dpi, cy}, pennello, 2.2f * dpi, tratto);
     dc->DrawLine({cx - 3 * dpi, cy}, {cx + 4 * dpi, cy + 7 * dpi}, pennello, 2.2f * dpi, tratto);
-    scrivi(L"Controllo", fmtVoce, {cx + 12 * dpi, ri.top, ri.right, ri.bottom});
+    scrivi(testi::t(L"Controllo", L"Control"), fmtVoce, {cx + 12 * dpi, ri.top, ri.right, ri.bottom});
     dc->SetTransform(baseVista);
     // titolo al centro vero della testata (il formato dei titoli e' allineato a sinistra: si misura)
-    const std::wstring titolo = tipo == P_SFONDO ? L"In background" : tipo == P_WIDGET ? L"Widget" : L"Notifiche";
+    const std::wstring titolo = tipo == P_SFONDO ? testi::t(L"In background", L"In background") : tipo == P_WIDGET ? L"Widget" : testi::t(L"Notifiche", L"Notifications");
     const float lt = larghezzaTesto(titolo, fmtTitolo);
     pennello->SetColor(ink);
     scrivi(titolo, fmtTitolo, {std::max(110 * dpi, PW / 2 - lt / 2), ri.top, PW - m, ri.bottom});
@@ -458,7 +458,7 @@ inline auto Motore::disegnaSfondo(bool scuro, D2D1_COLOR_F ink) -> void {
     const float tw = (PW - 2 * m) / 4, th = 86 * dpi, top = 10 * dpi;
     if (appSfondo.empty()) {
         pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.6f});
-        scrivi(L"Nessuna app in background", fmtSotto, {m, top, PW - m, top + 40 * dpi});
+        scrivi(testi::t(L"Nessuna app in background", L"No apps in the background"), fmtSotto, {m, top, PW - m, top + 40 * dpi});
     }
     for (size_t i = 0; i < appSfondo.size() && i < 24; i++) {
         const float x = m + (i % 4) * tw, y = top + (i / 4) * th;
@@ -479,7 +479,7 @@ inline auto Motore::disegnaSfondo(bool scuro, D2D1_COLOR_F ink) -> void {
     const D2D1_RECT_F rp = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
     evidenzia(aggiungi(rp, A_TUTTE, 0), rp, scuro, 6 * dpi);
     pennello->SetColor(ink);
-    scrivi(L"Pannello di Windows", fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
+    scrivi(testi::t(L"Pannello di Windows", L"Windows panel"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
     chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
 }
 
@@ -511,12 +511,12 @@ inline auto Motore::quandoN(INT64 t) -> std::wstring {
     const INT64 ora = ((INT64)f.dwHighDateTime << 32) | f.dwLowDateTime;
     const INT64 s = std::max<INT64>(0, (ora - t) / 10000000);
     wchar_t b[32];
-    if (s < 60) return L"adesso";
-    if (s < 3600) { swprintf(b, 32, L"%d min fa", (int)(s / 60)); return b; }
-    if (s < 86400) { swprintf(b, 32, L"%d h fa", (int)(s / 3600)); return b; }
+    if (s < 60) return testi::t(L"adesso", L"now");
+    if (s < 3600) { swprintf(b, 32, testi::t(L"%d min fa", L"%d min ago"), (int)(s / 60)); return b; }
+    if (s < 86400) { swprintf(b, 32, testi::t(L"%d h fa", L"%d h ago"), (int)(s / 3600)); return b; }
     FILETIME ft = {(DWORD)t, (DWORD)(t >> 32)}, lt; SYSTEMTIME st;
     FileTimeToLocalFileTime(&ft, &lt); FileTimeToSystemTime(&lt, &st);
-    GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &st, L"d MMM", b, 32, nullptr);
+    GetDateFormatEx(testi::locale(), 0, &st, testi::t(L"d MMM", L"MMM d"), b, 32, nullptr);
     return b;
 }
 
@@ -536,7 +536,7 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(scheda);
     dc->FillRoundedRectangle({{m, ct, PW - m, cb}, 12 * dpi, 12 * dpi}, pennello);
     SYSTEMTIME oggi; GetLocalTime(&oggi);
-    wchar_t mese[64] = L""; GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &oggi, L"MMMM yyyy", mese, 64, nullptr);
+    wchar_t mese[64] = L""; GetDateFormatEx(testi::locale(), 0, &oggi, L"MMMM yyyy", mese, 64, nullptr);
     if (mese[0]) mese[0] = (wchar_t)towupper(mese[0]);
     pennello->SetColor(ink);
     scrivi(mese, fmtVoce, {m + 12 * dpi, ct + 8 * dpi, PW - m, ct + 28 * dpi});
@@ -549,7 +549,7 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     const float cw = (PW - 2 * m - 16 * dpi) / 7, x0 = m + 8 * dpi, rh = 18 * dpi, y0 = ct + 54 * dpi;
     for (int g = 0; g < 7; g++) {   // iniziali dei giorni nella lingua dell'utente (lunedi' 1/1/2024)
         SYSTEMTIME s{}; s.wYear = 2024; s.wMonth = 1; s.wDay = (WORD)(1 + g);
-        wchar_t n[16] = L""; GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, 0, &s, L"ddd", n, 16, nullptr);
+        wchar_t n[16] = L""; GetDateFormatEx(testi::locale(), 0, &s, L"ddd", n, 16, nullptr);
         std::wstring iniziale(1, (wchar_t)towupper(n[0]));
         pennello->SetColor(tenue);
         scrivi(iniziale, fmtNome, {x0 + g * cw, ct + 32 * dpi, x0 + (g + 1) * cw, ct + 48 * dpi});
@@ -568,20 +568,21 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     // notifiche
     const float nt = (N_TESTA + N_CAL) * dpi;
     pennello->SetColor(ink);
-    scrivi(L"Notifiche", fmtTitolo, {m, nt, PW - m, nt + 28 * dpi});
+    scrivi(testi::t(L"Notifiche", L"Notifications"), fmtTitolo, {m, nt, PW - m, nt + 28 * dpi});
     if (permessoN && !listaN.empty()) {
-        const float lw = larghezzaTesto(L"Cancella tutto", fmtSotto) + 16 * dpi;
+        const float lw = larghezzaTesto(testi::t(L"Cancella tutto", L"Clear all"), fmtSotto) + 16 * dpi;
         const D2D1_RECT_F rc = {PW - m - lw, nt + 3 * dpi, PW - m, nt + 25 * dpi};
         evidenzia(aggiungi(rc, A_CANCELLA, 0), rc, scuro, 11 * dpi);
         pennello->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 1));
-        scrivi(L"Cancella tutto", fmtSotto, {rc.left + 8 * dpi, rc.top, rc.right, rc.bottom});
+        scrivi(testi::t(L"Cancella tutto", L"Clear all"), fmtSotto, {rc.left + 8 * dpi, rc.top, rc.right, rc.bottom});
     }
     float y = nt + N_TITOLO * dpi;
     if (!permessoN || listaN.empty()) {
         pennello->SetColor(scheda);
         dc->FillRoundedRectangle({{m, y, PW - m, y + 46 * dpi}, 12 * dpi, 12 * dpi}, pennello);
         pennello->SetColor(tenue);
-        scrivi(permessoN ? L"Nessuna notifica" : L"Consenti l'accesso alle notifiche nelle impostazioni",
+        scrivi(permessoN ? testi::t(L"Nessuna notifica", L"No notifications")
+                         : testi::t(L"Consenti l'accesso alle notifiche nelle impostazioni", L"Allow access to notifications in Settings"),
                fmtSotto, {m + 14 * dpi, y, PW - m - 10 * dpi, y + 46 * dpi});
     } else {
         const int quante = schedeVisibili();
@@ -631,7 +632,7 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
             y += N_SCHEDA * dpi;
         }
         if ((int)listaN.size() > quante) {
-            wchar_t b[48]; swprintf(b, 48, L"+ altre %d", (int)listaN.size() - quante);
+            wchar_t b[48]; swprintf(b, 48, testi::t(L"+ altre %d", L"+ %d more"), (int)listaN.size() - quante);
             pennello->SetColor(tenue);
             scrivi(b, fmtSotto, {m + 4 * dpi, y - 4 * dpi, PW - m, y + 16 * dpi});
         }
@@ -644,7 +645,7 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     const D2D1_RECT_F rp = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
     evidenzia(aggiungi(rp, A_IMPOST_NOTIFICHE, 0), rp, scuro, 6 * dpi);
     pennello->SetColor(ink);
-    scrivi(L"Impostazioni notifiche", fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
+    scrivi(testi::t(L"Impostazioni notifiche", L"Notification settings"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
     chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
 }
 
@@ -655,15 +656,15 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     // Wi-Fi: interruttore vero se c'e' la scheda; senza (PC col cavo) lo stato della rete, e il clic apre le impostazioni
     const int wf = sis.wifi, bt = sis.bluetooth;
     if (wf >= 0) piastrella({m, y, m + mezzo, y + 64 * dpi}, A_RETE, wf == 1, L"Wi-Fi",
-                            wf == 1 ? (rete == 2 ? nomeRete : L"Acceso") : L"Spento", scuro, ink);
-    else piastrella({m, y, m + mezzo, y + 64 * dpi}, A_RETE, rete != 0, rete == 2 ? L"Wi-Fi" : rete == 1 ? L"Ethernet" : L"Rete",
-                    rete ? L"Connessa" : L"Non connessa", scuro, ink);
+                            wf == 1 ? (rete == 2 ? nomeRete : testi::t(L"Acceso", L"On")) : testi::t(L"Spento", L"Off"), scuro, ink);
+    else piastrella({m, y, m + mezzo, y + 64 * dpi}, A_RETE, rete != 0, rete == 2 ? L"Wi-Fi" : rete == 1 ? L"Ethernet" : testi::t(L"Rete", L"Network"),
+                    rete ? testi::t(L"Connessa", L"Connected") : testi::t(L"Non connessa", L"Not connected"), scuro, ink);
     piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_BLUETOOTH, bt == 1, L"Bluetooth",
-               bt < 0 ? L"Non disponibile" : bt == 1 ? L"Acceso" : L"Spento", scuro, ink);
+               bt < 0 ? testi::t(L"Non disponibile", L"Unavailable") : bt == 1 ? testi::t(L"Acceso", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
     y += 64 * dpi + 10 * dpi;
     const bool tScuro = sistema::Sistema::temaScuro();
-    piastrella({m, y, m + mezzo, y + 64 * dpi}, A_TEMA, tScuro, L"Tema scuro", tScuro ? L"Attivo" : L"Spento", scuro, ink);
-    piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_FLUIDWIN, false, L"FluidWin", L"Impostazioni", scuro, ink);
+    piastrella({m, y, m + mezzo, y + 64 * dpi}, A_TEMA, tScuro, testi::t(L"Tema scuro", L"Dark theme"), tScuro ? testi::t(L"Attivo", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
+    piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_FLUIDWIN, false, L"FluidWin", testi::t(L"Impostazioni", L"Settings"), scuro, ink);
 
     // volume: capsula riempita di bianco come su iOS; si trascina, la rotella regola, l'altoparlante disattiva
     y += 64 * dpi + 14 * dpi;
@@ -683,7 +684,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(scuro && v < 0.12f ? ink : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.85f));
     simboloVolume(rv.left + 26 * dpi, (rv.top + rv.bottom) / 2);
     dc->SetTransform(baseVista);
-    wchar_t pc[16]; swprintf(pc, 16, muto ? L"muto" : L"%d%%", (int)std::lround(volume * 100));
+    wchar_t pc[16]; swprintf(pc, 16, muto ? testi::t(L"muto", L"muted") : L"%d%%", (int)std::lround(volume * 100));
     pennello->SetColor(scuro && v < 0.9f ? ink : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.7f));
     scrivi(pc, fmtNome, {rv.right - 56 * dpi, rv.top, rv.right - 8 * dpi, rv.bottom});
 
@@ -712,14 +713,14 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     const D2D1_RECT_F ru = {m - 8 * dpi, y, PW - m + 8 * dpi, y + 36 * dpi};
     evidenzia(aggiungi(ru, A_AUDIO, 0), ru, scuro, 6 * dpi);
     pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.62f});
-    scrivi(L"Uscita", fmtSotto, {m, y, m + 60 * dpi, y + 36 * dpi});
+    scrivi(testi::t(L"Uscita", L"Output"), fmtSotto, {m, y, m + 60 * dpi, y + 36 * dpi});
     pennello->SetColor(ink);
-    scrivi(nomeUscita.empty() ? L"Nessun dispositivo" : nomeUscita, fmtVoce, {m + 52 * dpi, y, PW - m - 20 * dpi, y + 36 * dpi});
+    scrivi(nomeUscita.empty() ? std::wstring(testi::t(L"Nessun dispositivo", L"No device")) : nomeUscita, fmtVoce, {m + 52 * dpi, y, PW - m - 20 * dpi, y + 36 * dpi});
     chevronDestra(PW - m - 4 * dpi, y + 18 * dpi);
 
     // scorciatoie tonde
     y += 36 * dpi + 16 * dpi;
-    const wchar_t* nomi[4] = {L"Widget", L"In background", L"Notifiche", L"Impostazioni"};
+    const wchar_t* nomi[4] = {L"Widget", L"In background", testi::t(L"Notifiche", L"Notifications"), testi::t(L"Impostazioni", L"Settings")};
     const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_IMPOSTAZIONI};
     for (int i = 0; i < 4; i++) {
         const float cx = m + larg * (i + 0.5f) / 4, cy = y + 26 * dpi;
@@ -759,7 +760,7 @@ inline auto Motore::disegnaWidget(bool scuro, D2D1_COLOR_F ink) -> void {
         pennello->SetColor(bianco);
         simboloMeteo(wid.codice, rm.right - 40 * dpi, rm.top + 44 * dpi, 1.4f);
         pennello->SetColor(biancoT);
-        wchar_t d[96]; swprintf(d, 96, L"%ls · umidità %d%% · %d km/h", widget::descrizione(wid.codice), (int)std::lround(wid.umidita), (int)std::lround(wid.vento));
+        wchar_t d[96]; swprintf(d, 96, testi::t(L"%ls · umidità %d%% · %d km/h", L"%ls · humidity %d%% · %d km/h"), widget::descrizione(wid.codice), (int)std::lround(wid.umidita), (int)std::lround(wid.vento));
         scrivi(d, fmtSotto, {rm.left + 16 * dpi, rm.top + 76 * dpi, rm.right - 16 * dpi, rm.top + 94 * dpi});
         // i prossimi giorni
         const size_t n = std::min<size_t>(5, wid.giorni.size());
@@ -767,7 +768,7 @@ inline auto Motore::disegnaWidget(bool scuro, D2D1_COLOR_F ink) -> void {
             const float cw = (rm.right - rm.left - 16 * dpi) / 5, cx = rm.left + 8 * dpi + cw * (i + 0.5f), y = rm.top + 104 * dpi;
             const auto& g = wid.giorni[i];
             pennello->SetColor(biancoT);
-            scrivi(g.nome, fmtNome, {cx - cw / 2, y, cx + cw / 2, y + 14 * dpi});
+            scrivi(widget::nomeGiorno(g), fmtNome, {cx - cw / 2, y, cx + cw / 2, y + 14 * dpi});
             pennello->SetColor(bianco);
             simboloMeteo(g.codice, cx, y + 27 * dpi, 0.8f);
             wchar_t mm[32]; swprintf(mm, 32, L"%d°  %d°", (int)std::lround(g.max), (int)std::lround(g.min));
@@ -775,16 +776,16 @@ inline auto Motore::disegnaWidget(bool scuro, D2D1_COLOR_F ink) -> void {
         }
     } else {
         pennello->SetColor(biancoT);
-        scrivi(L"Meteo in arrivo…", fmtSotto, {rm.left + 16 * dpi, rm.top + 40 * dpi, rm.right - 16 * dpi, rm.top + 60 * dpi});
+        scrivi(testi::t(L"Meteo in arrivo…", L"Loading weather…"), fmtSotto, {rm.left + 16 * dpi, rm.top + 40 * dpi, rm.right - 16 * dpi, rm.top + 60 * dpi});
     }
     // notizie
     float y = rm.bottom + 16 * dpi;
     pennello->SetColor(ink);
-    scrivi(L"Notizie", fmtTitolo, {m, y, PW - m, y + 22 * dpi});
+    scrivi(testi::t(L"Notizie", L"News"), fmtTitolo, {m, y, PW - m, y + 22 * dpi});
     pennello->SetColor(tenue);
     scrivi(L"ANSA", fmtSotto, {PW - m - 36 * dpi, y + 2 * dpi, PW - m, y + 20 * dpi});
     y += 28 * dpi;
-    if (wid.notizie.empty()) { pennello->SetColor(tenue); scrivi(L"Notizie in arrivo…", fmtSotto, {m, y, PW - m, y + 20 * dpi}); }
+    if (wid.notizie.empty()) { pennello->SetColor(tenue); scrivi(testi::t(L"Notizie in arrivo…", L"Loading news…"), fmtSotto, {m, y, PW - m, y + 20 * dpi}); }
     for (size_t i = 0; i < wid.notizie.size() && y + 56 * dpi < PH - m; i++) {
         const auto& nz = wid.notizie[i];
         const D2D1_RECT_F r = {m - 8 * dpi, y, PW - m + 8 * dpi, y + 56 * dpi};
@@ -1106,7 +1107,7 @@ inline auto Motore::elencaAppSfondo() -> std::vector<AppSfondo> {
             AppSfondo a; a.exe = exe;
             wchar_t tip[256] = L""; DWORD ts = sizeof(tip);
             RegGetValueW(k, sub, L"InitialTooltip", RRF_RT_REG_SZ, nullptr, tip, &ts);
-            a.nome = exe == proprio ? L"FluidWin" : exe.find(L"securityhealthsystray") != std::wstring::npos ? L"Sicurezza di Windows" : nomeDaTooltip(tip);
+            a.nome = exe == proprio ? L"FluidWin" : exe.find(L"securityhealthsystray") != std::wstring::npos ? testi::t(L"Sicurezza di Windows", L"Windows Security") : nomeDaTooltip(tip);
             if (a.nome.empty()) a.nome = nomeExe(exe);
             a.chiaveReg = sub;   // l'icona la chiede poi il thread principale
             // come si apre: rilanciarle e' il modo ufficiale (le app da area di notifica mostrano la loro finestra)
@@ -1213,10 +1214,10 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         case A_LUMINOSITA:   break;
         case A_AUDIO: {   // le uscite audio in un menu: si sceglie quella predefinita
             const auto lista = sistema::Sistema::uscite();
-            std::vector<menu::Voce> voci = {menu::titolo(L"Uscita audio")};
+            std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Uscita audio", L"Sound output"))};
             for (size_t i = 0; i < lista.size(); i++) { auto x = menu::voce(lista[i].nome, (UINT)(i + 1)); x.spuntata = lista[i].predefinita; voci.push_back(x); }
             voci.push_back(menu::separatore());
-            voci.push_back(menu::voce(L"Impostazioni audio", 1000));
+            voci.push_back(menu::voce(testi::t(L"Impostazioni audio", L"Sound settings"), 1000));
             POINT pt = {(LONG)e.r.left, (LONG)e.r.bottom}; ClientToScreen(pannello, &pt);
             const UINT s = menuScheda(voci, pt, pannello);
             if (s == 1000) { chiudiPannello(); apriPagina(L"ms-settings:sound"); }
@@ -1301,8 +1302,8 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
             POINT pt{(LONG)x, (LONG)y}; ClientToScreen(h, &pt);
             const int indice = d->elementi[e].indice;
             const std::wstring exe = indice >= 0 && indice < (int)d->appSfondo.size() ? d->appSfondo[indice].exe : L"";
-            const int s = (int)d->menuScheda({menu::voce(L"Apri", 1), menu::separatore(),
-                                               menu::voce(L"Altre opzioni (pannello di Windows)", 2)}, pt, h);
+            const int s = (int)d->menuScheda({menu::voce(testi::t(L"Apri", L"Open"), 1), menu::separatore(),
+                                               menu::voce(testi::t(L"Altre opzioni (pannello di Windows)", L"More options (Windows panel)"), 2)}, pt, h);
             // nel frattempo l'elenco puo' essere stato riletto (in ordine di nome): si ritrova la stessa app
             if (s == 1) {
                 for (size_t k = 0; k < d->appSfondo.size(); k++)

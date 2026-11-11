@@ -53,6 +53,7 @@
 #include "notifiche.h"
 #include "menu.h"
 #include "notch.h"
+#include "testi.h"
 
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
 #define DWMWA_SYSTEMBACKDROP_TYPE 38
@@ -230,6 +231,13 @@ public:
 
     // Da chiamare quando cambiano le finestre aperte (lo fa FluidWin con gli eventi)
     void segnaCambiamento() { appDaAggiornare = true; }
+
+    // Lingua dell'interfaccia cambiata: date, nomi delle voci fisse e pannelli si rifanno nella lingua nuova
+    void linguaCambiata() {
+        testoOra.clear();   // le date si ricalcolano anche se l'ora non e' cambiata
+        aggiornaStato(true);
+        appDaAggiornare = true; dirty = true; pDirty = true; lDirty = true;
+    }
 
     // true se il dock deve disegnare il prossimo fotogramma (ingrandimento, rimbalzo, etichetta in movimento)
     bool serveFotogramma() const { return attivo && !nascostoSchermoIntero && !perso && (dirty || inMovimento || pannelloDaDisegnare() || launcherDaDisegnare()); }
@@ -768,7 +776,7 @@ private:
             return std::find(ordineAperte.begin(), ordineAperte.end(), chiave(a)) < std::find(ordineAperte.begin(), ordineAperte.end(), chiave(b));
         });
         // ultima icona: il centro di controllo (sempre in fondo, come il Cestino su macOS; disegnata dal dock)
-        { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = L"Centro di controllo"; nuove.push_back(std::move(c)); }
+        { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
         const bool primaVolta = voci.empty();
         std::vector<bool> ritrovata(voci.size(), false);
@@ -1191,9 +1199,9 @@ private:
     std::wstring descrizioneStato(int i) const {
         switch (i) {
             case CONTROLLO: {
-                std::wstring s = rete == 0 ? L"Nessuna connessione" : nomeRete;
-                if (!audioOk) return s + L" \u00b7 nessun audio";
-                if (muto) return s + L" \u00b7 audio disattivato";
+                std::wstring s = rete == 0 ? testi::t(L"Nessuna connessione", L"No connection") : nomeRete;
+                if (!audioOk) return s + testi::t(L" \u00b7 nessun audio", L" \u00b7 no audio");
+                if (muto) return s + testi::t(L" \u00b7 audio disattivato", L" \u00b7 sound off");
                 wchar_t b[32]; swprintf(b, 32, L" \u00b7 volume %d%%", (int)std::lround(volume * 100)); return s + b;
             }
             case ORA:      return testoDataLunga;
@@ -1290,9 +1298,10 @@ private:
         swprintf(b, 96, L"%02d:%02d", st.wHour, st.wMinute);
         if (testoOra != b) {
             testoOra = b; cambiato = true;
-            if (GetDateFormatEx(L"it-IT", 0, &st, L"ddd d MMM", b, 96, nullptr)) testoData = b;
-            if (GetDateFormatEx(L"it-IT", 0, &st, L"dddd d MMMM yyyy", b, 96, nullptr)) { testoDataLunga = b; if (!testoDataLunga.empty()) testoDataLunga[0] = (wchar_t)towupper(testoDataLunga[0]); }
-            if (GetDateFormatEx(L"it-IT", 0, &st, L"dddd d MMMM", b, 96, nullptr)) { testoNotch = b; if (!testoNotch.empty()) testoNotch[0] = (wchar_t)towupper(testoNotch[0]); }
+            const wchar_t* loc = testi::locale();
+            if (GetDateFormatEx(loc, 0, &st, testi::t(L"ddd d MMM", L"ddd, MMM d"), b, 96, nullptr)) testoData = b;
+            if (GetDateFormatEx(loc, 0, &st, testi::t(L"dddd d MMMM yyyy", L"dddd, MMMM d, yyyy"), b, 96, nullptr)) { testoDataLunga = b; if (!testoDataLunga.empty()) testoDataLunga[0] = (wchar_t)towupper(testoDataLunga[0]); }
+            if (GetDateFormatEx(loc, 0, &st, testi::t(L"dddd d MMMM", L"dddd, MMMM d"), b, 96, nullptr)) { testoNotch = b; if (!testoNotch.empty()) testoNotch[0] = (wchar_t)towupper(testoNotch[0]); }
             notch.testi(testoOra, testoNotch);   // il notch mostra ora e data
         }
         const float v0 = volume; const bool m0 = muto, ok0 = audioOk;
@@ -1359,7 +1368,7 @@ private:
         for (auto* a = (IP_ADAPTER_ADDRESSES*)buf.data(); a; a = a->Next) {
             if (a->OperStatus != IfOperStatusUp || !a->FirstGatewayAddress || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
             const int tipo = a->IfType == IF_TYPE_IEEE80211 ? 2 : 1;
-            if (tipo > rete || rete == 0) { rete = tipo; nomeRete = a->FriendlyName ? a->FriendlyName : L"Rete"; }
+            if (tipo > rete || rete == 0) { rete = tipo; nomeRete = a->FriendlyName ? a->FriendlyName : testi::t(L"Rete", L"Network"); }
             if (tipo == 1) break;   // col cavo collegato e' quella in uso
         }
     }
@@ -1892,14 +1901,14 @@ private:
                              GetFileAttributesW(v.exe.c_str()) != INVALID_FILE_ATTRIBUTES;
         const bool store = v.avvio.rfind(L"shell:", 0) == 0;
         const bool collegamento = v.fissata && v.avvio.size() > 4 && minuscolo(v.avvio.substr(v.avvio.size() - 4)) == L".lnk";
-        std::vector<menu::Voce> voci = {menu::titolo(v.nome), menu::voce(L"Apri nuova finestra", 1)};
-        if (!store || exeVero) voci.push_back(menu::voce(L"Esegui come amministratore", 3));
-        if (exeVero) voci.push_back(menu::voce(L"Apri percorso file", 4));
-        if (collegamento) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(L"Rimuovi dal dock", 5)); }
-        else if (!v.fissata) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(L"Aggiungi al dock", 6)); }
+        std::vector<menu::Voce> voci = {menu::titolo(v.nome), menu::voce(testi::t(L"Apri nuova finestra", L"Open new window"), 1)};
+        if (!store || exeVero) voci.push_back(menu::voce(testi::t(L"Esegui come amministratore", L"Run as administrator"), 3));
+        if (exeVero) voci.push_back(menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 4));
+        if (collegamento) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Rimuovi dal dock", L"Remove from dock"), 5)); }
+        else if (!v.fissata) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), 6)); }
         if (!v.finestre.empty()) {
             voci.push_back(menu::separatore());
-            voci.push_back(menu::voce(v.finestre.size() > 1 ? L"Chiudi tutte le finestre" : L"Chiudi", 2));
+            voci.push_back(menu::voce(v.finestre.size() > 1 ? testi::t(L"Chiudi tutte le finestre", L"Close all windows") : testi::t(L"Chiudi", L"Close"), 2));
         }
         SetForegroundWindow(icone);   // cosi' la tastiera (Esc, frecce) arriva al menu
         // sopra il dock, centrato sull'icona (il punto e' quello del clic)

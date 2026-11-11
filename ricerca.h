@@ -324,8 +324,8 @@ private:
             double val;
             if (Calcolo::valuta(q, val)) {
                 wchar_t b[64]; swprintf(b, 64, L"%.10g", val);
-                std::wstring s = b; for (auto& c : s) if (c == L'.') c = L',';
-                risultati.push_back({T_CALCOLO, L"= " + s, L"Invio per copiare il risultato", s, L""});
+                std::wstring s = b; if (!testi::inglese()) for (auto& c : s) if (c == L'.') c = L',';   // virgola in italiano
+                risultati.push_back({T_CALCOLO, L"= " + s, testi::t(L"Invio per copiare il risultato", L"Enter to copy the result"), s, L""});
             }
             // app: prima chi inizia con il testo
             std::vector<std::pair<int, size_t>> trovate;
@@ -338,10 +338,11 @@ private:
             int n = 0;
             for (const auto& s : pagine()) {
                 if (n >= 3) break;
-                if (punteggio(s.titolo, ql) > 0 || minuscolo(s.sotto).find(ql) != std::wstring::npos) { Risultato r = s; r.sotto = L"Impostazioni"; risultati.push_back(r); n++; }
+                if (punteggio(s.titolo, ql) > 0 || minuscolo(s.sotto).find(ql) != std::wstring::npos) { Risultato r = s; r.sotto = testi::t(L"Impostazioni", L"Settings"); risultati.push_back(r); n++; }
             }
             for (const auto& f : file) risultati.push_back(f);
-            risultati.push_back({T_WEB, L"Cerca “" + q + L"” sul web", L"Nel browser predefinito", q, L""});
+            risultati.push_back({T_WEB, testi::t(L"Cerca “", L"Search “") + q + testi::t(L"” sul web", L"” on the web"),
+                                 testi::t(L"Nel browser predefinito", L"In the default browser"), q, L""});
         }
         sel = std::clamp(sel, 0, std::max(0, (int)risultati.size() - 1));
         if (risultati.empty()) sel = 0;
@@ -425,7 +426,7 @@ private:
         v.rt->DrawEllipse({{lx - 1.5f * d, ly - 1.5f * d}, 7.5f * d, 7.5f * d}, v.pen, 2.0f * d);
         v.rt->DrawLine({lx + 4 * d, ly + 4 * d}, {lx + 9 * d, ly + 9 * d}, v.pen, 2.2f * d);
         const D2D1_RECT_F rt = {54 * d, 0, W - 24 * d, ALTO_BARRA * d};
-        if (testo.empty()) v.testo(L"Cerca app, file, impostazioni…", fTesto, rt, tenue);
+        if (testo.empty()) v.testo(testi::t(L"Cerca app, file, impostazioni…", L"Search apps, files, settings…"), fTesto, rt, tenue);
         else v.testo(testo, fTesto, rt, ink);
         if (cursore) {
             const float cx = rt.left + (testo.empty() ? 0 : std::min(rt.right - rt.left, v.larghezza(testo, fTesto))) + 1.5f * d;
@@ -485,44 +486,43 @@ private:
         }
     }
 
+    // pagine delle impostazioni: nome in italiano e in inglese, parole chiave nelle due lingue (si trova in tutte e due)
     static const std::vector<Risultato>& pagine() {
-        static const std::vector<Risultato> p = [] {
-            const wchar_t* t[][3] = {
-                {L"Schermo", L"display risoluzione monitor scala", L"ms-settings:display"},
-                {L"Audio", L"suono volume microfono altoparlanti", L"ms-settings:sound"},
-                {L"Notifiche", L"avvisi non disturbare", L"ms-settings:notifications"},
-                {L"Bluetooth e dispositivi", L"cuffie mouse tastiera", L"ms-settings:bluetooth"},
-                {L"Wi-Fi", L"wireless rete internet", L"ms-settings:network-wifi"},
-                {L"Rete e Internet", L"ethernet connessione proxy vpn", L"ms-settings:network-status"},
-                {L"Personalizzazione", L"aspetto", L"ms-settings:personalization"},
-                {L"Sfondo", L"wallpaper desktop", L"ms-settings:personalization-background"},
-                {L"Colori e tema scuro", L"modalità scura chiara colore", L"ms-settings:colors"},
-                {L"App installate", L"disinstalla programmi", L"ms-settings:appsfeatures"},
-                {L"App predefinite", L"browser apri con", L"ms-settings:defaultapps"},
-                {L"App all'avvio", L"esecuzione automatica", L"ms-settings:startupapps"},
-                {L"Account", L"utente profilo", L"ms-settings:yourinfo"},
-                {L"Data e ora", L"orologio fuso orario", L"ms-settings:dateandtime"},
-                {L"Lingua e area geografica", L"italiano formato", L"ms-settings:regionlanguage"},
-                {L"Tastiera e digitazione", L"layout", L"ms-settings:typing"},
-                {L"Mouse", L"puntatore velocità touchpad", L"ms-settings:mousetouchpad"},
-                {L"Energia", L"batteria sospensione spegnimento", L"ms-settings:powersleep"},
-                {L"Archiviazione", L"spazio disco pulizia", L"ms-settings:storagesense"},
-                {L"Windows Update", L"aggiornamenti", L"ms-settings:windowsupdate"},
-                {L"Sicurezza di Windows", L"antivirus defender firewall", L"windowsdefender:"},
-                {L"Privacy e sicurezza", L"autorizzazioni fotocamera posizione", L"ms-settings:privacy"},
-                {L"Stampanti e scanner", L"stampa", L"ms-settings:printers"},
-                {L"Informazioni sul sistema", L"pc specifiche nome versione", L"ms-settings:about"},
-                {L"Gioco", L"game bar modalità gioco", L"ms-settings:gaming-gamebar"},
-                {L"Accessibilità", L"testo grande contrasto narratore", L"ms-settings:easeofaccess"},
-                {L"Pannello di controllo", L"classico", L"control"},
-                {L"Gestione attività", L"processi task manager", L"taskmgr"},
-                {L"Impostazioni di FluidWin", L"dock gelatina genio panoramica", L"*fluidwin"},
-            };
-            std::vector<Risultato> v;
-            for (auto& x : t) v.push_back({T_IMPOSTAZIONE, x[0], x[1], x[2], L""});
-            return v;
-        }();
-        return p;
+        static const wchar_t* t[][4] = {
+                {L"Schermo", L"Display", L"display risoluzione monitor scala resolution scale", L"ms-settings:display"},
+                {L"Audio", L"Sound", L"suono volume microfono altoparlanti audio microphone speakers", L"ms-settings:sound"},
+                {L"Notifiche", L"Notifications", L"avvisi non disturbare alerts do not disturb", L"ms-settings:notifications"},
+                {L"Bluetooth e dispositivi", L"Bluetooth & devices", L"cuffie mouse tastiera headphones keyboard", L"ms-settings:bluetooth"},
+                {L"Wi-Fi", L"Wi-Fi", L"wireless rete internet network", L"ms-settings:network-wifi"},
+                {L"Rete e Internet", L"Network & internet", L"ethernet connessione proxy vpn connection", L"ms-settings:network-status"},
+                {L"Personalizzazione", L"Personalization", L"aspetto appearance", L"ms-settings:personalization"},
+                {L"Sfondo", L"Background", L"wallpaper desktop sfondo", L"ms-settings:personalization-background"},
+                {L"Colori e tema scuro", L"Colors and dark mode", L"modalità scura chiara colore dark light theme", L"ms-settings:colors"},
+                {L"App installate", L"Installed apps", L"disinstalla programmi uninstall programs", L"ms-settings:appsfeatures"},
+                {L"App predefinite", L"Default apps", L"browser apri con open with", L"ms-settings:defaultapps"},
+                {L"App all'avvio", L"Startup apps", L"esecuzione automatica autostart", L"ms-settings:startupapps"},
+                {L"Account", L"Accounts", L"utente profilo user profile", L"ms-settings:yourinfo"},
+                {L"Data e ora", L"Date & time", L"orologio fuso orario clock time zone", L"ms-settings:dateandtime"},
+                {L"Lingua e area geografica", L"Language & region", L"italiano inglese formato english format", L"ms-settings:regionlanguage"},
+                {L"Tastiera e digitazione", L"Keyboard & typing", L"layout tastiera keyboard", L"ms-settings:typing"},
+                {L"Mouse", L"Mouse", L"puntatore velocità touchpad pointer speed", L"ms-settings:mousetouchpad"},
+                {L"Energia", L"Power", L"batteria sospensione spegnimento battery sleep", L"ms-settings:powersleep"},
+                {L"Archiviazione", L"Storage", L"spazio disco pulizia disk space cleanup", L"ms-settings:storagesense"},
+                {L"Windows Update", L"Windows Update", L"aggiornamenti updates", L"ms-settings:windowsupdate"},
+                {L"Sicurezza di Windows", L"Windows Security", L"antivirus defender firewall", L"windowsdefender:"},
+                {L"Privacy e sicurezza", L"Privacy & security", L"autorizzazioni fotocamera posizione permissions camera location", L"ms-settings:privacy"},
+                {L"Stampanti e scanner", L"Printers & scanners", L"stampa print", L"ms-settings:printers"},
+                {L"Informazioni sul sistema", L"About", L"pc specifiche nome versione specs name version", L"ms-settings:about"},
+                {L"Gioco", L"Gaming", L"game bar modalità gioco game mode", L"ms-settings:gaming-gamebar"},
+                {L"Accessibilità", L"Accessibility", L"testo grande contrasto narratore large text contrast narrator", L"ms-settings:easeofaccess"},
+                {L"Pannello di controllo", L"Control Panel", L"classico classic", L"control"},
+                {L"Gestione attività", L"Task Manager", L"processi task manager processes", L"taskmgr"},
+                {L"Impostazioni di FluidWin", L"FluidWin settings", L"dock gelatina genio panoramica jelly genie overview", L"*fluidwin"},
+        };
+        static std::vector<Risultato> p[2];
+        std::vector<Risultato>& v = p[testi::inglese() ? 1 : 0];
+        if (v.empty()) for (auto& x : t) v.push_back({T_IMPOSTAZIONE, testi::inglese() ? x[1] : x[0], x[2], x[3], L""});
+        return v;
     }
 
     // ---- thread: file dall'indice di ricerca di Windows e icone ----

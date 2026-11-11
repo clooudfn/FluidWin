@@ -21,6 +21,7 @@
 #include <mutex>
 #include <atomic>
 #include <roapi.h>
+#include "testi.h"
 
 namespace banner {
 
@@ -282,7 +283,7 @@ private:
             v.rt->FillRoundedRectangle({{ix, iy, ix + il, iy + il}, 9 * d, 9 * d}, v.pen);
         }
         const float tx = ix + il + 14 * d, tr = W - 40 * d;
-        v.testo(attuale.app.empty() ? L"Notifica" : attuale.app, fApp, {tx, 12 * d, tr, 28 * d}, tenue);
+        v.testo(attuale.app.empty() ? std::wstring(testi::t(L"Notifica", L"Notification")) : attuale.app, fApp, {tx, 12 * d, tr, 28 * d}, tenue);
         v.testo(attuale.titolo, fTitolo, {tx, 28 * d, tr + 24 * d, 48 * d}, ink);
         v.testo(attuale.testo, fTesto, {tx, 48 * d, tr + 24 * d, 68 * d}, v.inchiostro(0.8f));
         if (dentro) {   // la x per toglierla, solo col mouse sopra

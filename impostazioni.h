@@ -2,6 +2,7 @@
 // (dal menu dell'icona di FluidWin o dal centro di controllo). Ogni cambio si applica subito.
 #pragma once
 #include "vetro.h"
+#include "testi.h"
 #include <windowsx.h>
 #include <vector>
 #include <functional>
@@ -19,6 +20,7 @@ struct Valori {
     bool winTab = true;           // Win+Tab apre la panoramica di FluidWin
     bool winS = true;             // Alt+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
+    int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
 };
 
 inline Valori& valori() { static Valori v; return v; }
@@ -41,6 +43,8 @@ inline void carica() {
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
     v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0);
+    v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
+    testi::lingua() = v.lingua;
     // la capsula dei tasti non c'e' piu' (1.1.1): via i suoi valori rimasti dalle versioni prima
     RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"Capsula");
     RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"CapsulaMisura");
@@ -51,14 +55,14 @@ inline void salva() {
     scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
     scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
-    scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner);
+    scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"Lingua", (DWORD)v.lingua);
 }
 
 // ---- la finestra ----
 class Finestra {
 public:
     std::function<void()> cambiato;   // dopo ogni cambio (gia' salvato)
-    std::wstring infoAngoli;          // riga informativa sugli angoli (raggio e da dove viene)
+    int raggioWindhawk = 0;           // raggio della mod di Windhawk (0 = nessuna): riga informativa sugli angoli
     void (*registro)(const char*) = nullptr;
 
     void apri() {
@@ -128,18 +132,29 @@ public:
     }
 
 private:
-    struct Voce { const wchar_t* nome; const wchar_t* spiega; bool Valori::*campo; };
+    // nome e spiegazione in italiano e in inglese
+    struct Voce { const wchar_t *nome, *name, *spiega, *explain; bool Valori::*campo; };
     const std::vector<Voce> voci = {
-        {L"Finestre di gelatina", L"Le finestre si deformano mentre le trascini", &Valori::gelatina},
-        {L"Effetto genio", L"Riduzione e ripristino che entrano ed escono dal dock", &Valori::genio},
-        {L"Animazione di chiusura", L"La finestra si rimpicciolisce e svanisce sul posto", &Valori::chiusura},
-        {L"Animazione di apertura", L"Le finestre aperte da Start o dalla ricerca crescono dal centro", &Valori::apertura},
-        {L"Indicatore del volume", L"Al posto di quello di Windows, in alto al centro", &Valori::volume},
-        {L"Panoramica dall'angolo", L"Mouse nell'angolo in alto a sinistra", &Valori::angolo},
-        {L"Win+Tab apre la panoramica", L"Al posto della Visualizzazione attività", &Valori::winTab},
-        {L"Alt+Tab apre la ricerca", L"App, file, impostazioni e calcoli (al posto del selettore)", &Valori::winS},
-        {L"Onda di luce della ricerca", L"I bordi dello schermo si accendono di colori", &Valori::onda},
-        {L"Banner delle notifiche FluidWin", L"Escono dall'isola; quelli di Windows si spengono", &Valori::banner},
+        {L"Finestre di gelatina", L"Jelly windows",
+         L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina},
+        {L"Effetto genio", L"Genie effect",
+         L"Riduzione e ripristino che entrano ed escono dal dock", L"Minimize into the dock and come back out of it", &Valori::genio},
+        {L"Animazione di chiusura", L"Close animation",
+         L"La finestra si rimpicciolisce e svanisce sul posto", L"The window shrinks and fades away in place", &Valori::chiusura},
+        {L"Animazione di apertura", L"Open animation",
+         L"Le finestre aperte da Start o dalla ricerca crescono dal centro", L"Windows opened from Start or search grow from the center", &Valori::apertura},
+        {L"Indicatore del volume", L"Volume indicator",
+         L"Al posto di quello di Windows, in alto al centro", L"Instead of the Windows one, at the top center", &Valori::volume},
+        {L"Panoramica dall'angolo", L"Overview from the corner",
+         L"Mouse nell'angolo in alto a sinistra", L"Move the mouse to the top-left corner", &Valori::angolo},
+        {L"Win+Tab apre la panoramica", L"Win+Tab opens the overview",
+         L"Al posto della Visualizzazione attività", L"Instead of Task View", &Valori::winTab},
+        {L"Alt+Tab apre la ricerca", L"Alt+Tab opens search",
+         L"App, file, impostazioni e calcoli (al posto del selettore)", L"Apps, files, settings and math (instead of the switcher)", &Valori::winS},
+        {L"Onda di luce della ricerca", L"Search light wave",
+         L"I bordi dello schermo si accendono di colori", L"The edges of the screen light up with color", &Valori::onda},
+        {L"Banner delle notifiche FluidWin", L"FluidWin notification banners",
+         L"Escono dall'isola; quelli di Windows si spengono", L"They come out of the island; the Windows ones are turned off", &Valori::banner},
     };
     vetro::Finestra v;
     IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr;
@@ -148,13 +163,13 @@ private:
     ULONGLONG t0 = 0;
     double k = 0;
     std::vector<double> anim;
-    // zone: 0..n-1 le voci, 200 chiudi
+    // zone: 0..n-1 le voci, 100+i la lingua, 200 chiudi
     struct Zona { D2D1_RECT_F r; int id; };
     std::vector<Zona> zone;
 
     int colonne = 1;
     int righe() const { return (int)((voci.size() + colonne - 1) / colonne); }
-    float altezza() const { return 76 + righe() * 58.0f + 64; }
+    float altezza() const { return 76 + righe() * 58.0f + 130; }
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
     int zonaIn(float x, float y) const {
@@ -165,7 +180,8 @@ private:
     void clic(int id) {
         if (id < 0) return;
         if (id == 200) { chiudi(); return; }
-        if (id < (int)voci.size()) { bool& b = valori().*(voci[id].campo); b = !b; }
+        if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
+        else if (id < (int)voci.size()) { bool& b = valori().*(voci[id].campo); b = !b; }
         salva();
         if (cambiato) cambiato();
         vetro::battito(v.fin, 1);
@@ -178,7 +194,7 @@ private:
         const D2D1_COLOR_F ink = v.inchiostro(), tenue = v.inchiostro(0.6f);
         zone.clear();
         if (anim.size() != voci.size()) { anim.clear(); for (const auto& x : voci) anim.push_back(stato(x) ? 1 : 0); }
-        v.testo(L"Impostazioni di FluidWin", fTitolo, {24 * d, 18 * d, W - 60 * d, 52 * d}, ink);
+        v.testo(testi::t(L"Impostazioni di FluidWin", L"FluidWin settings"), fTitolo, {24 * d, 18 * d, W - 60 * d, 52 * d}, ink);
         // chiudi
         {
             const D2D1_RECT_F r = {W - 52 * d, 18 * d, W - 20 * d, 50 * d};
@@ -203,13 +219,40 @@ private:
                 v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.07f) : D2D1::ColorF(0, 0, 0, 0.04f));
                 v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
             }
-            v.testo(voci[i].nome, fVoce, {r.left + 12 * d, r.top + 7 * d, r.right - 70 * d, r.top + 29 * d}, ink);
-            v.testo(voci[i].spiega, fSotto, {r.left + 12 * d, r.top + 28 * d, r.right - 70 * d, r.top + 48 * d}, tenue);
+            v.testo(testi::t(voci[i].nome, voci[i].name), fVoce, {r.left + 12 * d, r.top + 7 * d, r.right - 70 * d, r.top + 29 * d}, ink);
+            v.testo(testi::t(voci[i].spiega, voci[i].explain), fSotto, {r.left + 12 * d, r.top + 28 * d, r.right - 70 * d, r.top + 48 * d}, tenue);
             levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i]);
         }
         y += nr * 58 * d;
-        y += 14 * d;
-        v.testo(infoAngoli, fSotto, {28 * d, y, W - 28 * d, y + 20 * d}, tenue);
+        // lingua: due scelte (i nomi restano ciascuno nella sua lingua)
+        y += 8 * d;
+        v.testo(testi::t(L"LINGUA", L"LANGUAGE"), fSezione, {28 * d, y, W - 28 * d, y + 22 * d}, tenue);
+        y += 26 * d;
+        {
+            const float x0 = 24 * d, larg = W - 48 * d, h = 34 * d;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(0, 0, 0, 0.06f));
+            v.rt->FillRoundedRectangle({{x0, y, x0 + larg, y + h}, h / 2, h / 2}, v.pen);
+            const wchar_t* nomi[2] = {L"Italiano", L"English"};
+            for (int i = 0; i < 2; i++) {
+                const D2D1_RECT_F r = {x0 + larg * i / 2 + 3 * d, y + 3 * d, x0 + larg * (i + 1) / 2 - 3 * d, y + h - 3 * d};
+                zone.push_back({r, 100 + i});
+                if (valori().lingua == i) {
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(1, 1, 1, 0.95f));
+                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                } else if (sopra == 100 + i) {
+                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                }
+                v.testo(nomi[i], fCentro, r, ink);
+            }
+            y += h + 18 * d;
+        }
+        const std::wstring info = raggioWindhawk > 0
+            ? std::wstring(testi::t(L"Angoli delle finestre: ", L"Window corners: ")) + std::to_wstring(raggioWindhawk) +
+              testi::t(L" px (dalla mod di Windhawk)", L" px (from the Windhawk mod)")
+            : std::wstring(testi::t(L"Angoli delle finestre: quelli di Windows (piu' tondi con la mod di Windhawk)",
+                                    L"Window corners: the Windows ones (rounder with the Windhawk mod)"));
+        v.testo(info, fSotto, {28 * d, y, W - 28 * d, y + 20 * d}, tenue);
         v.finisci();
     }
 

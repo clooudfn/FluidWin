@@ -384,7 +384,7 @@ inline auto Motore::menuApp(int i, POINT pt) -> void {
     if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, ID_DOCK - 1, CMF_NORMAL))) {
         cm->QueryInterface(IID_PPV_ARGS(&menuShell2)); cm->QueryInterface(IID_PPV_ARGS(&menuShell3));
         // le voci di Windows, disegnate da noi; in cima il nome dell'app e "Aggiungi al dock"
-        std::vector<menu::Voce> voci = {menu::titolo(a.nome), menu::voce(L"Aggiungi al dock", ID_DOCK), menu::separatore()};
+        std::vector<menu::Voce> voci = {menu::titolo(a.nome), menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), ID_DOCK), menu::separatore()};
         for (auto& v : menu::daHmenu(m)) voci.push_back(v);
         // i sottomenu ("Invia a", "Apri con"...) la shell li riempie solo quando stanno per aprirsi
         auto prepara = [this](HMENU s) {
@@ -442,8 +442,9 @@ inline auto Motore::aggiungiAlDock(const std::wstring& nome, const std::wstring&
 
 // Accensione: come il pulsante dello Start
 inline auto Motore::menuEnergia(POINT pt) -> void {
-    const int s = (int)menu::mostra({menu::voce(L"Sospendi", 1), menu::voce(L"Riavvia", 2), menu::voce(L"Arresta il sistema", 3),
-                                     menu::separatore(), menu::voce(L"Blocca", 4), menu::voce(L"Disconnetti", 5)}, pt, launcher);
+    const int s = (int)menu::mostra({menu::voce(testi::t(L"Sospendi", L"Sleep"), 1), menu::voce(testi::t(L"Riavvia", L"Restart"), 2),
+                                     menu::voce(testi::t(L"Arresta il sistema", L"Shut down"), 3), menu::separatore(),
+                                     menu::voce(testi::t(L"Blocca", L"Lock"), 4), menu::voce(testi::t(L"Disconnetti", L"Sign out"), 5)}, pt, launcher);
     lSopraEnergia = false; lDirty = true;
     if (s <= 0) return;
     chiudiLauncher();
@@ -547,7 +548,7 @@ inline auto Motore::renderLauncher() -> bool {
     dc->DrawEllipse({{lx - 2 * dpi, ly - 2 * dpi}, 6 * dpi, 6 * dpi}, pennello, 1.8f * dpi);
     linea(2.5f, 2.5f, 7, 7, lx, ly);
     const D2D1_RECT_F rt = {lx + 18 * dpi, rc.top, rc.right - 14 * dpi, rc.bottom};
-    if (query.empty()) scrivi(L"Cerca un'app", fmtTitolo, rt);
+    if (query.empty()) scrivi(testi::t(L"Cerca un'app", L"Search for an app"), fmtTitolo, rt);
     else {
         pennello->SetColor(ink);
         scrivi(query, fmtTitolo, rt);
@@ -578,7 +579,7 @@ inline auto Motore::renderLauncher() -> bool {
         pennello->SetColor(ink);
         scrivi(a.nome, fmtNome, {r.left + 6 * dpi, ri.bottom + 6 * dpi, r.right - 6 * dpi, ri.bottom + 24 * dpi});
     }
-    if (filtrate.empty()) { pennello->SetColor({ink.r, ink.g, ink.b, 0.5f}); scrivi(L"Nessuna app trovata", fmtNome, {0, lGrigliaTop() + 40 * dpi, LW, lGrigliaTop() + 70 * dpi}); }
+    if (filtrate.empty()) { pennello->SetColor({ink.r, ink.g, ink.b, 0.5f}); scrivi(testi::t(L"Nessuna app trovata", L"No apps found"), fmtNome, {0, lGrigliaTop() + 40 * dpi, LW, lGrigliaTop() + 70 * dpi}); }
     dc->PopAxisAlignedClip();
     // barra di scorrimento sottile, solo se serve; col mouse sopra (o trascinandola) si allarga, come su macOS
     if (lScrollMax() > 0) {

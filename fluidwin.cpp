@@ -2028,7 +2028,7 @@ static void impostaPausa(bool p) {
         gFoto.clear();
     }
     aggiornaTransizioni();
-    wcscpy(gIcona.szTip, p ? L"FluidWin (in pausa)" : L"FluidWin");
+    wcscpy(gIcona.szTip, p ? testi::t(L"FluidWin (in pausa)", L"FluidWin (paused)") : L"FluidWin");
     Shell_NotifyIconW(NIM_MODIFY, &gIcona);
 }
 
@@ -2160,9 +2160,7 @@ static banner::Banner gBanner;
 static impostazioni::Finestra gImpostazioni;
 
 static void apriImpostazioni() {
-    const int rw = raggio::windhawk();
-    gImpostazioni.infoAngoli = rw > 0 ? L"Angoli delle finestre: " + std::to_wstring(rw) + L" px (dalla mod di Windhawk)"
-                                      : L"Angoli delle finestre: quelli di Windows (piu' tondi con la mod di Windhawk)";
+    gImpostazioni.raggioWindhawk = raggio::windhawk();
     gImpostazioni.apri();
 }
 
@@ -2174,8 +2172,16 @@ static void applicaImpostazioni() {
     gTastoRicerca = v.winS;
     gBanner.accendi(v.banner);
     aggiornaTransizioni();
-    logf("impostazioni: gelatina=%d genio=%d volume=%d angolo=%d wintab=%d wins=%d banner=%d",
-         v.gelatina, v.genio, v.volume, v.angolo, v.winTab, v.winS, v.banner);
+    // lingua cambiata: i testi si leggono al momento di disegnare, basta ridisegnare (date e nomi del dock si rifanno)
+    static int linguaPrima = -1;
+    if (v.lingua != linguaPrima) {
+        if (linguaPrima >= 0 && gDockOk) gDock.linguaCambiata();
+        linguaPrima = v.lingua;
+        wcscpy(gIcona.szTip, gPausa ? testi::t(L"FluidWin (in pausa)", L"FluidWin (paused)") : L"FluidWin");
+        if (gIcona.hWnd) Shell_NotifyIconW(NIM_MODIFY, &gIcona);
+    }
+    logf("impostazioni: gelatina=%d genio=%d volume=%d angolo=%d wintab=%d wins=%d banner=%d lingua=%d",
+         v.gelatina, v.genio, v.volume, v.angolo, v.winTab, v.winS, v.banner, v.lingua);
 }
 
 // Angolo in alto a sinistra dello schermo principale: col mouse fermo li' (e nessun tasto premuto) si apre la
@@ -2222,10 +2228,11 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 POINT pt; GetCursorPos(&pt);
                 SetForegroundWindow(h);   // cosi' la tastiera (Esc, frecce) arriva al menu
                 const int scelta = (int)menu::mostra({menu::titolo(L"FluidWin"), menu::separatore(),
-                                                      menu::voce(L"Impostazioni…", 3),
-                                                      menu::voce(gPausa ? L"Riprendi animazioni" : L"Metti in pausa", 1),
+                                                      menu::voce(testi::t(L"Impostazioni…", L"Settings…"), 3),
+                                                      menu::voce(gPausa ? testi::t(L"Riprendi animazioni", L"Resume animations")
+                                                                        : testi::t(L"Metti in pausa", L"Pause"), 1),
                                                       menu::separatore(),
-                                                      menu::voce(L"Esci", 2)}, pt, h, true);
+                                                      menu::voce(testi::t(L"Esci", L"Exit"), 2)}, pt, h, true);
                 if (GetForegroundWindow() == h) attivaFinestraInCima();   // il fuoco non resta alla nostra finestra invisibile
                 if (scelta == 1) impostaPausa(!gPausa);
                 else if (scelta == 2) PostQuitMessage(0);
@@ -2434,6 +2441,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     salvaStatoBarra();                      // prima che il dock nasconda la barra di Windows
     gDock.riduci = riduciDalDock;
     gDock.registro = [](const char* s) { logf("dock: %s", s); };
+    impostazioni::carica();   // prima di tutto: la lingua dei testi (dock compreso)
     gDockOk = gDock.inizializza(inst);
     if (!gDockOk) { gDock.chiudi(); ripristinaBarra(); }
     else { mostraBarreWindows(false); gDock.controllaFinestre(); }

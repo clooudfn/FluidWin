@@ -12,10 +12,11 @@
 #include <atomic>
 #include <cstdlib>
 #include <cmath>
+#include "testi.h"
 
 namespace widget {
 
-struct Giorno { int codice = 0; double max = 0, min = 0; std::wstring nome; };
+struct Giorno { int codice = 0; double max = 0, min = 0; int settimana = -1; };   // settimana: 0 domenica .. 6 sabato, -1 oggi
 struct Notizia { std::wstring titolo, link, quando; };
 
 struct Istantanea {
@@ -28,18 +29,27 @@ struct Istantanea {
 
 // descrizione del codice meteo WMO (quello che usa Open-Meteo)
 inline const wchar_t* descrizione(int c) {
-    if (c == 0) return L"Sereno";
-    if (c == 1) return L"Quasi sereno";
-    if (c == 2) return L"Parzialmente nuvoloso";
-    if (c == 3) return L"Coperto";
-    if (c == 45 || c == 48) return L"Nebbia";
-    if (c >= 51 && c <= 57) return L"Pioviggine";
-    if (c >= 61 && c <= 67) return L"Pioggia";
-    if (c >= 71 && c <= 77) return L"Neve";
-    if (c >= 80 && c <= 82) return L"Rovesci";
-    if (c >= 85 && c <= 86) return L"Rovesci di neve";
-    if (c >= 95) return L"Temporale";
+    using testi::t;
+    if (c == 0) return t(L"Sereno", L"Clear");
+    if (c == 1) return t(L"Quasi sereno", L"Mostly clear");
+    if (c == 2) return t(L"Parzialmente nuvoloso", L"Partly cloudy");
+    if (c == 3) return t(L"Coperto", L"Overcast");
+    if (c == 45 || c == 48) return t(L"Nebbia", L"Fog");
+    if (c >= 51 && c <= 57) return t(L"Pioviggine", L"Drizzle");
+    if (c >= 61 && c <= 67) return t(L"Pioggia", L"Rain");
+    if (c >= 71 && c <= 77) return t(L"Neve", L"Snow");
+    if (c >= 80 && c <= 82) return t(L"Rovesci", L"Showers");
+    if (c >= 85 && c <= 86) return t(L"Rovesci di neve", L"Snow showers");
+    if (c >= 95) return t(L"Temporale", L"Thunderstorm");
     return L"";
+}
+
+// nome breve del giorno nelle previsioni ("Oggi", "Lun"...)
+inline const wchar_t* nomeGiorno(const Giorno& g) {
+    static const wchar_t* it[7] = {L"Dom", L"Lun", L"Mar", L"Mer", L"Gio", L"Ven", L"Sab"};
+    static const wchar_t* en[7] = {L"Sun", L"Mon", L"Tue", L"Wed", L"Thu", L"Fri", L"Sat"};
+    if (g.settimana < 0 || g.settimana > 6) return testi::t(L"Oggi", L"Today");
+    return testi::inglese() ? en[g.settimana] : it[g.settimana];
 }
 
 class Dati {
@@ -151,9 +161,8 @@ private:
         if (day != std::string::npos) {
             const auto cod = elenco(j, "weather_code", day), mx = elenco(j, "temperature_2m_max", day), mn = elenco(j, "temperature_2m_min", day);
             SYSTEMTIME st; GetLocalTime(&st);
-            static const wchar_t* gg[7] = {L"Dom", L"Lun", L"Mar", L"Mer", L"Gio", L"Ven", L"Sab"};
             for (size_t i = 0; i < cod.size() && i < mx.size() && i < mn.size(); i++)
-                d.giorni.push_back({(int)cod[i], mx[i], mn[i], i == 0 ? L"Oggi" : gg[(st.wDayOfWeek + i) % 7]});
+                d.giorni.push_back({(int)cod[i], mx[i], mn[i], i == 0 ? -1 : (int)((st.wDayOfWeek + i) % 7)});
         }
         d.meteoOk = ok;
     }

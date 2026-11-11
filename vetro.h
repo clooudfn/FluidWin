@@ -15,6 +15,7 @@
 #include <algorithm>
 #include "raggio.h"
 #include "fabbriche.h"
+#include "testi.h"   // lingua dell'interfaccia (per tutte le finestre di vetro)
 
 namespace vetro {
 
