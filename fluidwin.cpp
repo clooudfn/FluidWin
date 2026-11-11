@@ -1751,6 +1751,46 @@ static bool invertiRipristino(HWND h) {
     return true;
 }
 
+// App con i tasti della barra del titolo disegnati da loro dentro la finestra (Discord e altre app Electron senza
+// cornice): il loro hit test dice "zona normale" anche sul tasto "riduci", e la riduzione non si poteva prevedere
+// (niente genio: la finestra spariva di colpo). A un clic nell'angolo in alto a destra di queste finestre si fa solo
+// la foto (pochi ms, nient'altro cambia); se entro 2 s la finestra si riduce, il genio parte da quella foto
+struct FotoDelClic { HWND h = nullptr; genio::Immagine foto; RECT vis{}; double t = 0; };
+static FotoDelClic gFotoClic;
+
+static void liberaFotoClic() { gFotoClic.foto.libera(); gFotoClic.h = nullptr; }
+
+static void fotoDelClic(HWND h, const InfoFinestra& i, POINT pt) {
+    const double sc = scalaFinestra(h);
+    if (pt.x < i.visibile.right - (LONG)(240 * sc) || pt.y > i.visibile.top + (LONG)(56 * sc)) return;
+    RECT ic;
+    if (!gGenioOk || !nascondibile(h) || GetPropW(h, PROP_NASCOSTA) || schermoInteroAttivo() || !iconaBarra(h, ic)) return;
+    liberaFotoClic();
+    const double t0 = ora();
+    if (!gGenio.cattura(h, i.visibile, gFotoClic.foto, true)) { gFotoClic.foto.libera(); return; }
+    gFotoClic.h = h; gFotoClic.vis = i.visibile; gFotoClic.t = ora();
+    logf("foto del clic %p (tasti disegnati dall'app) in %.1f ms", h, (ora() - t0) * 1000);
+}
+
+// riduzione non prevista subito dopo un clic in alto a destra: genio dalla foto del clic
+static bool riduciDallaFotoDelClic(HWND h) {
+    if (gFotoClic.h != h || !gFotoClic.foto.srv || ora() - gFotoClic.t > 2.0) return false;
+    if (gPausa || !gMovimento || !impostazioni::valori().genio || schermoInteroAttivo()) { liberaFotoClic(); return false; }
+    InfoFinestra* i = traccia(h);
+    RECT ic;
+    if (!i || !iconaBarra(h, ic)) { liberaFotoClic(); return false; }
+    spegniTransizioniNative(h);
+    if (!rendiLayered(h, 0)) { riaccendiTransizioniNative(h); liberaFotoClic(); return false; }   // trasparente per il ripristino
+    Anim* a = nuovaAnim(h, Tipo::Riduci, gFotoClic.vis, ic, *i, 0);
+    if (!a) { rendiVisibileFinestra(h); liberaFotoClic(); return false; }
+    liberaFoto(h);
+    gFoto[h] = gFotoClic.foto; gFotoClic.foto = {}; gFotoClic.h = nullptr;   // (la foto passa al genio)
+    a->fase = 0; a->genio = true; a->fotogrammiGenio = 0; a->t0 = tempoProssimoFotogramma();
+    logf("riduci %p genio dalla foto del clic, bersaglio %ld,%ld-%ld,%ld", h, ic.left, ic.top, ic.right, ic.bottom);
+    if (gDockOk) SetTimer(gMessaggi, 2, 80, nullptr);
+    return true;
+}
+
 // Inizio cattura del mouse: se e' la pressione del pulsante "riduci a icona", prepariamo la copia
 static void suCattura(HWND figlia) {
     if (gPausa) return;
@@ -1782,6 +1822,7 @@ static void suCattura(HWND figlia) {
     } else {
         DWORD_PTR colpo = 0;
         if (!SendMessageTimeoutW(h, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y), SMTO_ABORTIFHUNG | SMTO_BLOCK, 40, &colpo)) return;
+        if (colpo == HTCLIENT && !in) { fotoDelClic(h, *i, pt); return; }   // forse un tasto "riduci" disegnato dall'app
         if (colpo != HTMINBUTTON) return;
     }
     if (in) invertiRipristino(h); else preparaCopia(h, *i);
@@ -1828,6 +1869,7 @@ static void adotta(HWND h) {
 
 static void suRiduci(HWND h) {
     Anim* a = animDi(h);
+    if (!a && riduciDallaFotoDelClic(h)) return;   // tasto "riduci" disegnato dall'app (Discord)
     if (!a || a->tipo == Tipo::Ripristina) {        // riduzione non anticipata: resta l'animazione nativa
         if (a) annullaAnimDi(h);
         if (!gPausa && finestraApp(h)) { gDaAdottare.insert(h); SetTimer(gMessaggi, 3, 450, nullptr); }
@@ -2631,6 +2673,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 return 0;
             }
             if (w == 7) {
+                if (gFotoClic.foto.srv && ora() - gFotoClic.t > 2.5) liberaFotoClic();   // nessuna riduzione dopo il clic
                 controllaAngolo();
                 if (!gChiusure.empty()) pulisciChiusure();
                 // fine di un trascinamento fatto dall'app: tasto sinistro rilasciato
