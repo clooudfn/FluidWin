@@ -56,6 +56,7 @@
 #include "comodita.h"
 #include "mixer.h"
 #include "pila.h"
+#include "appunti.h"
 #include <ole2.h>
 #include <knownfolders.h>
 #include "testi.h"
@@ -352,6 +353,13 @@ public:
             SHQUERYRBINFO q{}; q.cbSize = sizeof(q);
             const bool p = SUCCEEDED(SHQueryRecycleBinW(nullptr, &q)) && q.i64NumItems > 0;
             if (p != cestinoPieno) { cestinoPieno = p; dirty = true; }
+        }
+        // appunti aperti: si aggiornano quando si copia qualcosa
+        if (pannelloTipo == P_APPUNTI && !pChiusura && appunti::Cronologia::io().versione != versioneAppunti) {
+            versioneAppunti = appunti::Cronologia::io().versione;
+            const float nuova = altezzaVista(P_APPUNTI);
+            if (nuova != PH) { PH = nuova; pAnimazione = true; }
+            pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
         }
         // mixer aperto: si rilegge ogni secondo (app che iniziano o smettono di suonare, volumi cambiati da fuori)
         if (pannelloTipo == P_MIXER && !pChiusura && trascinaMixer < 0 && ++giroMixer % 2 == 0) rileggiMixer();
@@ -1442,14 +1450,15 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI };
     widget::Dati widD;                   // meteo e notizie (scaricati in un thread a parte)
     widget::Istantanea wid;              // l'ultima copia, per il disegno
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
-                  A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE };
+                  A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
+                  A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA };
     sistema::Sistema sis;                // Wi-Fi, Bluetooth e luminosita' (letti e cambiati in un thread a parte)
     double temaK = -1;                   // simbolo del tema: 0 sole (chiaro) .. 1 luna (scuro), animato
     bool trascinaLum = false;
@@ -1708,6 +1717,12 @@ private:
     void mixerDaMouse(float x);
     void rileggiMixer();
     void menuUscite(const D2D1_RECT_F& r);
+    // cronologia degli appunti (vista P_APPUNTI, appunti.h): anteprime delle immagini per id della voce
+    std::unordered_map<UINT, ID2D1Bitmap1*> immaginiAppunti;
+    UINT versioneAppunti = 0;
+    float altezzaAppunti() const;
+    void disegnaAppunti(bool scuro, D2D1_COLOR_F ink);
+    void simboloAppunti(float cx, float cy);
 
     void simboloGoccia(float cx, float cy);
 

@@ -2342,6 +2342,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         case WM_APRI_LAUNCHER: if (gDockOk) gDock.apriLauncher(); return 0;
         case WM_HOTKEY: if (w == TASTO_PRIMO_PIANO) primoPiano(); return 0;
+        case WM_CLIPBOARDUPDATE: appunti::Cronologia::io().cambiato(); return 0;   // cronologia degli appunti
         case WM_VOLUME:
             if (gDockOk) {
                 float liv = 0; bool muto = false;
@@ -2558,6 +2559,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     RegisterClassW(&wm);
     gMessaggi = CreateWindowExW(0, wm.lpszClassName, L"FluidWin", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
     SetTimer(gMessaggi, 1, 500, nullptr);
+    appunti::Cronologia::io().avvia(gMessaggi);   // cronologia degli appunti (solo in memoria)
     // Ctrl+Win+T: sempre in primo piano (se un altro programma la usa gia', resta a lui)
     if (!RegisterHotKey(gMessaggi, TASTO_PRIMO_PIANO, MOD_CONTROL | MOD_WIN | MOD_NOREPEAT, 'T'))
         logf("Ctrl+Win+T usata da un altro programma (errore %lu): niente sempre in primo piano", GetLastError());
@@ -2676,6 +2678,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (gDockOk) gDock.chiudi();
     banner::ripristinaBannerWindows();   // senza FluidWin tornano i banner di Windows (alla prossima apertura si rispengono)
     togliPrimoPiano();
+    appunti::Cronologia::io().ferma();
     if (gOsdOk) gOsd.chiudi();
     // finestre appena create che un thread sta rendendo trasparenti: si aspetta che finisca (poco: con un'app
     // bloccata il thread non cambia niente finche' non risponde), poi le rimette a posto ripristinaTutte

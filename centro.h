@@ -126,6 +126,7 @@ inline auto Motore::preparaVista(int tipo) -> void {
     else if (tipo == P_NOTIFICHE) { Cronometro cr(this, "notifiche"); permessoN = lettoreN.leggi(listaN); }
     else if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
     else if (tipo == P_MIXER) mix.leggi();
+    else if (tipo == P_APPUNTI) versioneAppunti = appunti::Cronologia::io().versione;
 }
 
 // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
@@ -136,6 +137,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_WIDGET) h = std::round(560 * dpi) + testa;
     else if (tipo == P_NOTIFICHE) h = altezzaNotifiche() + testa;
     else if (tipo == P_MIXER) h = altezzaMixer() + testa;
+    else if (tipo == P_APPUNTI) h = altezzaAppunti() + testa;
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
 }
@@ -392,6 +394,7 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
         else if (tipo == P_NOTIFICHE) disegnaNotifiche(scuro, ink);
         else if (tipo == P_WIDGET) disegnaWidget(scuro, ink);
         else if (tipo == P_MIXER) disegnaMixer(scuro, ink);
+        else if (tipo == P_APPUNTI) disegnaAppunti(scuro, ink);
         for (size_t i = n; i < elementi.size(); i++) { elementi[i].r.top += testa; elementi[i].r.bottom += testa; }
     }
     baseVista = D2D1::Matrix3x2F::Identity(); dc->SetTransform(baseVista);
@@ -415,7 +418,8 @@ inline auto Motore::disegnaTesta(int tipo, bool scuro, D2D1_COLOR_F ink) -> void
     dc->SetTransform(baseVista);
     // titolo al centro vero della testata (il formato dei titoli e' allineato a sinistra: si misura)
     const std::wstring titolo = tipo == P_SFONDO ? testi::t(L"In background", L"In background") : tipo == P_WIDGET ? L"Widget"
-                              : tipo == P_MIXER ? testi::t(L"Mixer", L"Mixer") : testi::t(L"Notifiche", L"Notifications");
+                              : tipo == P_MIXER ? testi::t(L"Mixer", L"Mixer") : tipo == P_APPUNTI ? testi::t(L"Appunti", L"Clipboard")
+                              : testi::t(L"Notifiche", L"Notifications");
     const float lt = larghezzaTesto(titolo, fmtTitolo);
     pennello->SetColor(ink);
     scrivi(titolo, fmtTitolo, {std::max(110 * dpi, PW / 2 - lt / 2), ri.top, PW - m, ri.bottom});
@@ -453,6 +457,95 @@ inline auto Motore::scrivi(const std::wstring& s, IDWriteTextFormat* f, const D2
 }
 
 inline auto Motore::chevronDestra(float x, float cy) -> void { linea(-2, -4, 2, 0, x, cy, 1.8f); linea(2, 0, -2, 4, x, cy, 1.8f); }
+
+// ---- cronologia degli appunti (pulsante "Appunti" del centro di controllo) ----
+static constexpr float APP_RIGA = 54, APP_PIEDE = 52;
+
+inline auto Motore::altezzaAppunti() const -> float {
+    const size_t n = appunti::Cronologia::io().voci.size();
+    const int entrano = std::max(1, (int)((altezzaMassimaP() / dpi - TESTA - 10 - APP_PIEDE) / APP_RIGA));
+    const int righe = std::max(1, std::min((int)n, std::min(entrano, 9)));
+    return std::round((10 + righe * APP_RIGA + APP_PIEDE) * dpi);
+}
+
+// cartellina con il fermaglio
+inline auto Motore::simboloAppunti(float cx, float cy) -> void {
+    const float d = dpi;
+    dc->DrawRoundedRectangle({{cx - 6.5f * d, cy - 7 * d, cx + 6.5f * d, cy + 9 * d}, 2 * d, 2 * d}, pennello, 1.6f * d);
+    dc->FillRoundedRectangle({{cx - 3.5f * d, cy - 9.5f * d, cx + 3.5f * d, cy - 5 * d}, 1.5f * d, 1.5f * d}, pennello);
+    linea(-3, -1, 3, -1, cx, cy, 1.4f);
+    linea(-3, 3, 2, 3, cx, cy, 1.4f);
+}
+
+inline auto Motore::disegnaAppunti(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const auto& voci = appunti::Cronologia::io().voci;
+    // anteprime delle immagini: create quando servono, liberate quando la voce non c'e' piu'
+    for (auto it = immaginiAppunti.begin(); it != immaginiAppunti.end();) {
+        const bool c = std::any_of(voci.begin(), voci.end(), [&](const appunti::Voce& v) { return v.id == it->first; });
+        if (!c) { if (it->second) it->second->Release(); it = immaginiAppunti.erase(it); } else ++it;
+    }
+    float y = 10 * dpi;
+    const float limite = PH - APP_PIEDE * dpi;
+    if (voci.empty()) {
+        pennello->SetColor(tenue);
+        scrivi(testi::t(L"Niente copiato finora", L"Nothing copied yet"), fmtSotto, {m, y, PW - m, y + 44 * dpi});
+    }
+    for (size_t i = 0; i < voci.size() && y + APP_RIGA * dpi <= limite + 1; i++) {
+        const appunti::Voce& v = voci[i];
+        const D2D1_RECT_F r = {m - 6 * dpi, y, PW - m + 6 * dpi, y + (APP_RIGA - 4) * dpi};
+        const int e = aggiungi(r, A_APPUNTI_VOCE, (int)v.id);
+        evidenzia(e, r, scuro, 10 * dpi);
+        float tx = m + 2 * dpi;
+        std::wstring riga, sotto = quandoN(v.quando);
+        if (v.immagine) {
+            ID2D1Bitmap1*& b = immaginiAppunti[v.id];
+            if (!b && !v.anteprima.empty())
+                dc->CreateBitmap(D2D1::SizeU(v.aw, v.ah), v.anteprima.data(), v.aw * 4,
+                                 D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_NONE, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &b);
+            const float ih = 40 * dpi, iw = std::min(72 * dpi, ih * v.aw / std::max(1, v.ah)), iy = y + 3 * dpi;
+            if (b) dc->DrawBitmap(b, {tx, iy, tx + iw, iy + ih}, 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            tx += iw + 10 * dpi;
+            wchar_t t[64]; swprintf(t, 64, testi::t(L"Immagine · %d × %d", L"Image · %d × %d"), v.w, v.h);
+            riga = t;
+        } else {
+            // prima parte del testo, con gli a capo e le tabulazioni come spazi
+            bool spazio = false;
+            for (wchar_t c : v.testo) {
+                if (riga.size() >= 160) break;
+                if (iswspace(c)) { if (!spazio && !riga.empty()) riga.push_back(L' '); spazio = true; }
+                else { riga.push_back(c); spazio = false; }
+            }
+        }
+        const bool sopra = pMouseDentro && (pSopra == e || pSopra == e + 1);
+        pennello->SetColor(ink);
+        scrivi(riga, fmtVoce, {tx, y + 6 * dpi, r.right - 34 * dpi, y + 26 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(sotto, fmtSotto, {tx, y + 26 * dpi, r.right - 34 * dpi, y + 44 * dpi});
+        // x per toglierla, solo col mouse sopra
+        const D2D1_RECT_F rx = {r.right - 30 * dpi, r.top + 13 * dpi, r.right - 6 * dpi, r.top + 37 * dpi};
+        const int ex = aggiungi(rx, A_APPUNTI_TOGLI, (int)v.id);
+        if (sopra) {
+            const double hh = evidenzia(ex, rx, scuro, 12 * dpi);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f + 0.1f * (float)hh) : D2D1::ColorF(0, 0, 0, 0.08f + 0.06f * (float)hh));
+            const float cx = (rx.left + rx.right) / 2, cy = (rx.top + rx.bottom) / 2;
+            dc->FillEllipse({{cx, cy}, 10 * dpi, 10 * dpi}, pennello);
+            pennello->SetColor(ink);
+            linea(-3.5f, -3.5f, 3.5f, 3.5f, cx, cy, 1.5f);
+            linea(3.5f, -3.5f, -3.5f, 3.5f, cx, cy, 1.5f);
+        }
+        y += APP_RIGA * dpi;
+    }
+    // piede: cancella tutto
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rp = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rp, A_APPUNTI_SVUOTA, 0), rp, scuro, 6 * dpi);
+    pennello->SetColor(voci.empty() ? tenue : D2D1::ColorF(1.0f, 0.27f, 0.23f, 1));
+    scrivi(testi::t(L"Cancella tutto", L"Clear all"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
+}
 
 // ---- mixer del volume (riga "Uscita" del centro di controllo) ----
 // Per ogni uscita (la predefinita in cima, le altre solo se ci suona un'app): titolo, la riga dell'uscita e le righe
@@ -874,8 +967,8 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
 
     // scorciatoie tonde
     y += 36 * dpi + 16 * dpi;
-    const wchar_t* nomi[4] = {L"Widget", L"In background", testi::t(L"Notifiche", L"Notifications"), testi::t(L"Impostazioni", L"Settings")};
-    const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_IMPOSTAZIONI};
+    const wchar_t* nomi[4] = {L"Widget", L"In background", testi::t(L"Notifiche", L"Notifications"), testi::t(L"Appunti", L"Clipboard")};
+    const Azione az[4] = {A_WIDGET, A_SFONDO, A_NOTIFICHE, A_APPUNTI};
     for (int i = 0; i < 4; i++) {
         const float cx = m + larg * (i + 0.5f) / 4, cy = y + 26 * dpi;
         const D2D1_RECT_F r = {cx - 36 * dpi, y - 4 * dpi, cx + 36 * dpi, y + 76 * dpi};
@@ -885,7 +978,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f + 0.06f * (float)h) : D2D1::ColorF(0, 0, 0, 0.06f + 0.05f * (float)h));
         dc->FillEllipse({{cx, cy}, 26 * dpi * s, 26 * dpi * s}, pennello);
         pennello->SetColor(ink);
-        if (i == 0) simboloWidget(cx, cy); else if (i == 1) simboloFreccia(cx, cy); else if (i == 2) simboloCampana(cx, cy); else simboloIngranaggio(cx, cy);
+        if (i == 0) simboloWidget(cx, cy); else if (i == 1) simboloFreccia(cx, cy); else if (i == 2) simboloCampana(cx, cy); else simboloAppunti(cx, cy);
         pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.75f});
         scrivi(nomi[i], fmtNome, {cx - 40 * dpi, cy + 30 * dpi, cx + 40 * dpi, cy + 48 * dpi});
     }
@@ -1467,6 +1560,10 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         // la riga dell'uscita apre il mixer (volume per uscita e per app)
         case A_AUDIO:        cambiaVista(P_MIXER, {(e.r.left + e.r.right) / 2, (e.r.top + e.r.bottom) / 2}); break;
         case A_ALTRE_USCITE: menuUscite(e.r); break;
+        case A_APPUNTI:      cambiaVista(P_APPUNTI, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;
+        case A_APPUNTI_VOCE: if (appunti::Cronologia::io().ricopia((UINT)e.indice)) chiudiPannello(); break;   // di nuovo negli appunti
+        case A_APPUNTI_TOGLI: appunti::Cronologia::io().togli((UINT)e.indice); break;
+        case A_APPUNTI_SVUOTA: appunti::Cronologia::io().svuota(); break;
         case A_MIXER_MUTO:   mix.muto(e.indice / 1000, e.indice % 1000 - 1); leggiVolume(); pDirty = true; dirty = true; break;
         case A_MIXER_PRED: {
             const size_t u = e.indice / 1000;
@@ -1630,7 +1727,7 @@ inline auto Motore::rettIsolaSchermo() const -> RECT {
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }
 
 // apre il centro di controllo da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
-inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_MIXER) apriCentro(tipo); }
+inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_APPUNTI) apriCentro(tipo); }
 
 // Il centro di controllo (icona a destra nel dock, notch, Win+N...): si apre sulla vista chiesta. Gia' aperto: la
 // stessa vista lo chiude, un'altra ci passa dentro la stessa finestra. Col launcher aperto prima si chiude lui

@@ -33,6 +33,9 @@
 #include "testi.h"
 #include "comodita.h"
 #include "sensori.h"
+#include <ole2.h>
+#include <shlobj.h>
+#include <shobjidl.h>
 
 namespace notch {
 
@@ -55,11 +58,16 @@ public:
                               WS_POPUP, 0, 0, 1, 1, nullptr, nullptr, inst, nullptr);
         if (!fin) return false;
         SetWindowLongPtrW(fin, 0, (LONG_PTR)this);
+        // scaffale: i file trascinati sul notch ci restano appoggiati (serve OleInitialize nel thread)
+        bersaglio.n = this;
+        RegisterDragDrop(fin, &bersaglio);
         BOOL niente = TRUE; DwmSetWindowAttribute(fin, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
         return true;
     }
 
     ~Notch() {
+        if (fin) RevokeDragDrop(fin);
+        svuotaScaffale();
         lettore.ferma();
         libera();
         for (IDWriteTextFormat* f : formati()) if (f) f->Release();
@@ -134,7 +142,7 @@ public:
     }
 
 private:
-    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO, TIMER, SUONA };
+    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO, TIMER, SUONA, SCAFFALE };
 
     HWND fin = nullptr;
     bool acceso = false, visibile = false;
@@ -227,6 +235,7 @@ private:
         if (t < fineAvviso) return AVVISO;
         if (comodita::timerSuona()) return SUONA;
         if (notificaAttiva) return NOTIFICA;
+        if (trascinoSopra || t < fineScaffale || (sopra && !scaffale.empty())) return SCAFFALE;
         if (sopra && brano.c) return APERTO;
         if (comodita::timerAttivo()) return TIMER;
         if (brano.c && brano.suona) return MUSICA;
@@ -240,10 +249,12 @@ private:
             case APERTO:   w = 372 * d; h = 96 * d; R = 26 * d; break;
             case VOLUME:   w = 292 * d; h = 32 * d; R = 14 * d; break;
             case NOTIFICA: w = 372 * d; h = 78 * d; R = 26 * d; break;
+            case SCAFFALE: w = 372 * d; h = 96 * d; R = 26 * d; break;
             case AVVISO:   w = std::clamp(larghezzaAvviso + 76 * d, 220 * d, 372 * d); h = 32 * d; R = 14 * d; break;
             case TIMER:    w = largoOra + 104 * d; h = 22 * d; R = 9 * d; break;
             case SUONA:    w = 300 * d; h = 42 * d; R = 20 * d; break;
             default:       w = largoOra; h = 22 * d; R = 9 * d;
+                           if (!scaffale.empty()) w += 40 * d;                     // posto per il segno dello scaffale
                            if (sopra) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
         }
         w = std::round(w); h = std::round(h); R = std::round(R);
@@ -344,7 +355,9 @@ private:
         if (ps != pulsanteSopra || sx != sopraX || dentro != mouseDentro) { pulsanteSopra = ps; sopraX = sx; mouseDentro = dentro; ridisegnare = true; }
         // scadenze: volume e notifica (ferma finche' c'e' sopra il mouse)
         if (notificaAttiva && t >= fineNotifica) { if (dentro) fineNotifica = t + 1.5; else finisciNotifica(); }
-        cliccabile(modoAtt == NORMALE && (sopra || (scena == NOTIFICA && dentro) || scena == SUONA));
+        // con il tasto premuto e il mouse sul notch (un file trascinato da Esplora file) il notch si fa trovare dal
+        // trascinamento: trasparente al mouse, Windows non glielo darebbe mai
+        cliccabile(modoAtt == NORMALE && (sopra || (scena == NOTIFICA && dentro) || scena == SUONA || scena == SCAFFALE || (tasti && dentro)));
         const int prima = scena;
         bersagli();
         if (scena != prima) ridisegnare = false;   // ci pensa l'animazione
@@ -380,6 +393,12 @@ private:
     }
 
     void clicca(int x, int y) {
+        if (scena == SCAFFALE) {
+            const int o = oggettoIn(x, y);
+            if (o == SVUOTA) { svuotaScaffale(); bersagli(); }
+            else if (o >= 0 && o < (int)scaffale.size()) ShellExecuteW(nullptr, L"open", scaffale[o].percorso.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            return;
+        }
         if (scena == SUONA) { comodita::silenziaTimer(); bersagli(); return; }   // clic: la sveglia smette
         if (scena == NOTIFICA) {
             if (sullaX(x, y)) { if (chiudiNotifica) chiudiNotifica(); }
@@ -403,6 +422,7 @@ private:
 
     void libera() {
         for (ID2D1Bitmap** b : {&bCopertina, &bIcona}) if (*b) { (*b)->Release(); *b = nullptr; }
+        for (auto& o : scaffale) if (o.b) { o.b->Release(); o.b = nullptr; }   // (legate al vecchio render target)
         if (pen) { pen->Release(); pen = nullptr; }
         if (rt) { rt->Release(); rt = nullptr; }
         if (mem) { SelectObject(mem, vecchio); DeleteDC(mem); mem = nullptr; }
@@ -597,7 +617,8 @@ private:
         switch (s) {
             case ORA:
                 ora(L, w, h, a);
-                if (segnoSveglio) tazzina(L + 15 * d, h / 2, 0.75f * a);
+                if (!scaffale.empty()) segnoScaffale(L + 18 * d, h / 2, a);
+                if (segnoSveglio) tazzina(L + (scaffale.empty() ? 15 : 44) * d, h / 2, 0.75f * a);
                 if (segnoSilenzio) lunetta(L + w - 15 * d, h / 2, 0.75f * a);
                 break;
             case AVVISO: {
@@ -617,6 +638,7 @@ private:
                 break;
             }
             case APERTO: aperto(L, w, h, a); break;
+            case SCAFFALE: scaffaleScena(L, w, h, a); break;
             case TIMER: {   // ora al centro, anello del timer a sinistra e il tempo che resta a destra, in arancio
                 ora(L, w, h, a);
                 anello(L + 20 * d, h / 2, 6.5f * d, (float)comodita::timerAvanzamento(), a);
@@ -698,6 +720,189 @@ private:
         if (!acceso) {
             colore(0, 0, 0, a); rt->DrawLine({cx - 7 * d, cy - 7 * d}, {cx + 7 * d, cy + 7 * d}, pen, 3.2f * d);
             colore(1, 1, 1, a); rt->DrawLine({cx - 6 * d, cy - 6 * d}, {cx + 6 * d, cy + 6 * d}, pen, 1.4f * d);
+        }
+    }
+
+    // ---- scaffale ----
+    // File appoggiati sul notch (riferimenti: i file restano dove sono). Si trascinano sopra da qualsiasi app, si
+    // riprendono trascinandoli fuori (uno o "Tutti"); dopo un trascinamento riuscito escono dallo scaffale.
+    struct Oggetto { std::wstring percorso, nome; std::vector<UINT> px; int w = 0, h = 0; ID2D1Bitmap* b = nullptr; };
+    std::vector<Oggetto> scaffale;
+    bool trascinoSopra = false, trascinoMio = false;
+    double fineScaffale = 0;
+    int premutoX = 0, premutoY = 0, premutoS = -1;
+    static constexpr int TUTTI = 1000, SVUOTA = 1001, MAX_VISTI = 6;
+
+    struct Bersaglio : IDropTarget {
+        Notch* n = nullptr; bool ok = false;
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** p) override { if (r == IID_IUnknown || r == IID_IDropTarget) { *p = this; return S_OK; } *p = nullptr; return E_NOINTERFACE; }
+        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE DragEnter(IDataObject* o, DWORD, POINTL, DWORD* e) override {
+            FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+            ok = o && !n->trascinoMio && n->modoAtt == NORMALE && o->QueryGetData(&f) == S_OK;
+            if (ok) { n->trascinoSopra = true; n->bersagli(); }
+            *e = ok ? DROPEFFECT_COPY : DROPEFFECT_NONE;
+            return S_OK;
+        }
+        HRESULT STDMETHODCALLTYPE DragOver(DWORD, POINTL, DWORD* e) override { *e = ok ? DROPEFFECT_COPY : DROPEFFECT_NONE; return S_OK; }
+        HRESULT STDMETHODCALLTYPE DragLeave() override { if (n->trascinoSopra) { n->trascinoSopra = false; n->bersagli(); } return S_OK; }
+        HRESULT STDMETHODCALLTYPE Drop(IDataObject* o, DWORD, POINTL, DWORD* e) override {
+            *e = DROPEFFECT_NONE;
+            n->trascinoSopra = false;
+            if (ok && o) {
+                FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM m{};
+                if (SUCCEEDED(o->GetData(&f, &m))) {
+                    if (HDROP hd = (HDROP)GlobalLock(m.hGlobal)) {
+                        const UINT k = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
+                        for (UINT i = 0; i < k && i < 50; i++) { wchar_t p[MAX_PATH * 4]; if (DragQueryFileW(hd, i, p, MAX_PATH * 4)) n->appoggia(p); }
+                        GlobalUnlock(m.hGlobal);
+                    }
+                    ReleaseStgMedium(&m);
+                    *e = DROPEFFECT_COPY;   // copia: il file resta dov'era
+                    n->fineScaffale = adesso() + 1.8;   // si vede un attimo cosa e' entrato
+                }
+            }
+            n->bersagli(); n->ridisegna();
+            return S_OK;
+        }
+    } bersaglio;
+
+    void appoggia(const std::wstring& p) {
+        for (auto& o : scaffale) if (!_wcsicmp(o.percorso.c_str(), p.c_str())) return;
+        Oggetto o; o.percorso = p;
+        const size_t s = p.find_last_of(L"\\/"); o.nome = s == std::wstring::npos ? p : p.substr(s + 1);
+        IShellItemImageFactory* fab = nullptr;   // icona o anteprima (poche e piccole: subito)
+        if (SUCCEEDED(SHCreateItemFromParsingName(p.c_str(), nullptr, IID_PPV_ARGS(&fab)))) {
+            HBITMAP hb = nullptr;
+            const int lato = (int)std::lround(40 * dpi);
+            if (SUCCEEDED(fab->GetImage({lato, lato}, SIIGBF_BIGGERSIZEOK, &hb)) && hb) {
+                BITMAP bm{}; GetObject(hb, sizeof(bm), &bm);
+                if (bm.bmWidth > 0 && bm.bmHeight > 0 && bm.bmWidth <= 1024 && bm.bmHeight <= 1024) {
+                    o.px.resize((size_t)bm.bmWidth * bm.bmHeight); o.w = bm.bmWidth; o.h = bm.bmHeight;
+                    BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), bm.bmWidth, -bm.bmHeight, 1, 32, BI_RGB};
+                    HDC scr = GetDC(nullptr); GetDIBits(scr, hb, 0, bm.bmHeight, o.px.data(), &bi, DIB_RGB_COLORS); ReleaseDC(nullptr, scr);
+                    bool alfa = false; for (UINT x : o.px) if (x >> 24) { alfa = true; break; }
+                    for (UINT& x : o.px) {
+                        const UINT a = alfa ? (x >> 24) : 255;
+                        x = (a << 24) | ((((x >> 16) & 255) * a / 255) << 16) | ((((x >> 8) & 255) * a / 255) << 8) | ((x & 255) * a / 255);
+                    }
+                }
+                DeleteObject(hb);
+            }
+            fab->Release();
+        }
+        scaffale.push_back(std::move(o));
+    }
+
+    void svuotaScaffale() { for (auto& o : scaffale) if (o.b) o.b->Release(); scaffale.clear(); }
+
+    // dove sta l'oggetto i dello scaffale (coordinate della finestra), "Tutti" e "Svuota"
+    D2D1_RECT_F rettOggetto(int i) const {
+        float w, h, R; misura(SCAFFALE, w, h, R);
+        const float L = sinistra(SCAFFALE), d = dpi;
+        if (i == TUTTI) return {L + w - 150 * d, 6 * d, L + w - 72 * d, 30 * d};
+        if (i == SVUOTA) return {L + w - 68 * d, 6 * d, L + w - 18 * d, 30 * d};
+        const float cw = (w - 40 * d) / MAX_VISTI;
+        return {L + 20 * d + i * cw, 32 * d, L + 20 * d + (i + 1) * cw, 90 * d};
+    }
+    int oggettoIn(int x, int y) const {
+        if (scaffale.empty()) return -1;
+        for (int i : {TUTTI, SVUOTA}) { const D2D1_RECT_F r = rettOggetto(i); if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return i; }
+        for (int i = 0; i < (int)std::min<size_t>(scaffale.size(), MAX_VISTI); i++) {
+            const D2D1_RECT_F r = rettOggetto(i);
+            if (x >= r.left && x < r.right && y >= r.top && y < r.bottom) return i;
+        }
+        return -1;
+    }
+
+    // trascina fuori un oggetto (o tutti): un trascinamento vero di Windows con i file della shell
+    void trascinaFuori(int i) {
+        std::vector<size_t> quali;
+        if (i == TUTTI) for (size_t k = 0; k < scaffale.size(); k++) quali.push_back(k);
+        else if (i >= 0 && i < (int)scaffale.size()) quali.push_back(i);
+        else return;
+        std::vector<PIDLIST_ABSOLUTE> id;
+        for (size_t k : quali) { PIDLIST_ABSOLUTE p = nullptr; if (SUCCEEDED(SHParseDisplayName(scaffale[k].percorso.c_str(), nullptr, &p, 0, nullptr)) && p) id.push_back(p); }
+        IShellItemArray* arr = nullptr; IDataObject* dati = nullptr;
+        if (!id.empty() && SUCCEEDED(SHCreateShellItemArrayFromIDLists((UINT)id.size(), (PCIDLIST_ABSOLUTE_ARRAY)id.data(), &arr)) && arr &&
+            SUCCEEDED(arr->BindToHandler(nullptr, BHID_DataObject, IID_PPV_ARGS(&dati))) && dati) {
+            trascinoMio = true;
+            DWORD effetto = DROPEFFECT_NONE;
+            const HRESULT r = DoDragDrop(dati, &fonte, DROPEFFECT_COPY | DROPEFFECT_MOVE | DROPEFFECT_LINK, &effetto);
+            trascinoMio = false;
+            if (r == DRAGDROP_S_DROP && effetto != DROPEFFECT_NONE) {   // arrivato: esce dallo scaffale (nel dubbio resta)
+                for (auto it = quali.rbegin(); it != quali.rend(); ++it) { if (scaffale[*it].b) scaffale[*it].b->Release(); scaffale.erase(scaffale.begin() + *it); }
+            }
+            dati->Release();
+        }
+        if (arr) arr->Release();
+        for (auto p : id) CoTaskMemFree(p);
+        bersagli(); ridisegna();
+    }
+
+    struct Fonte : IDropSource {
+        HRESULT STDMETHODCALLTYPE QueryInterface(REFIID r, void** p) override { if (r == IID_IUnknown || r == IID_IDropSource) { *p = this; return S_OK; } *p = nullptr; return E_NOINTERFACE; }
+        ULONG STDMETHODCALLTYPE AddRef() override { return 1; }
+        ULONG STDMETHODCALLTYPE Release() override { return 1; }
+        HRESULT STDMETHODCALLTYPE QueryContinueDrag(BOOL esc, DWORD k) override { return esc ? DRAGDROP_S_CANCEL : !(k & MK_LBUTTON) ? DRAGDROP_S_DROP : S_OK; }
+        HRESULT STDMETHODCALLTYPE GiveFeedback(DWORD) override { return DRAGDROP_S_USEDEFAULTCURSORS; }
+    } fonte;
+
+    // segno nel notch a riposo: un vassoio con il numero dei file
+    void segnoScaffale(float cx, float cy, float a) {
+        const float d = dpi;
+        colore(0.40f, 0.68f, 1.0f, a);
+        rt->DrawLine({cx - 8 * d, cy - 1 * d}, {cx - 8 * d, cy + 4 * d}, pen, 1.4f * d);
+        rt->DrawLine({cx - 8 * d, cy + 4 * d}, {cx + 1 * d, cy + 4 * d}, pen, 1.4f * d);
+        rt->DrawLine({cx + 1 * d, cy + 4 * d}, {cx + 1 * d, cy - 1 * d}, pen, 1.4f * d);
+        rt->DrawLine({cx - 3.5f * d, cy - 6 * d}, {cx - 3.5f * d, cy + 1 * d}, pen, 1.4f * d);
+        rt->DrawLine({cx - 6 * d, cy - 1.5f * d}, {cx - 3.5f * d, cy + 1 * d}, pen, 1.4f * d);
+        rt->DrawLine({cx - 1 * d, cy - 1.5f * d}, {cx - 3.5f * d, cy + 1 * d}, pen, 1.4f * d);
+        wchar_t b[8]; swprintf(b, 8, L"%d", (int)scaffale.size());
+        colore(1, 1, 1, 0.85f * a);
+        rt->DrawText(b, (UINT32)wcslen(b), fPiccolo, {cx + 4 * d, cy - 8 * d, cx + 22 * d, cy + 8 * d}, pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+    }
+
+    void scaffaleScena(float L, float w, float h, float a) {
+        const float d = dpi;
+        if (scaffale.empty() || trascinoSopra) {   // zona dove lasciare i file
+            const D2D1_RECT_F z = {L + 20 * d, (scaffale.empty() ? 14 : 32) * d, L + w - 20 * d, h - 10 * d};
+            ID2D1StrokeStyle* tr = nullptr;
+            const float trattini[] = {4, 3};
+            fabbriche::d2d()->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                                                D2D1_LINE_JOIN_ROUND, 10, D2D1_DASH_STYLE_CUSTOM, 0), trattini, 2, &tr);
+            colore(0.40f, 0.68f, 1.0f, (trascinoSopra ? 0.9f : 0.5f) * a);
+            rt->DrawRoundedRectangle({z, 14 * d, 14 * d}, pen, 1.5f * d, tr);
+            if (tr) tr->Release();
+            if (scaffale.empty()) {
+                const DWRITE_TEXT_ALIGNMENT al = fTitolo->GetTextAlignment();
+                fTitolo->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                scrivi(testi::t(L"Lascia qui i file", L"Drop files here"), fTitolo, z, a);
+                fTitolo->SetTextAlignment(al);
+                return;
+            }
+        }
+        scrivi(testi::t(L"Scaffale", L"Shelf"), fPiccolo, {L + 22 * d, 6 * d, L + 150 * d, 30 * d}, 0.6f * a);
+        scrivi(testi::t(L"Tutti", L"All"), fPiccolo, rettOggetto(TUTTI), 0.85f * a);
+        scrivi(testi::t(L"Svuota", L"Clear"), fPiccolo, rettOggetto(SVUOTA), 0.6f * a);
+        const int vis = (int)std::min<size_t>(scaffale.size(), MAX_VISTI);
+        for (int i = 0; i < vis; i++) {
+            Oggetto& o = scaffale[i];
+            if (!o.b) bitmap(rt, o.b, o.px, o.w, o.h);
+            const D2D1_RECT_F r = rettOggetto(i);
+            const float cx = (r.left + r.right) / 2, l = 17 * d;
+            if (o.b) {
+                const D2D1_SIZE_F s = o.b->GetSize();
+                const float f = std::min(2 * l / s.width, 2 * l / s.height);
+                rt->DrawBitmap(o.b, {cx - s.width * f / 2, r.top + 2 * d + l - s.height * f / 2, cx + s.width * f / 2, r.top + 2 * d + l + s.height * f / 2}, a);
+            }
+            std::wstring nome = o.nome;
+            if (i == MAX_VISTI - 1 && scaffale.size() > (size_t)MAX_VISTI) { wchar_t b[24]; swprintf(b, 24, L"+%d", (int)(scaffale.size() - MAX_VISTI + 1)); nome = b; }
+            DWRITE_TEXT_ALIGNMENT al = fPiccolo->GetTextAlignment();
+            fPiccolo->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            scrivi(nome, fPiccolo, {r.left + 2 * d, r.top + 40 * d, r.right - 2 * d, r.bottom}, 0.85f * a);
+            fPiccolo->SetTextAlignment(al);
         }
     }
 
@@ -873,7 +1078,13 @@ private:
         switch (m) {
             case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
             case WM_TIMER: if (n && w == 2) n->controlla(); return 0;
-            case WM_LBUTTONUP: if (n) n->clicca((short)LOWORD(l), (short)HIWORD(l)); return 0;
+            case WM_LBUTTONDOWN: if (n) { n->premutoX = (short)LOWORD(l); n->premutoY = (short)HIWORD(l); n->premutoS = n->scena == SCAFFALE ? n->oggettoIn(n->premutoX, n->premutoY) : -1; } return 0;
+            case WM_MOUSEMOVE:   // trascinamento fuori dallo scaffale
+                if (n && n->premutoS != -1 && (w & MK_LBUTTON) && (std::abs((short)LOWORD(l) - n->premutoX) > 5 || std::abs((short)HIWORD(l) - n->premutoY) > 5)) {
+                    const int s = n->premutoS; n->premutoS = -1; n->trascinaFuori(s);
+                }
+                return 0;
+            case WM_LBUTTONUP: if (n) { const bool premuto = n->premutoS != -1 || n->scena != SCAFFALE; n->premutoS = -1; if (premuto) n->clicca((short)LOWORD(l), (short)HIWORD(l)); } return 0;
             case WM_CLOSE: return 0;
         }
         return DefWindowProcW(h, m, w, l);
