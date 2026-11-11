@@ -237,7 +237,7 @@ inline auto Motore::chiudiPannello() -> void {
     usa(s);
 }
 
-inline auto Motore::altezzaControllo() const -> float { return std::round((370 + (sis.luminosita >= 0 ? 52 : 0)) * dpi); }
+inline auto Motore::altezzaControllo() const -> float { return std::round((444 + (sis.luminosita >= 0 ? 52 : 0)) * dpi); }
 
 inline auto Motore::nascondiPannello() -> void {
     if (pannello) ShowWindow(pannello, SW_HIDE);
@@ -665,6 +665,12 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
     const bool tScuro = sistema::Sistema::temaScuro();
     piastrella({m, y, m + mezzo, y + 64 * dpi}, A_TEMA, tScuro, testi::t(L"Tema scuro", L"Dark theme"), tScuro ? testi::t(L"Attivo", L"On") : testi::t(L"Spento", L"Off"), scuro, ink);
     piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_FLUIDWIN, false, L"FluidWin", testi::t(L"Impostazioni", L"Settings"), scuro, ink);
+    // tieni sveglio e non disturbare (comodita.h): il clic apre il menu delle durate
+    y += 64 * dpi + 10 * dpi;
+    piastrella({m, y, m + mezzo, y + 64 * dpi}, A_SVEGLIO, comodita::sveglio(), testi::t(L"Non dormire", L"Keep awake"),
+               comodita::descrivi(comodita::stato().svegliaFino), scuro, ink);
+    piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_SILENZIO, comodita::silenzio(), testi::t(L"Silenzioso", L"Silent"),
+               comodita::descrivi(comodita::stato().silenzioFino), scuro, ink);
 
     // volume: capsula riempita di bianco come su iOS; si trascina, la rotella regola, l'altoparlante disattiva
     y += 64 * dpi + 14 * dpi;
@@ -868,6 +874,15 @@ inline auto Motore::simboloTema(float cx, float cy) -> void {
     }
     for (IUnknown* o : std::initializer_list<IUnknown*>{a, b, g}) if (o) o->Release();
     dc->SetTransform(baseVista);
+}
+
+// tazzina di caffe' (tieni sveglio): tazza, manico e un filo di vapore
+inline auto Motore::simboloCaffe(float cx, float cy) -> void {
+    const float d = dpi;
+    dc->FillRoundedRectangle({{cx - 6.5f * d, cy - 1.5f * d, cx + 4.5f * d, cy + 7.5f * d}, 2.5f * d, 2.5f * d}, pennello);
+    dc->DrawEllipse({{cx + 5.5f * d, cy + 2.5f * d}, 2.6f * d, 2.6f * d}, pennello, 1.5f * d);
+    linea(-3.5f, -4.5f, -3.5f, -8.5f, cx, cy, 1.4f);
+    linea(0.5f, -4.0f, 0.5f, -9.0f, cx, cy, 1.4f);
 }
 
 inline auto Motore::simboloLuna(float cx, float cy) -> void {
@@ -1205,6 +1220,31 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             aggiornaTemaVetri(); dirty = true; pDirty = true;
             break;
         case A_FLUIDWIN:     chiudiPannello(); if (impostazioni) impostazioni(); break;
+        case A_SVEGLIO:
+        case A_SILENZIO: {   // durate in un menu
+            const bool sv = e.azione == A_SVEGLIO;
+            const bool acceso = sv ? comodita::sveglio() : comodita::silenzio();
+            std::vector<menu::Voce> voci = {menu::titolo(sv ? testi::t(L"Tieni sveglio il PC", L"Keep the PC awake") : testi::t(L"Non disturbare", L"Do not disturb")),
+                                            menu::voce(testi::t(L"Per 1 ora", L"For 1 hour"), 1)};
+            if (sv) {
+                voci.push_back(menu::voce(testi::t(L"Per 2 ore", L"For 2 hours"), 2));
+                voci.push_back(menu::voce(testi::t(L"Finché non lo spengo", L"Until I turn it off"), 3));
+            } else {
+                voci.push_back(menu::voce(testi::t(L"Per 3 ore", L"For 3 hours"), 2));
+                voci.push_back(menu::voce(testi::t(L"Fino a domani mattina", L"Until tomorrow morning"), 3));
+            }
+            if (acceso) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Spegni", L"Turn off"), 4)); }
+            POINT pt = {(LONG)e.r.left, (LONG)e.r.bottom}; ClientToScreen(pannello, &pt);
+            const UINT s = menuScheda(voci, pt, pannello);
+            if (s >= 1 && s <= 4) {
+                const ULONGLONG ora = 3600000ULL;
+                const ULONGLONG ms = s == 4 ? 0 : s == 1 ? ora : s == 2 ? (sv ? 2 : 3) * ora : (sv ? comodita::SEMPRE : comodita::finoADomani(8));
+                if (sv) comodita::tieniSveglio(ms); else comodita::nonDisturbare(ms);
+                if (registro) { char b[96]; snprintf(b, 96, "%s: %llu ms", sv ? "tieni sveglio" : "non disturbare", (unsigned long long)ms); scrivi(b); }
+                pDirty = true;
+            }
+            break;
+        }
         // le viste interne si aprono dentro la stessa finestra, dal pulsante toccato
         case A_WIDGET:       cambiaVista(P_WIDGET, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;
         case A_SFONDO:       cambiaVista(P_SFONDO, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;

@@ -574,6 +574,35 @@ static bool giocoASchermoIntero() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Sempre in primo piano (Ctrl+Win+T): la finestra attiva resta sopra le altre anche lavorando con altre finestre,
+// finche' non si ripreme. E' lo stile "sempre in primo piano" di Windows (WS_EX_TOPMOST), messo da fuori con
+// SetWindowPos: niente iniezione. All'uscita di FluidWin le finestre tornano normali.
+static std::unordered_set<HWND> gInPrimoPiano;
+static const int TASTO_PRIMO_PIANO = 1;
+
+static void primoPiano() {
+    HWND h = GetForegroundWindow();
+    DWORD pid = 0; GetWindowThreadProcessId(h, &pid);
+    if (!h || pid == GetCurrentProcessId()) return;
+    wchar_t c[64] = L""; GetClassNameW(h, c, 64);
+    if (!wcscmp(c, L"Progman") || !wcscmp(c, L"WorkerW") || !wcscmp(c, L"Shell_TrayWnd")) return;
+    const bool era = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
+    SetWindowPos(h, era ? HWND_NOTOPMOST : HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (era) gInPrimoPiano.erase(h); else gInPrimoPiano.insert(h);
+    wchar_t t[128] = L""; GetWindowTextW(h, t, 128);
+    std::wstring testo = era ? testi::t(L"Non più in primo piano", L"No longer on top") : testi::t(L"Sempre in primo piano", L"Always on top");
+    if (t[0]) testo += std::wstring(L" · ") + t;
+    logf("sempre in primo piano: %s (%ls)", era ? "tolto" : "messo", c);
+    if (gDockOk) gDock.ilNotch().avviso(testo, !era);
+}
+
+static void togliPrimoPiano() {
+    for (HWND h : gInPrimoPiano)
+        if (IsWindow(h) && risponde(h, 300)) SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    gInPrimoPiano.clear();
+}
+
+// ---------------------------------------------------------------------------------------------
 // Overlay e miniature
 
 static void aggiornaOrigine() {
@@ -2312,6 +2341,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             return 0;
         case WM_APRI_LAUNCHER: if (gDockOk) gDock.apriLauncher(); return 0;
+        case WM_HOTKEY: if (w == TASTO_PRIMO_PIANO) primoPiano(); return 0;
         case WM_VOLUME:
             if (gDockOk) {
                 float liv = 0; bool muto = false;
@@ -2385,6 +2415,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             // GPU persa anche senza niente da disegnare (si scopre al primo Present, ma si controlla anche qui)
             if ((gGenioOk && gGenio.gpuPersa()) || (gDockOk && gDock.gpuPersa())) riavvia("la GPU e' stata persa");
+            comodita::controlla();   // tieni sveglio e non disturbare scaduti
             controlloSicurezza(); if (gDockOk) {
                 const bool si = schermoInteroAttivo(); gLauncherTasto = !si;
                 const int tipo = si ? (giocoASchermoIntero() ? 2 : 1) : 0;
@@ -2517,6 +2548,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     RegisterClassW(&wm);
     gMessaggi = CreateWindowExW(0, wm.lpszClassName, L"FluidWin", 0, 0, 0, 0, 0, nullptr, nullptr, inst, nullptr);
     SetTimer(gMessaggi, 1, 500, nullptr);
+    // Ctrl+Win+T: sempre in primo piano (se un altro programma la usa gia', resta a lui)
+    if (!RegisterHotKey(gMessaggi, TASTO_PRIMO_PIANO, MOD_CONTROL | MOD_WIN | MOD_NOREPEAT, 'T'))
+        logf("Ctrl+Win+T usata da un altro programma (errore %lu): niente sempre in primo piano", GetLastError());
     gBattito = GetTickCount64(); SetTimer(gMessaggi, 13, 250, nullptr);   // battito per l'hook della tastiera
     gDpiAvvio = dpiPrincipale();
     leggiMovimento();
@@ -2548,7 +2582,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gRicerca.conOnda = []() { return gMovimento && impostazioni::valori().onda; };
     gRicerca.registro = [](const char* s) { logf("%s", s); };
     gBanner.isola = []() { return gDockOk ? gDock.rettIsolaSchermo() : vetro::areaPrincipale(true); };
-    gBanner.silenzio = []() { return schermoInteroAttivo(); };
+    gBanner.silenzio = []() { return schermoInteroAttivo() || comodita::silenzio(); };   // anche con Non disturbare
     // le notifiche escono dal notch (se si vede; altrimenti il banner di vetro)
     gBanner.nelNotch = [](const notifiche::Notifica& n, const std::vector<UINT>& px, int w, int h) {
         return gDockOk && gDock.ilNotch().notifica(n.app, n.titolo, n.testo, px, w, h);
@@ -2625,6 +2659,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     impostaPausa(true);
     if (gDockOk) gDock.chiudi();
     banner::ripristinaBannerWindows();   // senza FluidWin tornano i banner di Windows (alla prossima apertura si rispengono)
+    togliPrimoPiano();
     if (gOsdOk) gOsd.chiudi();
     // finestre appena create che un thread sta rendendo trasparenti: si aspetta che finisca (poco: con un'app
     // bloccata il thread non cambia niente finche' non risponde), poi le rimette a posto ripristinaTutte

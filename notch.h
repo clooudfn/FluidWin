@@ -31,6 +31,7 @@
 #include "vetro.h"
 #include "musica.h"
 #include "testi.h"
+#include "comodita.h"
 
 namespace notch {
 
@@ -120,8 +121,18 @@ public:
         return true;
     }
 
+    // avviso breve (1,6 s): una puntina e un testo, per esempio "Sempre in primo piano"; false se il notch non si vede
+    bool avviso(const std::wstring& testo, bool acceso) {
+        if (!visibile) return false;
+        testoAvviso = testo; avvisoAcceso = acceso;
+        larghezzaAvviso = fOra ? larghezza(testo, fPiccolo ? fPiccolo : fOra) : 160 * dpi;
+        fineAvviso = adesso() + 1.6;
+        bersagli(); anima();
+        return true;
+    }
+
 private:
-    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA };
+    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO };
 
     HWND fin = nullptr;
     bool acceso = false, visibile = false;
@@ -158,6 +169,8 @@ private:
 
     // contenuti
     float livello = 0, livelloVis = 0; bool muto = false; double fineVolume = 0;
+    std::wstring testoAvviso; bool avvisoAcceso = false; double fineAvviso = 0; float larghezzaAvviso = 0;
+    bool segnoSilenzio = false, segnoSveglio = false;   // lunetta e tazzina accanto all'ora (comodita.h)
     bool notificaAttiva = false; double fineNotifica = 0;
     std::wstring nApp, nTitolo, nTesto; std::vector<UINT> nPx; int nW = 0, nH = 0; bool iconaNuova = false;
     musica::Lettore lettore; musica::Brano brano; UINT versioneBrano = 0xFFFFFFFF; bool copertinaNuova = false;
@@ -184,7 +197,7 @@ private:
         } else {
             KillTimer(fin, 2); vetro::fermaBattito(fin, 1); animando = false;
             sopra = false; attesa = 0; cliccabile(false);
-            finisciNotifica(); fineVolume = 0;
+            finisciNotifica(); fineVolume = 0; fineAvviso = 0;
             ShowWindow(fin, SW_HIDE);
         }
     }
@@ -207,6 +220,7 @@ private:
     int scenaVoluta() const {
         const double t = adesso();
         if (t < fineVolume) return VOLUME;
+        if (t < fineAvviso) return AVVISO;
         if (notificaAttiva) return NOTIFICA;
         if (sopra && brano.c) return APERTO;
         if (brano.c && brano.suona) return MUSICA;
@@ -220,6 +234,7 @@ private:
             case APERTO:   w = 372 * d; h = 96 * d; R = 26 * d; break;
             case VOLUME:   w = 292 * d; h = 32 * d; R = 14 * d; break;
             case NOTIFICA: w = 372 * d; h = 78 * d; R = 26 * d; break;
+            case AVVISO:   w = std::clamp(larghezzaAvviso + 76 * d, 220 * d, 372 * d); h = 32 * d; R = 14 * d; break;
             default:       w = largoOra; h = 22 * d; R = 9 * d;
                            if (sopra) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
         }
@@ -277,6 +292,10 @@ private:
             if (b.versione != brano.versione || b.copertina.size() != brano.copertina.size()) copertinaNuova = true;
             brano = std::move(b);
             ridisegnare = true;
+        }
+        // lunetta (non disturbare) e tazzina (tieni sveglio)
+        if (comodita::silenzio() != segnoSilenzio || comodita::sveglio() != segnoSveglio) {
+            segnoSilenzio = comodita::silenzio(); segnoSveglio = comodita::sveglio(); ridisegnare = true;
         }
         // mouse
         POINT p; GetCursorPos(&p);
@@ -552,7 +571,17 @@ private:
         float w, h, R; misura(s, w, h, R);
         const float L = sinistra(s), d = dpi;
         switch (s) {
-            case ORA: ora(L, w, h, a); break;
+            case ORA:
+                ora(L, w, h, a);
+                if (segnoSveglio) tazzina(L + 15 * d, h / 2, 0.75f * a);
+                if (segnoSilenzio) lunetta(L + w - 15 * d, h / 2, 0.75f * a);
+                break;
+            case AVVISO: {
+                const float cx = L + 24 * d, cy = h / 2;
+                puntina(cx, cy, a, avvisoAcceso);
+                scrivi(testoAvviso, fPiccolo, {L + 44 * d, 0, L + w - 18 * d, h}, a);
+                break;
+            }
             case MUSICA: {
                 ora(L, w, h, a);
                 const float q = 14 * d, y = (h - q) / 2;   // copertina piccola a sinistra, barrette a destra
@@ -589,6 +618,43 @@ private:
         scrivi(testoGiorno, fGiorno, {xg, yGiorno, xg + lg + 2, yGiorno + altoGiorno}, 0.66f * a);
         colore(1, 1, 1, 0.38f * a);
         rt->DrawLine({xg, baseOra + 0.5f}, {xg + lg, baseOra + 0.5f}, pen, 1.0f);
+    }
+
+    void lunetta(float cx, float cy, float a) {
+        ID2D1Factory* f = fabbriche::d2d();
+        const float r = 4.6f * dpi;
+        ID2D1EllipseGeometry *e1 = nullptr, *e2 = nullptr; ID2D1PathGeometry* g = nullptr;
+        f->CreateEllipseGeometry({{cx, cy}, r, r}, &e1);
+        f->CreateEllipseGeometry({{cx + 2.8f * dpi, cy - 2.2f * dpi}, r * 0.85f, r * 0.85f}, &e2);
+        if (e1 && e2 && SUCCEEDED(f->CreatePathGeometry(&g))) {
+            ID2D1GeometrySink* s = nullptr; g->Open(&s);
+            e1->CombineWithGeometry(e2, D2D1_COMBINE_MODE_EXCLUDE, nullptr, s);
+            s->Close(); s->Release();
+            colore(0.62f, 0.55f, 1.0f, a);   // viola, come la luna di Non disturbare su iPhone
+            rt->FillGeometry(g, pen);
+        }
+        for (IUnknown* o : {(IUnknown*)e1, (IUnknown*)e2, (IUnknown*)g}) if (o) o->Release();
+    }
+
+    void tazzina(float cx, float cy, float a) {
+        const float d = dpi;
+        colore(1.0f, 0.72f, 0.35f, a);   // arancio caldo
+        rt->FillRoundedRectangle({{cx - 4 * d, cy - 1.5f * d, cx + 2.5f * d, cy + 4.5f * d}, 1.6f * d, 1.6f * d}, pen);
+        rt->DrawEllipse({{cx + 3.2f * d, cy + 1.3f * d}, 1.7f * d, 1.7f * d}, pen, 1.1f * d);
+        rt->DrawLine({cx - 2 * d, cy - 3 * d}, {cx - 2 * d, cy - 5.5f * d}, pen, 1.0f * d);
+        rt->DrawLine({cx + 0.5f * d, cy - 3 * d}, {cx + 0.5f * d, cy - 5.5f * d}, pen, 1.0f * d);
+    }
+
+    // puntina (sempre in primo piano): accesa piena, spenta barrata
+    void puntina(float cx, float cy, float a, bool acceso) {
+        const float d = dpi;
+        colore(1, 1, 1, a);
+        rt->FillEllipse({{cx, cy - 4 * d}, 4.2f * d, 4.2f * d}, pen);
+        rt->DrawLine({cx, cy - 1 * d}, {cx, cy + 7 * d}, pen, 1.6f * d);
+        if (!acceso) {
+            colore(0, 0, 0, a); rt->DrawLine({cx - 7 * d, cy - 7 * d}, {cx + 7 * d, cy + 7 * d}, pen, 3.2f * d);
+            colore(1, 1, 1, a); rt->DrawLine({cx - 6 * d, cy - 6 * d}, {cx + 6 * d, cy + 6 * d}, pen, 1.4f * d);
+        }
     }
 
     // nota musicale (al posto della copertina che manca)

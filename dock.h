@@ -53,6 +53,7 @@
 #include "notifiche.h"
 #include "menu.h"
 #include "notch.h"
+#include "comodita.h"
 #include "testi.h"
 
 #ifndef DWMWA_SYSTEMBACKDROP_TYPE
@@ -1391,7 +1392,7 @@ private:
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
-                  A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO };
+                  A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO };
     sistema::Sistema sis;                // Wi-Fi, Bluetooth e luminosita' (letti e cambiati in un thread a parte)
     double temaK = -1;                   // simbolo del tema: 0 sole (chiaro) .. 1 luna (scuro), animato
     bool trascinaLum = false;
@@ -1541,6 +1542,8 @@ private:
         if (a == A_RETE) simboloRete(cx, cy, simbolo);
         else if (a == A_BLUETOOTH) simboloBluetooth(cx, cy);
         else if (a == A_TEMA) simboloTema(cx, cy);
+        else if (a == A_SVEGLIO) simboloCaffe(cx, cy);
+        else if (a == A_SILENZIO) simboloLuna(cx, cy);
         else simboloGoccia(cx, cy);
         pennello->SetColor(ink);
         scrivi(titolo, fmtVoce, {cx + 26 * dpi, cy - 18 * dpi, r.right - 8 * dpi, cy});
@@ -1560,6 +1563,8 @@ private:
     void simboloTema(float cx, float cy);
 
     void simboloLuna(float cx, float cy);
+
+    void simboloCaffe(float cx, float cy);
 
     void simboloGoccia(float cx, float cy);
 

@@ -384,8 +384,18 @@ inline auto Motore::menuApp(int i, POINT pt) -> void {
     if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, ID_DOCK - 1, CMF_NORMAL))) {
         cm->QueryInterface(IID_PPV_ARGS(&menuShell2)); cm->QueryInterface(IID_PPV_ARGS(&menuShell3));
         // le voci di Windows, disegnate da noi; in cima il nome dell'app e "Aggiungi al dock"
-        std::vector<menu::Voce> voci = {menu::titolo(a.nome), menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), ID_DOCK), menu::separatore()};
-        for (auto& v : menu::daHmenu(m)) voci.push_back(v);
+        std::vector<menu::Voce> voci = {menu::titolo(a.nome), menu::voce(testi::t(L"Aggiungi al dock", L"Add to dock"), ID_DOCK)};
+        // "Disinstalla" (la voce di Windows, per le app dello Store e per le altre) in cima, subito visibile
+        UINT idDisinstalla = 0;
+        for (int i = 0; i < GetMenuItemCount(m) && !idDisinstalla; i++) {
+            const UINT id = GetMenuItemID(m, i);
+            if (id == (UINT)-1 || id == 0) continue;
+            wchar_t v[64] = L"";
+            if (SUCCEEDED(cm->GetCommandString(id - 1, GCS_VERBW, nullptr, (LPSTR)v, 64)) && !_wcsicmp(v, L"Uninstall")) idDisinstalla = id;
+        }
+        if (idDisinstalla) voci.push_back(menu::voce(testi::t(L"Disinstalla…", L"Uninstall…"), idDisinstalla));
+        voci.push_back(menu::separatore());
+        for (auto& v : menu::daHmenu(m)) if (v.id != idDisinstalla || v.separatore) voci.push_back(v);
         // i sottomenu ("Invia a", "Apri con"...) la shell li riempie solo quando stanno per aprirsi
         auto prepara = [this](HMENU s) {
             if (menuShell3) { LRESULT r = 0; menuShell3->HandleMenuMsg2(WM_INITMENUPOPUP, (WPARAM)s, 0, &r); }
