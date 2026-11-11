@@ -399,6 +399,17 @@ static void mostraBarreWindows(bool si) {
     }
 }
 
+// Controllo ogni mezzo secondo: una barra di Windows visibile si rinasconde. L'evento di comparsa non basta: Explorer
+// ricrea la barra del secondo schermo gia' visibile (cambi di schermo, riavvio di Explorer) e quell'evento non arriva;
+// la barra restava li', a scomparsa, e risaliva insieme al dock col mouse in fondo al secondo schermo
+static void rinascondiBarreWindows() {
+    for (const wchar_t* cls : {L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd"}) {
+        HWND t = nullptr;
+        while ((t = FindWindowExW(nullptr, t, cls, nullptr)))
+            if (IsWindowVisible(t)) { ShowWindowAsync(t, SW_HIDE); logf("barra di Windows visibile senza evento (%ls %p): rinascosta", cls, t); }
+    }
+}
+
 // La finestra risponde ai messaggi entro 'ms'? SetWindowLongPtr su una finestra di un altro programma aspetta che lei
 // risponda, senza limite: con una finestra che non li legge mai (una nascosta di nvcontainer, NVCapContext) si restava
 // bloccati per sempre, guardiano e avvio di FluidWin compresi
@@ -2628,6 +2639,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 }
             }
             controlloSicurezza(); if (gDockOk) {
+                rinascondiBarreWindows();
                 const bool si = schermoInteroAttivo(); gLauncherTasto = !si;
                 const int tipo = si ? (giocoASchermoIntero() ? 2 : 1) : 0;
                 static int tipoPrima = 0;
