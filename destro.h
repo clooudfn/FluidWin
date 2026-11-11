@@ -1,12 +1,13 @@
-// Menu del tasto destro di FluidWin sul desktop e nell'elenco dei file di Esplora file, al posto di quello di Windows
-// (niente piu' "Mostra altre opzioni"): un solo menu di vetro con tutte le voci, anche quelle delle altre app
-// (7-Zip, Git, antivirus...), divise per categoria: Apri, Modifica, Nuovo, Visualizza, Condividi, Comprimi, Altro e
-// in fondo Proprieta'.
+// Menu del tasto destro di FluidWin sul desktop e nell'elenco dei file di Esplora file, al posto di quello di Windows:
+// le stesse voci del menu compatto di Windows 11 (in cima la riga di icone Taglia, Copia, Rinomina, Condividi, Elimina;
+// sotto Apri, Apri con, Copia come percorso... e Proprieta'), nello stile di FluidWin; in fondo una freccia che, al
+// solo passaggio del mouse, gira e allunga il menu con tutte le altre voci (quelle di "Mostra altre opzioni", anche
+// delle altre app: 7-Zip, WinRAR, Git...). Tutto in un posto solo.
 // Niente iniezione in Esplora file: un gancio del mouse (fluidwin.cpp) trattiene il tasto destro solo sopra quelle
-// viste; qui si trova l'elemento sotto il mouse con UI Automation, lo si seleziona come farebbe Windows (IFolderView2)
-// e si prende il menu vero della shell (IShellView::GetItemObject -> IContextMenu), lo stesso del menu classico.
-// Se qualcosa non torna (punto non riconosciuto, nomi doppi, finestra non trovata) mostra() da' false e FluidWin
-// ripete il clic destro a Windows, che mostra il suo menu. Maiusc+clic destro: sempre quello di Windows.
+// viste; qui si trova l'elemento sotto il mouse (desktop: dalle posizioni delle icone, IFolderView::GetItemPosition;
+// Esplora file: UI Automation), lo si seleziona come farebbe Windows (IFolderView2) e si prende il menu vero della
+// shell (IShellView::GetItemObject -> IContextMenu).
+// Se qualcosa non torna mostra() da' false e FluidWin rimanda il clic a Windows. Maiusc+clic destro: quello di Windows.
 #pragma once
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -111,51 +112,52 @@ inline int sottoIlPunto(POINT pt, std::wstring& nome) {
     return r;
 }
 
-enum Categoria { APRI, MODIFICA, NUOVO, VISUALIZZA, CONDIVIDI, COMPRIMI, ALTRO, PROPRIETA, QUANTE };
-
-inline Categoria categoria(const std::wstring& verbo, const std::wstring& testo) {
-    const std::wstring v = minuscolo(verbo);
-    // testo senza "&" (le lettere sottolineate) e senza "..." in fondo
+// testo senza "&" (lettere sottolineate) e senza "..." in fondo, minuscolo
+inline std::wstring pulito(const std::wstring& testo) {
     std::wstring t;
     for (wchar_t ch : minuscolo(testo)) if (ch != L'&') t.push_back(ch);
     while (!t.empty() && (t.back() == L'.' || t.back() == L'…' || t.back() == L' ')) t.pop_back();
-    auto contiene = [&](std::initializer_list<const wchar_t*> l) { for (auto x : l) if (t.find(x) != std::wstring::npos) return true; return false; };
-    auto inizia = [&](std::initializer_list<const wchar_t*> l) { for (auto x : l) if (t.rfind(x, 0) == 0) return true; return false; };
-    auto uguale = [&](std::initializer_list<const wchar_t*> l) { for (auto x : l) if (t == x) return true; return false; };
-    // prima il verbo (quando Windows lo da')
-    if (v == L"properties") return PROPRIETA;
-    if (v.find(L"zip") != std::wstring::npos || v.find(L"compress") != std::wstring::npos || v.find(L"extract") != std::wstring::npos) return COMPRIMI;
-    for (auto x : {L"open", L"opennew", L"openas", L"openwith", L"runas", L"runasuser", L"edit", L"print", L"play", L"preview", L"explore",
-                   L"opencontaining", L"openinnewtab", L"openinnewwindow", L"opennewwindow", L"opennewtab"}) if (v == x) return APRI;
-    for (auto x : {L"cut", L"copy", L"paste", L"pastelink", L"delete", L"rename", L"link", L"copyaspath", L"undo", L"redo"}) if (v == x) return MODIFICA;
-    for (auto x : {L"view", L"arrange", L"groupby", L"refresh"}) if (v == x) return VISUALIZZA;
-    if (v.find(L"modernshare") != std::wstring::npos || v.find(L"share") != std::wstring::npos || v.find(L"sendto") != std::wstring::npos) return CONDIVIDI;
-    // poi il testo (italiano e inglese)
-    if (uguale({L"proprietà", L"properties"})) return PROPRIETA;
-    if (contiene({L"zip", L"7-zip", L"winrar", L"compr", L"estrai", L"extract", L"archiv"})) return COMPRIMI;
-    if (uguale({L"apri", L"open", L"modifica", L"edit", L"stampa", L"print", L"riproduci", L"play", L"esegui come amministratore", L"run as administrator"}) ||
-        inizia({L"apri con", L"open with", L"apri in", L"apri nel", L"open in", L"modifica con", L"modifica nel", L"modifica in",
-                L"edit with", L"edit in"})) return APRI;
-    if (uguale({L"taglia", L"copia", L"incolla", L"elimina", L"rinomina", L"crea collegamento", L"copia come percorso", L"incolla collegamento",
-                L"cut", L"copy", L"paste", L"delete", L"rename", L"create shortcut", L"copy as path", L"paste shortcut"}) ||
-        inizia({L"annulla", L"ripeti", L"undo", L"redo"})) return MODIFICA;
-    if (inizia({L"nuovo", L"new"})) return NUOVO;
-    if (uguale({L"visualizza", L"ordina per", L"raggruppa per", L"aggiorna", L"view", L"sort by", L"group by", L"refresh"})) return VISUALIZZA;
-    if (contiene({L"invia a", L"send to", L"condividi", L"share"})) return CONDIVIDI;
-    return ALTRO;
+    return t;
 }
 
-inline const wchar_t* nomeCategoria(int c) {
-    switch (c) {
-        case APRI: return testi::t(L"Apri", L"Open");
-        case MODIFICA: return testi::t(L"Modifica", L"Edit");
-        case NUOVO: return testi::t(L"Nuovo", L"New");
-        case VISUALIZZA: return testi::t(L"Visualizza", L"View");
-        case CONDIVIDI: return testi::t(L"Condividi e invia", L"Share and send");
-        case COMPRIMI: return testi::t(L"Comprimi ed estrai", L"Compress and extract");
-        case ALTRO: return testi::t(L"Altro", L"More");
+// pulsante della riga in cima (Taglia, Copia, Incolla, Rinomina, Condividi, Elimina), 0 se non lo e'
+inline int pulsante(const std::wstring& verbo, const std::wstring& testo) {
+    const std::wstring v = minuscolo(verbo), t = pulito(testo);
+    if (v == L"cut" || t == L"taglia" || t == L"cut") return menu::I_TAGLIA;
+    if (v == L"copy" || t == L"copia" || t == L"copy") return menu::I_COPIA;
+    if (v == L"paste" || t == L"incolla" || t == L"paste") return menu::I_INCOLLA;
+    if (v == L"rename" || t == L"rinomina" || t == L"rename") return menu::I_RINOMINA;
+    if (v.find(L"modernshare") != std::wstring::npos || t == L"condividi" || t == L"share") return menu::I_CONDIVIDI;
+    if (v == L"delete" || t == L"elimina" || t == L"delete") return menu::I_ELIMINA;
+    return 0;
+}
+
+// voce del menu compatto di Windows 11? (file: Apri, Apri con, Copia come percorso, Aggiungi a Preferiti, Modifica con,
+// Apri nel Terminale...; sfondo: Visualizza, Ordina per, Raggruppa per, Aggiorna, Annulla, Nuovo, Impostazioni
+// schermo, Personalizza...). Il resto va sotto la freccia
+inline bool principale(const std::wstring& verbo, const std::wstring& testo, bool file) {
+    const std::wstring v = minuscolo(verbo), t = pulito(testo);
+    auto inizia = [&](std::initializer_list<const wchar_t*> l) { for (auto x : l) if (t.rfind(x, 0) == 0) return true; return false; };
+    auto uguale = [&](std::initializer_list<const wchar_t*> l) { for (auto x : l) if (t == x) return true; return false; };
+    if (v == L"properties" || uguale({L"proprietà", L"properties"})) return true;
+    if (inizia({L"apri nel terminale", L"open in terminal"})) return true;
+    if (file) {
+        for (auto x : {L"open", L"opennew", L"openas", L"runas", L"openinnewtab", L"openinnewwindow", L"opennewwindow", L"opennewtab",
+                       L"setdesktopwallpaper", L"copyaspath", L"pintohome", L"pintostartscreen", L"unpinfromstartscreen", L"taskbarpin", L"taskbarunpin",
+                       L"opencontaining", L"play", L"preview"}) if (v == x) return true;
+        if (uguale({L"apri", L"open", L"esegui come amministratore", L"run as administrator", L"copia come percorso", L"copy as path",
+                    L"aggiungi a preferiti", L"add to favorites", L"rimuovi da preferiti", L"remove from favorites", L"riproduci", L"play"})) return true;
+        if (inizia({L"apri con", L"open with", L"apri in ", L"open in ", L"apri percorso", L"open file location", L"imposta come sfondo", L"set as desktop background",
+                    L"comprimi in", L"compress to", L"estrai tutto", L"extract all", L"aggiungi ad accesso rapido", L"pin to quick access", L"aggiungi a start", L"pin to start",
+                    L"rimuovi da start", L"unpin from start", L"aggiungi alla barra", L"pin to taskbar", L"rimuovi dalla barra", L"unpin from taskbar",
+                    L"modifica con", L"modifica nel", L"modifica in", L"edit with", L"edit in", L"chiedi a copilot", L"ask copilot", L"ruota", L"rotate"})) return true;
+        return false;
     }
-    return L"";
+    for (auto x : {L"view", L"arrange", L"groupby", L"refresh", L"undo", L"redo", L"pastelink", L"display", L"personalize"}) if (v == x) return true;
+    if (uguale({L"visualizza", L"view", L"ordina per", L"sort by", L"raggruppa per", L"group by", L"aggiorna", L"refresh", L"nuovo", L"new",
+                L"impostazioni schermo", L"display settings", L"personalizza", L"personalize", L"incolla collegamento", L"paste shortcut"})) return true;
+    if (inizia({L"annulla", L"ripeti", L"undo", L"redo"})) return true;
+    return false;
 }
 
 }  // namespace dettagli
@@ -176,15 +178,35 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
     HWND radice = GetAncestor(sotto, GA_ROOT);
     wchar_t rc[64] = L""; GetClassNameW(radice, rc, 64);
     const bool desktop = wcscmp(rc, L"CabinetWClass") != 0;
-    std::wstring nome;
-    const int cosa = sottoIlPunto(pt, nome);
-    if (cosa < 0) { if (registro) registro("tasto destro: punto non riconosciuto, menu di Windows"); return false; }
     IShellView* sv = vistaDi(sotto, desktop);
     if (!sv) { if (registro) registro("tasto destro: vista della shell non trovata, menu di Windows"); return false; }
     bool ok = false;
     IFolderView2* fv = nullptr;
     sv->QueryInterface(IID_PPV_ARGS(&fv));
-    if (cosa == 1) {
+    std::wstring nome;
+    int cosa = 0, indiceDesktop = -1;
+    if (desktop) {
+        // desktop: UI Automation non vede le icone come elementi; si confronta il punto con la posizione di ognuna
+        POINT pc = pt; ScreenToClient(sotto, &pc);
+        POINT passo{}; if (fv) fv->GetSpacing(&passo);
+        int n = 0; if (fv) fv->ItemCount(SVGIO_ALLVIEW, &n);
+        for (int i = 0; i < n && i < 5000 && passo.x > 0; i++) {
+            PITEMID_CHILD pid = nullptr; POINT pos{};
+            if (FAILED(fv->Item(i, &pid)) || !pid) continue;
+            const bool c = SUCCEEDED(fv->GetItemPosition(pid, &pos));
+            CoTaskMemFree(pid);
+            if (c && pc.x >= pos.x && pc.x < pos.x + passo.x && pc.y >= pos.y && pc.y < pos.y + passo.y) { indiceDesktop = i; break; }
+        }
+        cosa = indiceDesktop >= 0 ? 1 : 0;
+    } else {
+        cosa = sottoIlPunto(pt, nome);
+        if (cosa < 0) { if (fv) fv->Release(); sv->Release(); if (registro) registro("tasto destro: punto non riconosciuto, menu di Windows"); return false; }
+    }
+    if (cosa == 1 && indiceDesktop >= 0) {
+        DWORD stato = 0; PITEMID_CHILD pid = nullptr;
+        if (SUCCEEDED(fv->Item(indiceDesktop, &pid)) && pid) { fv->GetSelectionState(pid, &stato); CoTaskMemFree(pid); }
+        if (!(stato & SVSI_SELECT)) fv->SelectItem(indiceDesktop, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_FOCUSED);
+    } else if (cosa == 1) {
         // l'elemento col nome visto da UI Automation; se non e' gia' fra i selezionati diventa l'unico selezionato
         int indice = -1, quanti = 0;
         if (fv) {
@@ -215,22 +237,30 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
         if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, 0x7FFF, CMF_NORMAL | CMF_CANRENAME))) {
             IContextMenu2* cm2 = nullptr; IContextMenu3* cm3 = nullptr;
             cm->QueryInterface(IID_PPV_ARGS(&cm2)); cm->QueryInterface(IID_PPV_ARGS(&cm3));
-            // le voci di Windows divise per categoria (i sottomenu restano sottomenu)
-            std::vector<menu::Voce> perCat[QUANTE];
+            // come il menu di Windows 11: pulsanti in cima, voci principali (Proprieta' per ultima), poi sotto la
+            // freccia tutte le altre, nell'ordine di Windows (i sottomenu restano sottomenu)
+            std::vector<menu::Voce> pulsanti, principali, proprieta, altre;
             for (auto& v : menu::daHmenu(m)) {
-                if (v.separatore || v.titolo) continue;
+                if (v.titolo) continue;
+                if (v.separatore) { if (!altre.empty() && !altre.back().separatore) altre.push_back(v); continue; }
                 wchar_t verbo[128] = L"";
                 if (v.id > 0 && !v.sotto && FAILED(cm->GetCommandString(v.id - 1, GCS_VERBW, nullptr, (LPSTR)verbo, 128))) verbo[0] = 0;
-                perCat[categoria(verbo, v.testo)].push_back(v);
+                if (const int q = pulsante(verbo, v.testo)) { v.pulsante = q; pulsanti.push_back(v); continue; }
+                if (!wcscmp(verbo, L"properties") || pulito(v.testo) == L"propriet\u00e0" || pulito(v.testo) == L"properties") { proprieta.push_back(v); continue; }
+                if (principale(verbo, v.testo, cosa == 1)) principali.push_back(v);
+                else { v.extra = true; altre.push_back(v); }
             }
-            std::vector<menu::Voce> voci;
-            for (int c = 0; c < PROPRIETA; c++) {
-                if (perCat[c].empty()) continue;
-                if (!voci.empty()) voci.push_back(menu::separatore());
-                voci.push_back(menu::titolo(nomeCategoria(c)));
-                for (auto& v : perCat[c]) voci.push_back(v);
-            }
-            if (!perCat[PROPRIETA].empty()) { voci.push_back(menu::separatore()); for (auto& v : perCat[PROPRIETA]) voci.push_back(v); }
+            while (!altre.empty() && altre.back().separatore) altre.pop_back();
+            for (auto& x : altre) x.extra = true;
+            // l'ordine dei pulsanti come in Windows 11
+            std::stable_sort(pulsanti.begin(), pulsanti.end(), [](const menu::Voce& x, const menu::Voce& y) {
+                static const int ordine[] = {0, 1, 2, 3, 4, 5, 6};   // I_TAGLIA, I_COPIA, I_INCOLLA, I_RINOMINA, I_CONDIVIDI, I_ELIMINA
+                return ordine[x.pulsante] < ordine[y.pulsante];
+            });
+            std::vector<menu::Voce> voci = pulsanti;
+            for (auto& v : principali) voci.push_back(v);
+            if (!proprieta.empty()) { if (!principali.empty()) voci.push_back(menu::separatore()); for (auto& v : proprieta) voci.push_back(v); }
+            for (auto& v : altre) voci.push_back(v);
             auto prepara = [cm2, cm3](HMENU s) {   // i sottomenu della shell ("Invia a", "Apri con", "Nuovo") si riempiono ora
                 if (cm3) { LRESULT r = 0; cm3->HandleMenuMsg2(WM_INITMENUPOPUP, (WPARAM)s, 0, &r); }
                 else if (cm2) cm2->HandleMenuMsg(WM_INITMENUPOPUP, (WPARAM)s, 0);

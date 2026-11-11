@@ -2142,8 +2142,10 @@ static bool uiViva() { return GetTickCount64() - gBattito.load() < 1000; }
 // ---- tasto destro sul desktop e in Esplora file: il menu di FluidWin (destro.h) ----
 // Il gancio del mouse trattiene pressione e rilascio del tasto destro solo sopra quelle viste (non con Maiusc, non
 // se FluidWin e' bloccato) e al rilascio chiede il menu al thread principale. I clic rimandati da FluidWin a Windows
-// (SendInput) sono "iniettati" e il gancio li lascia passare.
+// (SendInput) portano la firma FIRMA_DESTRO e il gancio li lascia passare. Gli altri clic "iniettati" si prendono:
+// i programmi dei mouse (Logitech G HUB e simili) rimandano cosi' TUTTI i clic veri (visto sul PC dell'utente).
 static const UINT WM_TASTO_DESTRO = WM_APP + 13;
+static const ULONG_PTR FIRMA_DESTRO = 0x464C5744;   // "FLWD": clic destro rimandato da FluidWin
 static std::atomic<bool> gMenuDestro{false};
 static bool gDestroPreso = false;
 static HHOOK gHookMouse = nullptr;
@@ -2152,9 +2154,12 @@ static DWORD gThreadMouse = 0;
 static LRESULT CALLBACK suMouse(int code, WPARAM w, LPARAM l) {
     if (code == HC_ACTION && (w == WM_RBUTTONDOWN || w == WM_RBUTTONUP)) {
         const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)l;
-        if (!(m->flags & LLMHF_INJECTED)) {
+        if (m->dwExtraInfo != FIRMA_DESTRO) {
             if (w == WM_RBUTTONDOWN) {
-                gDestroPreso = gMenuDestro && uiViva() && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) && destro::vistaShell(m->pt);
+                const bool vista = destro::vistaShell(m->pt);
+                gDestroPreso = gMenuDestro && uiViva() && !(GetAsyncKeyState(VK_SHIFT) & 0x8000) && vista;
+                // (per il registro: perche' si' o perche' no, detto al thread principale)
+                if (gLog) PostMessageW(gMessaggi, WM_APP + 14, (gMenuDestro ? 1 : 0) | (uiViva() ? 2 : 0) | (vista ? 4 : 0), MAKELPARAM((short)m->pt.x, (short)m->pt.y));
                 if (gDestroPreso) return 1;
             } else if (gDestroPreso) {
                 gDestroPreso = false;
@@ -2169,6 +2174,7 @@ static LRESULT CALLBACK suMouse(int code, WPARAM w, LPARAM l) {
 static DWORD WINAPI threadMouse(LPVOID) {
     SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
     gHookMouse = SetWindowsHookExW(WH_MOUSE_LL, suMouse, GetModuleHandleW(nullptr), 0);
+    if (gLog) PostMessageW(gMessaggi, WM_APP + 15, gHookMouse ? 1 : 0, GetLastError());
     SetTimer(nullptr, 0, 15000, nullptr);
     MSG m;
     while (GetMessageW(&m, nullptr, 0, 0) > 0) {
@@ -2186,6 +2192,7 @@ static DWORD WINAPI threadMouse(LPVOID) {
 static void destroAWindows() {
     INPUT in[2]{}; in[0].type = in[1].type = INPUT_MOUSE;
     in[0].mi.dwFlags = MOUSEEVENTF_RIGHTDOWN; in[1].mi.dwFlags = MOUSEEVENTF_RIGHTUP;
+    in[0].mi.dwExtraInfo = in[1].mi.dwExtraInfo = FIRMA_DESTRO;   // (il gancio lo riconosce e lo lascia a Windows)
     SendInput(2, in, sizeof(INPUT));
 }
 
@@ -2395,6 +2402,14 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_APRI_LAUNCHER: if (gDockOk) gDock.apriLauncher(); return 0;
         case WM_HOTKEY: if (w == TASTO_PRIMO_PIANO) primoPiano(); return 0;
         case WM_CLIPBOARDUPDATE: appunti::Cronologia::io().cambiato(); return 0;   // cronologia degli appunti
+        case WM_APP + 14: {
+            const POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)}; HWND h = WindowFromPoint(pt);
+            wchar_t c[64] = L"", p[64] = L"", r[64] = L"";
+            if (h) { GetClassNameW(h, c, 64); GetClassNameW(GetParent(h), p, 64); GetClassNameW(GetAncestor(h, GA_ROOT), r, 64); }
+            logf("tasto destro giu' %ld,%ld: opzione %d, viva %d, vista %d (%ls in %ls, finestra %ls)", pt.x, pt.y, (int)(w & 1), (int)((w >> 1) & 1), (int)((w >> 2) & 1), c, p, r);
+            return 0;
+        }
+        case WM_APP + 15: logf("gancio del mouse: %s (errore %lu)", w ? "messo" : "NON messo", (unsigned long)l); return 0;
         case WM_TASTO_DESTRO: {
             const POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
             if (!destro::mostra(pt, gMessaggi, [](const char* s) { logf("%s", s); })) destroAWindows();

@@ -35,7 +35,10 @@ struct Voce {
     UINT id = 0;
     bool separatore = false, disattivata = false, titolo = false, spuntata = false;
     HMENU sotto = nullptr;   // sottomenu (preso da un HMENU)
+    int pulsante = 0;        // != 0: pulsante con icona nella riga in cima (vedi Icona), come nel menu di Windows 11
+    bool extra = false;      // nascosta finche' non si passa sulla freccia in fondo (le "altre opzioni")
 };
+enum Icona { I_NIENTE, I_TAGLIA, I_COPIA, I_INCOLLA, I_RINOMINA, I_CONDIVIDI, I_ELIMINA };
 
 static Voce voce(const std::wstring& t, UINT id) { Voce v; v.testo = t; v.id = id; return v; }
 static Voce separatore() { Voce v; v.separatore = true; return v; }
@@ -95,6 +98,13 @@ private:
     Menu* padre = nullptr;
     int aperto = -1;   // voce con il sottomenu aperto
     bool inSotto = false;
+    // riga dei pulsanti in cima e freccia in fondo che allunga il menu con le voci "extra"
+    D2D1_RECT_F rettFreccia{};
+    bool conFreccia = false, espanso = false;
+    float hCompatto = 0, hPieno = 0;
+    int x0 = 0, y0 = 0;
+    ULONGLONG tEsp = 0; double kEsp = 0;
+    bool premutoPrima = true, escPrima = true;
 
     Menu(const std::vector<Voce>& v, HWND p, std::function<void(HMENU)> pr) : voci(v), proprietario(p), prepara(pr) {}
     ~Menu() {
@@ -132,6 +142,7 @@ private:
     }
 
     float altezza(const Voce& v) const { return (v.separatore ? 9 : v.titolo ? 26 : 30) * dpi; }
+    static constexpr float LATO_PULSANTE = 38, ALTA_FRECCIA = 22;
 
     void crea(POINT pt, bool versoAlto) {
         static bool registrata = false;
@@ -157,9 +168,10 @@ private:
             f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
         }
         // misure: larghezza della voce piu' lunga
-        float largo = 180 * dpi, alto = 12 * dpi;
+        float largo = 180 * dpi;   // (le altezze le fanno i rettangoli, sotto)
+        int pulsanti = 0;
         for (const auto& v : voci) {
-            alto += altezza(v);
+            if (v.pulsante) { pulsanti++; continue; }
             if (v.separatore) continue;
             IDWriteTextLayout* l = nullptr;
             if (SUCCEEDED(fdw->CreateTextLayout(v.testo.c_str(), (UINT32)v.testo.size(), v.titolo ? fmtTitolo : fmt, 2000, 100, &l))) {
@@ -167,13 +179,31 @@ private:
                 largo = std::max(largo, tm.widthIncludingTrailingWhitespace + 64 * dpi);
             }
         }
-        W = (int)std::ceil(std::min(largo, 420 * dpi)); H = (int)std::ceil(alto);
+        if (pulsanti) { largo = std::max(largo, (pulsanti * (LATO_PULSANTE + 4) + 12) * dpi); }
+        conFreccia = std::any_of(voci.begin(), voci.end(), [](const Voce& v) { return v.extra; });
+        W = (int)std::ceil(std::min(largo, 420 * dpi));
+        // rettangoli: pulsanti in riga in cima, poi le voci, poi la freccia, poi le voci extra
+        {
+            float yy = 6 * dpi, xp = (W - (pulsanti * (LATO_PULSANTE + 4) - 4) * dpi) / 2;   // riga dei pulsanti centrata
+            rett.assign(voci.size(), D2D1_RECT_F{});
+            if (pulsanti) {
+                for (size_t i = 0; i < voci.size(); i++) if (voci[i].pulsante) { rett[i] = {xp, yy, xp + LATO_PULSANTE * dpi, yy + LATO_PULSANTE * dpi}; xp += (LATO_PULSANTE + 4) * dpi; }
+                yy += (LATO_PULSANTE + 6) * dpi;
+            }
+            for (size_t i = 0; i < voci.size(); i++) if (!voci[i].pulsante && !voci[i].extra) { const float a = altezza(voci[i]); rett[i] = {6 * dpi, yy, W - 6 * dpi, yy + a}; yy += a; }
+            if (conFreccia) { rettFreccia = {6 * dpi, yy, W - 6 * dpi, yy + ALTA_FRECCIA * dpi}; yy += ALTA_FRECCIA * dpi; }
+            hCompatto = yy + 6 * dpi;
+            for (size_t i = 0; i < voci.size(); i++) if (voci[i].extra) { const float a = altezza(voci[i]); rett[i] = {6 * dpi, yy, W - 6 * dpi, yy + a}; yy += a; }
+            hPieno = yy + 6 * dpi;
+        }
+        H = (int)std::ceil(hCompatto);
         // dentro lo schermo
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
         int x = pt.x, y = versoAlto ? pt.y - H : pt.y;
         if (x + W > mi.rcWork.right) x = std::max((int)mi.rcWork.left, (padre ? (int)padre->sinistraFin() - W : (int)mi.rcWork.right - W));
         if (y + H > mi.rcWork.bottom) y = mi.rcWork.bottom - H;
         if (y < mi.rcWork.top) y = mi.rcWork.top;
+        x0 = x; y0 = y;
         fin = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED, L"FluidWin.Menu", L"", WS_POPUP,
                               x, y, W, H, proprietario, nullptr, GetModuleHandleW(nullptr), this);
         SetLayeredWindowAttributes(fin, 0, 0, LWA_ALPHA);
@@ -190,14 +220,24 @@ private:
                                     D2D1::HwndRenderTargetProperties(fin, D2D1::SizeU(W, H)), &rt);
         rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);   // sul vetro il ClearType farebbe aloni colorati
         rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &pen);
-        // rettangoli delle voci
-        float yy = 6 * dpi;
-        for (const auto& v : voci) { const float a = altezza(v); rett.push_back({6 * dpi, yy, W - 6 * dpi, yy + a}); yy += a; }
+    }
+
+    // allunga il menu (freccia in fondo): la finestra cresce verso il basso, o sale se sotto non c'e' posto
+    void passoEspansione() {
+        kEsp = std::min(1.0, (GetTickCount64() - tEsp) / 170.0);
+        const double e = 1 - std::pow(1 - kEsp, 3);
+        const int h = (int)std::ceil(hCompatto + (hPieno - hCompatto) * e);
+        MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), &mi);
+        const int y = std::max((int)mi.rcWork.top, std::min(y0, (int)mi.rcWork.bottom - h));
+        SetWindowPos(fin, HWND_TOPMOST, x0, y, W, h, SWP_NOACTIVATE);
+        H = h;
+        if (rt) rt->Resize(D2D1::SizeU(W, H));
+        disegna();
     }
 
     float sinistraFin() const { RECT r; GetWindowRect(fin, &r); return (float)r.left; }
 
-    bool selezionabile(int i) const { return i >= 0 && i < (int)voci.size() && !voci[i].separatore && !voci[i].titolo && !voci[i].disattivata; }
+    bool selezionabile(int i) const { return i >= 0 && i < (int)voci.size() && !voci[i].separatore && !voci[i].titolo && !voci[i].disattivata && (!voci[i].extra || espanso); }
 
     int voceIn(int x, int y) const {
         for (int i = 0; i < (int)rett.size(); i++)
@@ -213,9 +253,30 @@ private:
         pen->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.45f) : D2D1::ColorF(1, 1, 1, 0.55f));
         rt->FillRectangle({0, 0, (float)W, (float)H}, pen);
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.9f);
+        if (conFreccia) {   // freccia: giu' da chiusa, su da aperta (gira mentre il menu si allunga)
+            const D2D1_RECT_F& r = rettFreccia;
+            const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+            pen->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.08f));
+            rt->DrawLine({r.left + 8 * dpi, r.top + 1}, {r.right - 8 * dpi, r.top + 1}, pen, 1.0f);
+            rt->SetTransform(D2D1::Matrix3x2F::Rotation((float)(180 * (1 - std::pow(1 - kEsp, 3))), {cx, cy}));
+            pen->SetColor({ink.r, ink.g, ink.b, ink.a * 0.7f});
+            rt->DrawLine({cx - 5 * dpi, cy - 2 * dpi}, {cx, cy + 3 * dpi}, pen, 1.6f * dpi);
+            rt->DrawLine({cx, cy + 3 * dpi}, {cx + 5 * dpi, cy - 2 * dpi}, pen, 1.6f * dpi);
+            rt->SetTransform(D2D1::Matrix3x2F::Identity());
+        }
         for (int i = 0; i < (int)voci.size(); i++) {
             const Voce& v = voci[i];
             const D2D1_RECT_F& r = rett[i];
+            if (v.extra && r.top > H) continue;
+            if (v.pulsante) {   // pulsante con icona (riga in cima)
+                const bool ev = i == sopra;
+                if (ev) { pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 1)); rt->FillRoundedRectangle({r, 8 * dpi, 8 * dpi}, pen); }
+                D2D1_COLOR_F c = ev ? D2D1::ColorF(1, 1, 1, 1) : ink;
+                if (v.disattivata) c.a *= 0.4f;
+                pen->SetColor(c);
+                icona(v.pulsante, (r.left + r.right) / 2, (r.top + r.bottom) / 2);
+                continue;
+            }
             if (v.separatore) {
                 pen->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.10f));
                 const float cy = (r.top + r.bottom) / 2;
@@ -251,6 +312,33 @@ private:
         ValidateRect(fin, nullptr);
     }
 
+    // icone della riga in cima, disegnate a linee
+    void icona(int q, float cx, float cy) {
+        const float d = dpi, s = 1.5f * d;
+        auto l = [&](float x1, float y1, float x2, float y2) { rt->DrawLine({cx + x1 * d, cy + y1 * d}, {cx + x2 * d, cy + y2 * d}, pen, s); };
+        switch (q) {
+            case I_TAGLIA:   // forbici
+                rt->DrawEllipse({{cx - 4 * d, cy + 5 * d}, 2.6f * d, 2.6f * d}, pen, s);
+                rt->DrawEllipse({{cx + 4 * d, cy + 5 * d}, 2.6f * d, 2.6f * d}, pen, s);
+                l(-2.5f, 3, 5, -8); l(2.5f, 3, -5, -8); break;
+            case I_COPIA:    // due fogli
+                rt->DrawRoundedRectangle({{cx - 3 * d, cy - 5 * d, cx + 6 * d, cy + 6 * d}, 2 * d, 2 * d}, pen, s);
+                l(-6, 3, -6, -6); l(-6, -6, 2, -6); break;
+            case I_INCOLLA:  // cartellina
+                rt->DrawRoundedRectangle({{cx - 6 * d, cy - 5 * d, cx + 6 * d, cy + 7 * d}, 2 * d, 2 * d}, pen, s);
+                rt->FillRoundedRectangle({{cx - 3 * d, cy - 7.5f * d, cx + 3 * d, cy - 3.5f * d}, 1.2f * d, 1.2f * d}, pen); break;
+            case I_RINOMINA: // casella con il cursore
+                rt->DrawRoundedRectangle({{cx - 7 * d, cy - 3.5f * d, cx + 5 * d, cy + 3.5f * d}, 1.5f * d, 1.5f * d}, pen, s);
+                l(2, -6.5f, 2, 6.5f); l(0, -6.5f, 4, -6.5f); l(0, 6.5f, 4, 6.5f); break;
+            case I_CONDIVIDI: // freccia che esce dalla scatola
+                l(0, 2, 0, -7); l(-3.5f, -3.5f, 0, -7); l(3.5f, -3.5f, 0, -7);
+                l(-6, -1, -6, 7); l(-6, 7, 6, 7); l(6, 7, 6, -1); break;
+            case I_ELIMINA:  // cestino
+                l(-6, -4.5f, 6, -4.5f); l(-2, -6.5f, 2, -6.5f);
+                l(-4.5f, -4.5f, -3.5f, 7); l(-3.5f, 7, 3.5f, 7); l(3.5f, 7, 4.5f, -4.5f); break;
+        }
+    }
+
     void scegli(int i) {
         if (!selezionabile(i)) return;
         if (voci[i].sotto) { apriSotto(i); return; }
@@ -283,8 +371,15 @@ private:
         disegna();
         SetCapture(fin);
         const ULONGLONG t0 = GetTickCount64();
+        premutoPrima = (GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON)) & 0x8000;
+        escPrima = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
         MSG msg;
         while (!fine) {
+            // FluidWin puo' non essere in primo piano (menu del tasto destro sopra Esplora file): la cattura del mouse
+            // allora non porta i clic fuori dal menu, ne' l'Esc. Si guardano i tasti direttamente
+            fuoriOEsc();
+            if (fine) break;
+            if (espanso && kEsp < 1) { passoEspansione(); if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue; }
             // dissolvenza d'apertura (120 ms)
             if (alfa < 255) {
                 alfa = (BYTE)std::min<ULONGLONG>(255, (GetTickCount64() - t0) * 255 / 120);
@@ -293,13 +388,29 @@ private:
             }
             // animazioni di FluidWin in corso: prima i messaggi in coda, poi un fotogramma (che aspetta il vblank)
             if (animazioni() && !PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE)) { passoAnimazioni(); continue; }
-            if (!GetMessageW(&msg, nullptr, 0, 0)) { PostQuitMessage((int)msg.wParam); break; }
+            if (!PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { MsgWaitForMultipleObjects(0, nullptr, FALSE, 25, QS_ALLINPUT); continue; }
+            if (msg.message == WM_QUIT) { PostQuitMessage((int)msg.wParam); break; }
             if (gestisci(msg)) continue;
             TranslateMessage(&msg); DispatchMessageW(&msg);
         }
         ReleaseCapture();
         ShowWindow(fin, SW_HIDE);
         return scelta;
+    }
+
+    // clic (di qualsiasi tasto) fuori da questo menu e dai suoi padri, o Esc: si chiude tutto
+    void fuoriOEsc() {
+        const bool premuto = ((GetAsyncKeyState(VK_LBUTTON) | GetAsyncKeyState(VK_RBUTTON) | GetAsyncKeyState(VK_MBUTTON)) & 0x8000) != 0;
+        const bool esc = (GetAsyncKeyState(VK_ESCAPE) & 0x8000) != 0;
+        if (esc && !escPrima) { fine = true; scelta = 0; }
+        if (premuto && !premutoPrima) {
+            POINT c; GetCursorPos(&c);
+            HWND h = GetAncestor(WindowFromPoint(c), GA_ROOT);
+            bool nostro = h == fin;
+            for (Menu* p = padre; p && !nostro; p = p->padre) nostro = h == p->fin;
+            if (!nostro) { fine = true; scelta = 0; for (Menu* p = padre; p; p = p->padre) p->fine = true; }
+        }
+        premutoPrima = premuto; escPrima = esc;
     }
 
     // messaggi di mouse e tastiera del menu (anche quelli del sottomenu passano di qui finche' e' aperto)
@@ -316,6 +427,8 @@ private:
                         RECT pr; GetClientRect(padre->fin, &pr);
                         if (PtInRect(&pr, s) && padre->voceIn(s.x, s.y) != padre->aperto) { fine = true; scelta = 0; }
                     }
+                    // sulla freccia in fondo, senza cliccare: il menu si allunga con le altre voci
+                    if (dentro && conFreccia && !espanso && p.y >= rettFreccia.top - 2 && p.y < rettFreccia.bottom + 4) { espanso = true; tEsp = GetTickCount64(); }
                     const int s = dentro ? voceIn(p.x, p.y) : -1;
                     if (s != sopra) {
                         sopra = s; disegna();
@@ -337,6 +450,11 @@ private:
             case WM_KEYDOWN: case WM_SYSKEYDOWN: {
                 const WPARAM k = msg.wParam;
                 if (k == VK_ESCAPE || (k == VK_LEFT && padre)) { fine = true; scelta = 0; return true; }
+                if (k == VK_DOWN && conFreccia && !espanso && sopra >= 0 && !voci[sopra].extra) {   // in fondo alle voci: si allunga
+                    bool ultima = true;
+                    for (int n = sopra + 1; n < (int)voci.size(); n++) if (selezionabile(n) && !voci[n].pulsante) { ultima = false; break; }
+                    if (ultima) { espanso = true; tEsp = GetTickCount64(); }
+                }
                 if (k == VK_DOWN || k == VK_UP) {
                     int s = sopra;
                     for (int n = 0; n < (int)voci.size(); n++) {
