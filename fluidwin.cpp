@@ -800,6 +800,10 @@ static void avviaViva(Gelatina& g) {
     // finestre che chiedono di non essere catturate (password manager, app protette): si rispetta, resta la foto
     DWORD aff = WDA_NONE;
     if (GetWindowDisplayAffinity(g.hwnd, &aff) && aff != WDA_NONE) { logf("gelatina %p: finestra protetta, niente contenuto vivo", g.hwnd); return; }
+    // finestre a misura fissa (Proprieta', altre finestre di dialogo): le immagini di Windows.Graphics.Capture non
+    // combaciano con la finestra (piu' piccole di qualche pixel, o spostate: restava una fascia di sfondo attaccata
+    // alla gelatina). Il loro contenuto e' fermo: basta la foto, che e' giusta
+    if (!(GetWindowLongPtrW(g.hwnd, GWL_STYLE) & WS_THICKFRAME)) { logf("gelatina %p: finestra a misura fissa, niente contenuto vivo", g.hwnd); return; }
     if (!g.viva.tex && !gGenio.copia(g.foto, g.viva)) return;
     g.cattura = std::make_shared<viva::Cattura>();
     g.vivaControllata = false; g.tViva = ora();
