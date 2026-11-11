@@ -29,10 +29,9 @@
 #include "genio.h"
 #include "viva.h"
 #include <memory>
+#include "scala.h"
 #include "dock.h"
-#include "capsula.h"
 #include "menu.h"
-#include "angoli.h"
 #include "impostazioni.h"
 #include "osd.h"
 #include "panoramica.h"
@@ -179,11 +178,9 @@ static bool gGenioOk = false;
 static std::unordered_map<HWND, genio::Immagine> gFoto;   // foto delle finestre ridotte col genio, per il ripristino
 static dock::Motore gDock;
 static bool gDockOk = false;
-static capsula::Motore gCapsula;   // i tre tasti delle finestre
-static bool gCapsulaOk = false;
-static angoli::Motore gAngoli;     // angoli piu' tondi di quelli di DWM
-static bool gAngoliOk = false;
-static const int RAGGIO_ANGOLI = 16;   // px a 96 dpi: angoli delle finestre, della capsula, della gelatina e del genio (senza Windhawk)
+// px a 96 dpi: angoli delle finestre di Windows 11 (quelli di DWM). Per arrotondarli di piu' c'e' solo la mod di
+// Windhawk "Custom Window Corner Radius": FluidWin non li simula piu' (due metodi insieme si sovrapponevano)
+static const int RAGGIO_ANGOLI = 8;
 static const wchar_t* CHIAVE_FLUIDWIN = L"Software\\FluidWin";   // stato originale della barra di Windows, per il recupero
 
 static double gRaggioBase = RAGGIO_ANGOLI;   // px a 96 dpi: angoli delle finestre (quelli di Windhawk, se c'e')
@@ -400,6 +397,14 @@ static void mostraBarreWindows(bool si) {
     }
 }
 
+// La finestra risponde ai messaggi entro 'ms'? SetWindowLongPtr su una finestra di un altro programma aspetta che lei
+// risponda, senza limite: con una finestra che non li legge mai (una nascosta di nvcontainer, NVCapContext) si restava
+// bloccati per sempre, guardiano e avvio di FluidWin compresi
+static bool risponde(HWND h, UINT ms) {
+    DWORD_PTR r = 0;
+    return SendMessageTimeoutW(h, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, ms, &r) != 0;
+}
+
 // Usata dal guardiano e all'avvio: rimette a posto qualsiasi finestra lasciata nascosta o senza animazioni
 static void ripristinaTutte() {
     ripristinaBarra();
@@ -410,8 +415,8 @@ static void ripristinaTutte() {
                 SetLayeredWindowAttributes(h, 0, (BYTE)orig, LWA_ALPHA);
                 RemovePropW(h, PROP_ALFA);
             } else {
-                SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
-                SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+                SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);   // (questo non aspetta la finestra: torna visibile)
+                if (risponde(h, 300)) SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
             }
             RemovePropW(h, PROP_NASCOSTA);
         }
@@ -421,7 +426,7 @@ static void ripristinaTutte() {
         }
         // finestre classiche a cui FluidWin ha tolto i tasti originali (WS_SYSMENU): tornano com'erano
         if (GetPropW(h, L"FluidWin.SenzaTasti")) {
-            SetWindowLongPtrW(h, GWL_STYLE, GetWindowLongPtrW(h, GWL_STYLE) | WS_SYSMENU);
+            if (risponde(h, 300)) SetWindowLongPtrW(h, GWL_STYLE, GetWindowLongPtrW(h, GWL_STYLE) | WS_SYSMENU);
             SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
             RemovePropW(h, L"FluidWin.SenzaTasti");
         }
@@ -591,7 +596,7 @@ static void annullaAnimDi(HWND h) {
     for (auto it = gAnim.begin(); it != gAnim.end();) {
         if (it->hwnd == h) {
             // ingrandimento interrotto (riduzione, chiusura...): finestra e capsula tornano normali
-            if (it->zoom) { if (gCapsulaOk) gCapsula.fineSegui(h); if (IsWindow(h)) rendiVisibileFinestra(h); liberaFotoZoom(*it); }
+            if (it->zoom) { if (IsWindow(h)) rendiVisibileFinestra(h); liberaFotoZoom(*it); }
             chiudiMiniatura(*it); it = gAnim.erase(it);
         } else ++it;
     }
@@ -686,12 +691,11 @@ struct Gelatina {
     double alza = 0;              // 0..1: l'ombra passa da "posata" a "sollevata" mentre la si tiene (e torna lasciandola)
     std::vector<genio::Vertice> maglia, ombra;
     // contenuto vivo (Windows.Graphics.Capture): mentre la si trascina si vede la finestra com'e' adesso. 'viva' parte
-    // come copia della foto e riceve le immagini nuove, con sopra la capsula ricopiata dalla foto
+    // come copia della foto e riceve le immagini nuove
     std::shared_ptr<viva::Cattura> cattura;   // condivisa col thread che la avvia
     bool vivaControllata = false; double tViva = 0;
     genio::Immagine viva;
     bool vivaPronta = false;      // e' arrivata almeno un'immagine viva: si disegna 'viva' invece di 'foto'
-    RECT capsula{};               // dove la foto ha la capsula (pixel della foto): si ricopia sulle immagini vive
     int immaginiVive = 0;
 };
 static std::list<Gelatina> gGelatine;
@@ -721,7 +725,7 @@ static void fermaViva(Gelatina& g) {
     g.cattura.reset();   // ancora in avvio: la chiude il thread dell'avvio quando ha finito
 }
 
-// appena pronta: le immagini devono combaciare con la foto pixel per pixel, e la capsula va ricopiata sopra
+// appena pronta: le immagini devono combaciare con la foto pixel per pixel
 static bool controllaViva(Gelatina& g) {
     if (g.vivaControllata) return true;
     const int st = g.cattura->statoAvvio();
@@ -731,32 +735,16 @@ static bool controllaViva(Gelatina& g) {
         logf("gelatina %p: contenuto vivo %dx%d diverso dalla foto %dx%d, resta la foto", g.hwnd, g.cattura->larghezza(), g.cattura->altezza(), g.viva.w, g.viva.h);
         g.cattura.reset(); return false;
     }
-    // la capsula: nelle immagini vive ci sono i tasti originali, si ricopre con quella dipinta sulla foto
-    g.capsula = RECT{};
-    RECT c{};
-    if (gCapsulaOk && gCapsula.areaFoto(g.hwnd, g.inizio, c)) {
-        const RECT foto = {0, 0, g.foto.w, g.foto.h};
-        IntersectRect(&g.capsula, &c, &foto);
-        // l'ultima riga dell'area cade gia' sul contenuto della finestra: dalla foto resterebbe una riga del colore di
-        // prima sotto la capsula (si vedeva una linea sottile). Quella riga la danno le immagini vive
-        if (g.capsula.bottom - g.capsula.top > 4) g.capsula.bottom--;
-    }
     g.vivaControllata = true;
-    logf("gelatina %p: contenuto vivo pronto dopo %.0f ms, capsula %ld,%ld-%ld,%ld", g.hwnd, (ora() - g.tViva) * 1000,
-         g.capsula.left, g.capsula.top, g.capsula.right, g.capsula.bottom);
+    logf("gelatina %p: contenuto vivo pronto dopo %.0f ms", g.hwnd, (ora() - g.tViva) * 1000);
     return true;
 }
 
-// l'ultima immagine arrivata (se ce n'e' una nuova) va in 'viva', con la capsula della foto ricopiata sopra
+// l'ultima immagine arrivata (se ce n'e' una nuova) va in 'viva'
 static void aggiornaViva(Gelatina& g) {
     if (!g.cattura || !g.viva.tex || !controllaViva(g)) return;
     ID3D11DeviceContext* ctx = gGenio.contesto();
     if (!g.cattura->copia(ctx, g.viva.tex, 0, 0, RECT{0, 0, g.viva.w, g.viva.h})) return;
-    const RECT& r = g.capsula;
-    if (r.right > r.left && r.bottom > r.top) {
-        D3D11_BOX box{(UINT)r.left, (UINT)r.top, 0, (UINT)r.right, (UINT)r.bottom, 1};
-        ctx->CopySubresourceRegion(g.viva.tex, 0, (UINT)r.left, (UINT)r.top, 0, g.foto.tex, 0, &box);
-    }
     gGenio.rifaiMips(g.viva);
     g.vivaPronta = true; g.immaginiVive++;
 }
@@ -901,8 +889,6 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
                 }
                 g.fase = 2; g.tFase = t;
                 fermaViva(g);   // ricompare la finestra vera: per la dissolvenza basta l'ultima immagine
-                if (gCapsulaOk) gCapsula.mostraPer(g.hwnd);   // la finestra vera ricompare: capsula e angoli con lei
-                if (gAngoliOk) gAngoli.mostraPer(g.hwnd);
             }
         }
         double alfaFoto = 1.0, alfaOmbra = g.fase >= 2 ? 0.0 : 1.0;
@@ -930,11 +916,9 @@ static void passoGelatine(double t, std::vector<genio::Elemento>& elementi) {
             if (g.rinascondi && ++g.fotogrammi > 2) {
                 g.rinascondi = false;
                 alfaFinestra(g.hwnd, 0);
-                if (gCapsulaOk) gCapsula.nascondiPer(g.hwnd);
-                if (gAngoliOk) gAngoli.nascondiPer(g.hwnd);
             }
             if (!g.nascosta && ++g.fotogrammi > 2) {
-                if (rendiLayered(g.hwnd, 0)) { g.nascosta = true; if (gCapsulaOk) gCapsula.nascondiPer(g.hwnd); if (gAngoliOk) gAngoli.nascondiPer(g.hwnd); }
+                if (rendiLayered(g.hwnd, 0)) g.nascosta = true;
                 else { logf("gelatina: finestra non nascondibile %p", g.hwnd); liberaGelatina(g); it = gGelatine.erase(it); continue; }
             }
             // griglia della foto e, sotto, quella dell'ombra: un anello in piu' attorno, 80 px fuori (la sfumatura e'
@@ -1053,7 +1037,9 @@ static DWORD WINAPI nascondiNata(LPVOID p) {
     const HWND h = (HWND)p;
     BOOL ok = FALSE;
     const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
-    if (!(ex & WS_EX_LAYERED)) {
+    // l'app ha 3 s per rispondere (si puo' star ancora avviando); una finestra che non legge mai i messaggi (vedi
+    // risponde) non si tocca: SetWindowLongPtr la aspetterebbe per sempre, tenendo occupato il thread
+    if (!(ex & WS_EX_LAYERED) && risponde(h, 3000)) {
         SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
         ok = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) && SetLayeredWindowAttributes(h, 0, 0, LWA_ALPHA);
         if (!ok && IsWindow(h)) SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
@@ -1288,7 +1274,6 @@ static void passoChiusure(double t, std::vector<genio::Elemento>& elementi) {
 }
 
 static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector<genio::Elemento>& el);
-static void copriTastiFoto(HWND h, const RECT& v, int w, int hh, unsigned int* px);
 
 // Pochi pixel campione (una griglia 48 x 27 della parte visibile) per capire se due foto sono uguali
 static std::vector<UINT> firmaDi(const std::vector<UINT>& px, const RECT& wr, const RECT& v) {
@@ -1334,9 +1319,7 @@ static void rileggiFotoZoom(Anim& a, double t) {
         const double t1 = ora();
         if (ok && !uguale) {   // pagina cambiata: la foto nuova al posto di quella di prima
             genio::Immagine nuova;
-            auto rit = gGenio.ritocco; gGenio.ritocco = copriTastiFoto;   // come la prima: sulla foto solo il fondo dei tasti
             caricata = gGenio.carica(a.hwnd, a.a, a.wrRilettura, px.data(), nuova);
-            gGenio.ritocco = rit;
             if (caricata) {
                 a.fotoZVecchia.libera();   // (se ne stava ancora sfumando una: non serve piu')
                 a.fotoZVecchia = a.fotoZ; a.fotoZ = nuova;
@@ -1408,7 +1391,7 @@ static void passo(double t) {
                 el.raggio = raggioDi(a.hwnd) * s;
                 elementi.push_back(el);
                 if (gLog && ++a.fotogrammiGenio <= 4) logf("crescita: fotogramma per t=%.3f scala=%.2f", t, s);
-                if (x >= 1.0) { a.fase = 1; a.tFase = t; if (gCapsulaOk) gCapsula.mostraPer(a.hwnd); if (gAngoliOk) gAngoli.mostraPer(a.hwnd); }
+                if (x >= 1.0) { a.fase = 1; a.tFase = t; }
             } else if (a.fase == 0) {
                 // La foto del genio e' quella fatta alla riduzione (anche minuti prima): appena la finestra e' ripristinata
                 // (ancora trasparente) se ne fa una nuova in sottofondo e la si mette al suo posto a meta' volo. Cosi'
@@ -1433,7 +1416,7 @@ static void passo(double t) {
                 a.pGenio = p;
                 elementi.push_back({&foto->second, a.da, a.a, p, 1.0 - morbido((p - 0.92) / 0.08)});
                 if (gLog && ++a.fotogrammiGenio <= 6) logf("genio ripristino: fotogramma per t=%.3f p=%.3f", t, p);
-                if (x >= 1.0) { a.fase = 1; a.tFase = t; if (gCapsulaOk) gCapsula.mostraPer(a.hwnd); if (gAngoliOk) gAngoli.mostraPer(a.hwnd); }
+                if (x >= 1.0) { a.fase = 1; a.tFase = t; }
             } else if (a.fase == 1 || a.fase == 2) {
                 // la finestra vera, con la sua ombra, ricompare sotto la foto in 150 ms (ombra morbida, non uno scatto);
                 // a meta' la foto comincia a sfumare (in 120 ms): niente attesa in piu' con la foto ferma sullo schermo
@@ -1459,12 +1442,9 @@ static void passo(double t) {
             // la finestrella ferma alla vecchia misura (angoli tondi di DWM, stabili) o la foto di prima coprono
             // l'attesa della foto nuova
             if (!a.vetrina) elementiZoom(a, 0, 0, 1.0, elementi);
-            if (gCapsulaOk) gCapsula.segui(a.hwnd, a.da, 0);
             if (++a.fotogrammiGenio >= 2) {
-                auto rit = gGenio.ritocco; gGenio.ritocco = copriTastiFoto;   // sulla foto solo il fondo; la pillola e' la capsula vera
                 const double t1 = ora();
                 const bool ok = gGenio.cattura(a.hwnd, a.a, a.fotoZ);
-                gGenio.ritocco = rit;
                 logf("ingrandimento: foto %s in %.1f ms", ok ? "fatta" : "non riuscita", (ora() - t1) * 1000);
                 if (!ok) finita = true;   // senza foto: la finestra compare subito al nuovo posto
                 else if (!a.vetrina) { a.passiZ = 3; a.t0 = t; }   // nessuna finestrella da togliere: si parte
@@ -1474,7 +1454,6 @@ static void passo(double t) {
             // la foto ferma alla vecchia misura, sotto la finestrella, per un paio di fotogrammi: poi la finestrella
             // sparisce e si parte senza stacchi
             elementiZoom(a, 0, 0, 1.0, elementi);
-            if (gCapsulaOk) gCapsula.segui(a.hwnd, a.da, 0);
             if (++a.passiZ == 3) { chiudiMiniatura(a); a.t0 = t; }
         } else if (a.zoom && a.fase == 0) {
             rileggiFotoZoom(a, t);
@@ -1488,7 +1467,6 @@ static void passo(double t) {
             // movimento mentre sfuma sopra la finestra vera (fase 2)
             const bool ferma = std::max(MOLLA_ANGOLO.residuo(dt), MOLLA_RESTO.residuo(dt)) * a.ampiezza < 6.0 * scalaFinestra(a.hwnd) || dt > 1.5;
             elementiZoom(a, pv, pl, 1.0, elementi);
-            if (gCapsulaOk) gCapsula.segui(a.hwnd, a.attuale, pv);   // l'angolo della capsula e' quello della molla veloce
             if (ferma) {
                 // arrivata: la finestra vera torna subito normale (non layered: angoli suoi) sotto la foto, che sfuma
                 rendiVisibileFinestra(a.hwnd);
@@ -1502,11 +1480,8 @@ static void passo(double t) {
             const double k = morbido((t - a.tFase) / (DISSOLVENZA_MINI * 2));
             const double dt = std::max(0.0, t - a.t0);   // la foto continua il suo movimento mentre sfuma
             elementiZoom(a, MOLLA_ANGOLO.valore(dt), MOLLA_RESTO.valore(dt), 1.0 - k, elementi);
-            if (gCapsulaOk) gCapsula.segui(a.hwnd, a.a, 1);
             if (k >= 1.0) {
                 a.fase = 3; a.tFase = t;
-                if (gCapsulaOk) gCapsula.fineSegui(a.hwnd);
-                if (gAngoliOk) gAngoli.mostraPer(a.hwnd);
             }
         } else if (a.fase == 0) {
             const double dt = std::max(0.0, t - a.t0);
@@ -1526,18 +1501,14 @@ static void passo(double t) {
             // la finestra vera, con la sua ombra, ricompare sotto la miniatura identica
             const double k = morbido((t - a.tFase) / RAMPA_FINESTRA);
             impostaMiniatura(a, a.a, 255);
-            if (a.zoom && gCapsulaOk) gCapsula.segui(a.hwnd, a.a, 1);
             alfaFinestra(a.hwnd, (BYTE)std::lround(k * 255));
             if (k >= 1.0) { a.fase = 2; a.tFase = t; }
         } else if (a.fase == 2) {
             // la miniatura sfuma: copre le piccole differenze di bordo tra copia e originale
             const double k = morbido((t - a.tFase) / DISSOLVENZA_MINI);
             impostaMiniatura(a, a.a, (BYTE)std::lround((1.0 - k) * 255));
-            if (a.zoom && gCapsulaOk) gCapsula.segui(a.hwnd, a.a, 1);
             if (k >= 1.0) {
                 chiudiMiniatura(a); a.fase = 3; a.tFase = t;
-                // copia sparita: la capsula torna sopra la finestra vera (e gli angoli con lei)
-                if (a.zoom) { if (gCapsulaOk) gCapsula.fineSegui(a.hwnd); if (gAngoliOk) gAngoli.mostraPer(a.hwnd); }
             }
         } else if (t - a.tFase >= ATTESA_STILE) {
             finita = true;
@@ -1546,7 +1517,6 @@ static void passo(double t) {
 
         if (finita) {
             if (gLog) logf("animazione finita %p (tipo %d%s%s)", a.hwnd, (int)a.tipo, a.genio ? ", genio" : "", a.zoom ? ", ingrandimento" : "");
-            if (a.zoom && gCapsulaOk) gCapsula.fineSegui(a.hwnd);
             if (a.tipo != Tipo::Riduci) rendiVisibileFinestra(a.hwnd);
             if (a.genio && a.tipo == Tipo::Ripristina) liberaFoto(a.hwnd);
             chiudiMiniatura(a);
@@ -1859,42 +1829,11 @@ static void elementiZoom(Anim& a, double pv, double pl, double alfa, std::vector
     }
 }
 
-// Foto della finestra com'e' adesso, appena prima di un ingrandimento/ripristino chiesto dal tasto della capsula:
-// durante l'animazione si vede lei che sfuma nella nuova (senza, all'inizio si vedrebbe gia' l'impaginazione nuova
-// schiacciata nella misura vecchia). Vale solo per l'animazione che parte subito dopo
-static void copriTastiFoto(HWND h, const RECT& v, int w, int hh, unsigned int* px) { if (gCapsulaOk) gCapsula.copriFoto(h, v, w, hh, px); }
-
-struct FotoPrima { genio::Immagine img; double t = 0; };
-static std::unordered_map<HWND, FotoPrima> gFotoPrimaZoom;
-
-static void fotoPrimaDiZoom(HWND h) {
-    if (!zoomAnimato() || animDi(h)) return;
-    InfoFinestra* i = traccia(h);
-    if (!i || !leggiRettangoli(h, *i)) return;
-    FotoPrima& f = gFotoPrimaZoom[h];
-    f.img.libera();
-    auto rit = gGenio.ritocco; gGenio.ritocco = copriTastiFoto;   // sulla foto solo il fondo; la pillola e' la capsula vera
-    const double t1 = ora();
-    const bool ok = gGenio.cattura(h, i->visibile, f.img);
-    gGenio.ritocco = rit;
-    logf("ingrandimento: foto di prima %s in %.1f ms", ok ? "fatta" : "non riuscita", (ora() - t1) * 1000);
-    if (ok) f.t = ora(); else gFotoPrimaZoom.erase(h);
-}
-
-// foto di prima mai usate (la finestra non si e' ingrandita, o si e' chiusa): vale 1 s, poi via dalla GPU
-static void pulisciFotoPrima() {
-    const double t = ora();
-    for (auto it = gFotoPrimaZoom.begin(); it != gFotoPrimaZoom.end();) {
-        if (t - it->second.t > 1.0 || !IsWindow(it->first)) { it->second.img.libera(); it = gFotoPrimaZoom.erase(it); }
-        else ++it;
-    }
-}
-
 // Ingrandita o ripristinata (le animazioni native sono spente: e' gia' al nuovo posto). Come per riduzione e
 // ripristino dal dock: la finestra vera resta trasparente, al suo posto la sua miniatura viva va con una molla dal
 // vecchio rettangolo al nuovo, e la capsula sta attaccata al suo angolo fotogramma per fotogramma
 static void avviaZoom(HWND h, const RECT& da, InfoFinestra& i) {
-    auto no = [&](const char* perche) { logf("ingrandimento senza animazione %p: %s", h, perche); if (gCapsulaOk) gCapsula.fineSegui(h); };
+    auto no = [&](const char* perche) { logf("ingrandimento senza animazione %p: %s", h, perche); };
     if (!zoomAnimato()) return no("animazioni spente");
     if (animDi(h) || gelatinaDi(h) || aperturaDi(h)) return no("gia' animata");
     if (h == gDaIngrandita || h == gInSpostamento) return no("trascinata");
@@ -1907,12 +1846,6 @@ static void avviaZoom(HWND h, const RECT& da, InfoFinestra& i) {
     n.t0 = n.tFase = tempoProssimoFotogramma();
     n.ampiezza = (double)distanzaMassima(da, i.visibile);
     n.sorgente = sorgenteDa(i);
-    // foto di prima fatta appena adesso (tasto della capsula): passa all'animazione
-    if (auto fp = gFotoPrimaZoom.find(h); fp != gFotoPrimaZoom.end()) {
-        if (ora() - fp->second.t < 1.0) { n.fotoPrima = fp->second.img; fp->second.img = genio::Immagine{}; }
-        fp->second.img.libera();
-        gFotoPrimaZoom.erase(fp);
-    }
     // senza foto di prima, mentre si fa quella nuova la copia viva della finestra sta in una finestrella ferma
     // alla vecchia misura; con la foto di prima la disegna subito la GPU
     if (!n.fotoPrima.srv) {
@@ -1923,8 +1856,6 @@ static void avviaZoom(HWND h, const RECT& da, InfoFinestra& i) {
     }
     gAnim.push_back(n);
     if (!rendiLayered(h, 0)) { annullaAnimDi(h); return no("trasparenza rifiutata"); }
-    if (gAngoliOk) gAngoli.nascondiPer(h);
-    if (gCapsulaOk) gCapsula.segui(h, da, 0);
     logf("ingrandimento animato %p (%s)", h, i.zoom ? "ingrandita" : "ripristinata");
 }
 
@@ -1943,23 +1874,15 @@ static void CALLBACK suEvento(HWINEVENTHOOK, DWORD ev, HWND h, LONG obj, LONG fi
 static void gestisciEvento(DWORD ev, HWND h) {
     switch (ev) {
         case EVENT_SYSTEM_MOVESIZESTART:
-            if (gCapsulaOk) gCapsula.spostamento(h, true);
-            if (gAngoliOk) gAngoli.spostamento(h, true);
             suInizioSpostamento(h); break;
         case EVENT_SYSTEM_MOVESIZEEND:
-            if (gCapsulaOk) gCapsula.spostamento(h, false);
-            if (gAngoliOk) gAngoli.spostamento(h, false);
             suFineSpostamento(h); break;
         case EVENT_SYSTEM_CAPTURESTART:  suCattura(h); break;
         case EVENT_SYSTEM_CAPTUREEND:    suFineCattura(h); break;
         case EVENT_SYSTEM_MINIMIZESTART:
-            if (gCapsulaOk) gCapsula.cambiata(h);
-            if (gAngoliOk) gAngoli.cambiata(h);
             suRiduci(h); break;
         case EVENT_SYSTEM_MINIMIZEEND:
             logf("ripristina %p", h); suRipristina(h);
-            if (gCapsulaOk) gCapsula.programma(700);
-            if (gAngoliOk) gAngoli.programma(700);
             break;
         case EVENT_OBJECT_SHOW: {
             // ricomparsa senza passare dal ripristino (per esempio un'app riaperta dall'area di notifica): mai trasparente
@@ -1980,8 +1903,6 @@ static void gestisciEvento(DWORD ev, HWND h) {
         }
         case EVENT_SYSTEM_FOREGROUND:
             traccia(h);
-            if (gCapsulaOk) gCapsula.programma();   // cambiato il primo piano o comparsa una finestra
-            if (gAngoliOk) gAngoli.programma();
             if (gDockOk && GetAncestor(h, GA_ROOT) == h) { gDock.segnaCambiamento(); gDock.controllaFinestre(); }
             break;
         case EVENT_OBJECT_HIDE:
@@ -2000,8 +1921,6 @@ static void gestisciEvento(DWORD ev, HWND h) {
             if (h == gTrascinoApp) gTrascinoApp = nullptr;
             if (h == gInSpostamento) gInSpostamento = nullptr;
             for (auto it = gGelatine.begin(); it != gGelatine.end();) if (it->hwnd == h) { it->foto.libera(); it = gGelatine.erase(it); } else ++it;
-            if (gCapsulaOk) gCapsula.distrutta(h);
-            if (gAngoliOk) gAngoli.distrutta(h);
             if (gDockOk && GetAncestor(h, GA_ROOT) == h) gDock.segnaCambiamento();
             break;
         case EVENT_OBJECT_LOCATIONCHANGE: {
@@ -2011,7 +1930,6 @@ static void gestisciEvento(DWORD ev, HWND h) {
                 // poi tasti e gelatina (prima la foto avrebbe ancora il contenuto impaginato da ingrandita, spostato)
                 if (gSganciata == 0) gSganciata = ora();
                 else if (ora() - gSganciata > 0.15) {
-                    if (gCapsulaOk) gCapsula.rimisura(h);
                     suInizioSpostamento(h);
                     if (gelatinaDi(h) || ora() - gSganciata > 1.0) { logf("staccata da ingrandita %p gelatina=%d", h, (int)(gelatinaDi(h) != nullptr)); gDaIngrandita = nullptr; }
                 }
@@ -2032,14 +1950,6 @@ static void gestisciEvento(DWORD ev, HWND h) {
                 }
                 gUltimoPosto[h] = w;
             }
-            // mentre si vede la foto della gelatina la capsula la gestisce lei; nell'ultimo secondo di attesa no
-            {
-                const Gelatina* g = gelatinaDi(h);
-                if (!g || g->fase >= 4) {
-                    if (gCapsulaOk) gCapsula.cambiata(h);
-                    if (gAngoliOk) gAngoli.cambiata(h);
-                }
-            }
             auto it = gInfo.find(h);
             if (it == gInfo.end()) break;
             if (gLog && animDi(h)) {
@@ -2052,8 +1962,7 @@ static void gestisciEvento(DWORD ev, HWND h) {
             if (validaPrima && zoomPrima != it->second.zoom) {
                 Anim* z = animDi(h);
                 if (!z) avviaZoom(h, visPrima, it->second);
-                else if (!z->zoom) { if (gCapsulaOk) gCapsula.fineSegui(h); }   // gia' in un'altra animazione: capsula normale
-                else {
+                else if (z->zoom) {
                     // cambiata di nuovo mentre si anima: si riparte (foto nuova) dalla forma che ha adesso
                     const RECT daQui = z->fase == 0 && z->passiZ >= 3 ? z->attuale : (z->fase == 0 ? z->da : visPrima);
                     annullaAnimDi(h); avviaZoom(h, daQui, it->second);
@@ -2119,7 +2028,6 @@ static void impostaPausa(bool p) {
         gFoto.clear();
     }
     aggiornaTransizioni();
-    if (gCapsulaOk) gCapsula.zoomEsterno = zoomAnimato();
     wcscpy(gIcona.szTip, p ? L"FluidWin (in pausa)" : L"FluidWin");
     Shell_NotifyIconW(NIM_MODIFY, &gIcona);
 }
@@ -2254,7 +2162,7 @@ static impostazioni::Finestra gImpostazioni;
 static void apriImpostazioni() {
     const int rw = raggio::windhawk();
     gImpostazioni.infoAngoli = rw > 0 ? L"Angoli delle finestre: " + std::to_wstring(rw) + L" px (dalla mod di Windhawk)"
-                                      : L"Angoli delle finestre: " + std::to_wstring(RAGGIO_ANGOLI) + L" px (simulati da FluidWin)";
+                                      : L"Angoli delle finestre: quelli di Windows (piu' tondi con la mod di Windhawk)";
     gImpostazioni.apri();
 }
 
@@ -2264,16 +2172,10 @@ static void applicaImpostazioni() {
     gTastiVolume = v.volume && gOsdOk;
     gTastoPanoramica = v.winTab;
     gTastoRicerca = v.winS;
-    if (gCapsulaOk) {
-        if (gCapsula.accesa() != v.capsula) gCapsula.spegni(!v.capsula);
-        const float r = impostazioni::raggioTasto();
-        if (r != gCapsula.raggioTasto) { gCapsula.raggioTasto = r; gCapsula.rimisuraTutte(); }
-    }
     gBanner.accendi(v.banner);
     aggiornaTransizioni();
-    if (gCapsulaOk) gCapsula.zoomEsterno = zoomAnimato();
-    logf("impostazioni: capsula=%d gelatina=%d genio=%d volume=%d angolo=%d wintab=%d wins=%d banner=%d misura=%d",
-         v.capsula, v.gelatina, v.genio, v.volume, v.angolo, v.winTab, v.winS, v.banner, v.capsulaMisura);
+    logf("impostazioni: gelatina=%d genio=%d volume=%d angolo=%d wintab=%d wins=%d banner=%d",
+         v.gelatina, v.genio, v.volume, v.angolo, v.winTab, v.winS, v.banner);
 }
 
 // Angolo in alto a sinistra dello schermo principale: col mouse fermo li' (e nessun tasto premuto) si apre la
@@ -2378,7 +2280,6 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             if (w == 7) {
                 controllaAngolo();
                 if (!gChiusure.empty()) pulisciChiusure();
-                if (!gFotoPrimaZoom.empty()) pulisciFotoPrima();
                 // fine di un trascinamento fatto dall'app: tasto sinistro rilasciato
                 if (gTrascinoApp && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) { HWND f = gTrascinoApp; gTrascinoApp = nullptr; suFineSpostamento(f); }
                 // fine del trascinamento di Windows mai arrivata (finestra chiusa, evento perso): dopo 2 s col tasto su si dimentica
@@ -2408,19 +2309,13 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 gTickBarra = (fuocoSullaBarra() && !PtInRect(&rb, pt)) ? gTickBarra + 1 : 0;
                 if (gTickBarra >= 3) { logf("fuoco rimasto sulla barra di Windows: torno all'app"); attivaFinestraInCima(); gTickBarra = 0; }
             }
-            { const double tc0 = ora();
-            if (gCapsulaOk) {
+            if (gLog) {
                 static bool prima = false; const bool si = schermoInteroAttivo();
                 if (si != prima) {
-                    prima = si; gCapsula.sospendi(si); if (gAngoliOk) gAngoli.sospendi(si);
-                    if (gLog) { wchar_t k[64] = L""; GetClassNameW(GetForegroundWindow(), k, 64);
-                                logf("schermo intero %s (primo piano %ls)%s%s", si ? "si': dock e tasti nascosti" : "finito", k, si ? ": " : "", si ? gPercheSchermoIntero : ""); }
+                    prima = si; wchar_t k[64] = L""; GetClassNameW(GetForegroundWindow(), k, 64);
+                    logf("schermo intero %s (primo piano %ls)%s%s", si ? "si': dock nascosto" : "finito", k, si ? ": " : "", si ? gPercheSchermoIntero : "");
                 }
-                gCapsula.controllo();
-                if (gAngoliOk) gAngoli.controllo();
             }
-            // quale parte del controllo periodico rallenta (un controllo lento ritarda anche le animazioni)
-            if (gLog && ora() - tc0 > 0.012) logf("controllo lento: capsula e angoli %.1f ms", (ora() - tc0) * 1000); }
             // GPU persa anche senza niente da disegnare (si scopre al primo Present, ma si controlla anche qui)
             if ((gGenioOk && gGenio.gpuPersa()) || (gDockOk && gDock.gpuPersa())) riavvia("la GPU e' stata persa");
             controlloSicurezza(); if (gDockOk) { const bool si = schermoInteroAttivo(); gLauncherTasto = !si; gDock.schermoIntero(si); gDock.controllaFinestre(); gDock.timer(); if (gLog) logf("dock: mosse=%ld fotogrammi=%ld lente=%.2f", gDock.diagMosse, gDock.diagFotogrammi, gDock.diagLente()); } return 0;
@@ -2562,32 +2457,12 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     wcscpy(gIcona.szTip, L"FluidWin");
     Shell_NotifyIconW(NIM_ADD, &gIcona);
 
-    gCapsula.riduci = riduciDalDock;
-    gCapsula.chiudendo = preparaChiusura;
-    gCapsula.ingrandendo = fotoPrimaDiZoom;
-    gCapsula.fotoPronta = [](HWND h) { return gFoto.count(h) > 0; };
-    gCapsula.idonea = finestraApp;
-    gCapsula.registro = [](const char* s) { logf("%s", s); };
-    gCapsulaOk = gCapsula.inizializza(inst);
-    // le foto di gelatina e genio hanno gia' la capsula disegnata sopra: i tasti nuovi non spariscono mai
-    if (gCapsulaOk) gGenio.ritocco = [](HWND h, const RECT& v, int w, int hh, unsigned int* px) { gCapsula.sopraFoto(h, v, w, hh, px); };
     gGenio.scoperta = scopertaSulloSchermo;
-    if (gCapsulaOk) gCapsula.programma();
-    logf("capsula dei tasti disponibile: %d", (int)gCapsulaOk);
-    // angoli piu' tondi: le finestre, la capsula, la gelatina e il genio con lo stesso raggio. Con la mod di
-    // Windhawk gli angoli veri li arrotonda gia' DWM e si segue il suo raggio; senza, li simula angoli.h
+    // gelatina e genio con gli angoli delle finestre: quelli della mod di Windhawk, se c'e', altrimenti quelli di Windows
     const int rw = raggio::windhawk(), ra = rw > 0 ? rw : RAGGIO_ANGOLI;
-    gCapsula.raggioAngoli = (float)ra;
     gGenio.raggioAngoli = ra * GetDpiForSystem() / 96.0f;   // (riserva: ogni foto usa i DPI della sua finestra, raggioDi)
     gRaggioBase = ra;
-    if (rw == 0) {
-        gAngoli.idonea = finestraApp;
-        gAngoli.registro = [](const char* s) { logf("%s", s); };
-        gAngoli.raggio = RAGGIO_ANGOLI;
-        gAngoliOk = gAngoli.inizializza(inst);
-        if (gAngoliOk) gAngoli.programma();
-    }
-    logf("raggio angoli %d (Windhawk %d), angoli simulati: %d", ra, rw, (int)gAngoliOk);
+    logf("raggio angoli %d (Windhawk %d)", ra, rw);
 
     // indicatore del volume, panoramica, ricerca, banner e impostazioni
     impostazioni::carica();
@@ -2633,9 +2508,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
         SetWinEventHook(EVENT_OBJECT_CREATE, EVENT_OBJECT_HIDE, nullptr, suEvento, 0, 0, fl),
         SetWinEventHook(EVENT_OBJECT_LOCATIONCHANGE, EVENT_OBJECT_LOCATIONCHANGE, nullptr, suEvento, 0, 0, fl),
         SetWinEventHook(EVENT_OBJECT_UNCLOAKED, EVENT_OBJECT_UNCLOAKED, nullptr, suEvento, 0, 0, fl),   // aperture delle app di Windows
-        // ordine delle finestre cambiato (un clic riporta in cima la finestra, sopra la sua capsula)
-        SetWinEventHook(EVENT_OBJECT_REORDER, EVENT_OBJECT_REORDER, nullptr,
-                        [](HWINEVENTHOOK, DWORD, HWND, LONG, LONG, DWORD, DWORD) { if (gCapsulaOk) gCapsula.riordina(); }, 0, 0, fl),
     };
 
     // i menu e la panoramica hanno un loro ciclo dei messaggi: mentre sono aperti fanno avanzare loro le animazioni
@@ -2669,8 +2541,6 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     for (auto h : hooks) if (h) UnhookWinEvent(h);
     if (gThreadTasti) PostThreadMessageW(gThreadTasti, WM_QUIT, 0, 0);
     impostaPausa(true);
-    if (gCapsulaOk) gCapsula.chiudi();
-    if (gAngoliOk) gAngoli.chiudi();
     if (gDockOk) gDock.chiudi();
     banner::ripristinaBannerWindows();   // senza FluidWin tornano i banner di Windows (alla prossima apertura si rispengono)
     if (gOsdOk) gOsd.chiudi();

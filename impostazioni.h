@@ -9,7 +9,6 @@
 namespace impostazioni {
 
 struct Valori {
-    bool capsula = true;          // tasti delle finestre nella capsula di vetro
     bool gelatina = true;         // finestre "di gelatina" quando si trascinano
     bool genio = true;            // riduzione e ripristino con l'effetto genio
     bool chiusura = true;         // finestre che si rimpiccioliscono e svaniscono quando si chiudono
@@ -20,7 +19,6 @@ struct Valori {
     bool winTab = true;           // Win+Tab apre la panoramica di FluidWin
     bool winS = true;             // Alt+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
-    int capsulaMisura = 1;        // 0 piccola, 1 media, 2 grande
 };
 
 inline Valori& valori() { static Valori v; return v; }
@@ -39,23 +37,22 @@ inline void scriviDword(const wchar_t* nome, DWORD v) {
 
 inline void carica() {
     Valori& v = valori();
-    v.capsula = leggiDword(L"Capsula", 1); v.gelatina = leggiDword(L"Gelatina", 1); v.genio = leggiDword(L"Genio", 1); v.chiusura = leggiDword(L"Chiusura", 1);
+    v.gelatina = leggiDword(L"Gelatina", 1); v.genio = leggiDword(L"Genio", 1); v.chiusura = leggiDword(L"Chiusura", 1);
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
     v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0);
-    v.capsulaMisura = (int)std::min<DWORD>(2, leggiDword(L"CapsulaMisura", 1));
+    // la capsula dei tasti non c'e' piu' (1.1.1): via i suoi valori rimasti dalle versioni prima
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"Capsula");
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"CapsulaMisura");
 }
 
 inline void salva() {
     const Valori& v = valori();
-    scriviDword(L"Capsula", v.capsula); scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
+    scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
     scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
-    scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"CapsulaMisura", (DWORD)v.capsulaMisura);
+    scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner);
 }
-
-// raggio dei cerchi della capsula (px a 96 dpi)
-inline float raggioTasto() { static const float r[3] = {9.5f, 11.0f, 12.5f}; return r[std::clamp(valori().capsulaMisura, 0, 2)]; }
 
 // ---- la finestra ----
 class Finestra {
@@ -133,7 +130,6 @@ public:
 private:
     struct Voce { const wchar_t* nome; const wchar_t* spiega; bool Valori::*campo; };
     const std::vector<Voce> voci = {
-        {L"Capsula dei tasti", L"Riduci, ingrandisci e chiudi in una capsula di vetro", &Valori::capsula},
         {L"Finestre di gelatina", L"Le finestre si deformano mentre le trascini", &Valori::gelatina},
         {L"Effetto genio", L"Riduzione e ripristino che entrano ed escono dal dock", &Valori::genio},
         {L"Animazione di chiusura", L"La finestra si rimpicciolisce e svanisce sul posto", &Valori::chiusura},
@@ -152,13 +148,13 @@ private:
     ULONGLONG t0 = 0;
     double k = 0;
     std::vector<double> anim;
-    // zone: 0..n-1 le voci, 100+i la misura della capsula, 200 chiudi
+    // zone: 0..n-1 le voci, 200 chiudi
     struct Zona { D2D1_RECT_F r; int id; };
     std::vector<Zona> zone;
 
     int colonne = 1;
     int righe() const { return (int)((voci.size() + colonne - 1) / colonne); }
-    float altezza() const { return 76 + righe() * 58.0f + 40 + 64 + 52; }
+    float altezza() const { return 76 + righe() * 58.0f + 64; }
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
     int zonaIn(float x, float y) const {
@@ -169,8 +165,7 @@ private:
     void clic(int id) {
         if (id < 0) return;
         if (id == 200) { chiudi(); return; }
-        if (id >= 100) valori().capsulaMisura = id - 100;
-        else if (id < (int)voci.size()) { bool& b = valori().*(voci[id].campo); b = !b; }
+        if (id < (int)voci.size()) { bool& b = valori().*(voci[id].campo); b = !b; }
         salva();
         if (cambiato) cambiato();
         vetro::battito(v.fin, 1);
@@ -213,29 +208,7 @@ private:
             levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i]);
         }
         y += nr * 58 * d;
-        // misura della capsula: tre scelte
-        y += 8 * d;
-        v.testo(L"MISURA DELLA CAPSULA", fSezione, {28 * d, y, W - 28 * d, y + 22 * d}, tenue);
-        y += 26 * d;
-        {
-            const float x0 = 24 * d, larg = W - 48 * d, h = 34 * d;
-            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(0, 0, 0, 0.06f));
-            v.rt->FillRoundedRectangle({{x0, y, x0 + larg, y + h}, h / 2, h / 2}, v.pen);
-            const wchar_t* nomi[3] = {L"Piccola", L"Media", L"Grande"};
-            for (int i = 0; i < 3; i++) {
-                const D2D1_RECT_F r = {x0 + larg * i / 3 + 3 * d, y + 3 * d, x0 + larg * (i + 1) / 3 - 3 * d, y + h - 3 * d};
-                zone.push_back({r, 100 + i});
-                if (valori().capsulaMisura == i) {
-                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(1, 1, 1, 0.95f));
-                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
-                } else if (sopra == 100 + i) {
-                    v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
-                    v.rt->FillRoundedRectangle({r, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
-                }
-                v.testo(nomi[i], fCentro, r, ink);
-            }
-            y += h + 18 * d;
-        }
+        y += 14 * d;
         v.testo(infoAngoli, fSotto, {28 * d, y, W - 28 * d, y + 20 * d}, tenue);
         v.finisci();
     }

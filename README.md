@@ -12,7 +12,6 @@ The result is an app that sits on top of Windows 11 and changes how it looks and
 - a **control center** where everything opens inside the same glass panel: background apps, notifications,
   weather and news;
 - the time and date in a small **notch** at the top of the screen;
-- new round **window buttons** that sit exactly where the original ones were;
 - windows that **minimize into the dock** with a genie effect, and come back out of it;
 - windows that **open and close** with a little bounce, and turn "jelly-like" while you drag them (with their content
   still alive);

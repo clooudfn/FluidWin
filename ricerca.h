@@ -516,7 +516,7 @@ private:
                 {L"Accessibilità", L"testo grande contrasto narratore", L"ms-settings:easeofaccess"},
                 {L"Pannello di controllo", L"classico", L"control"},
                 {L"Gestione attività", L"processi task manager", L"taskmgr"},
-                {L"Impostazioni di FluidWin", L"dock capsula gelatina genio panoramica", L"*fluidwin"},
+                {L"Impostazioni di FluidWin", L"dock gelatina genio panoramica", L"*fluidwin"},
             };
             std::vector<Risultato> v;
             for (auto& x : t) v.push_back({T_IMPOSTAZIONE, x[0], x[1], x[2], L""});
