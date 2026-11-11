@@ -184,7 +184,8 @@ private:
     ULONGLONG secondoTimer = 0; UINT versioneSensori = 0;
     bool segnoSilenzio = false, segnoSveglio = false;   // lunetta e tazzina accanto all'ora (comodita.h)
     double tSegnoSilenzio = -10, tSegnoSveglio = -10;   // quando sono comparse o sparite (dissolvenza)
-    float alfaSegno(bool acceso, double t0) const { const float k = (float)std::clamp((adesso() - t0) / 0.3, 0.0, 1.0); const float e = k * k * (3 - 2 * k); return acceso ? e : 1 - e; }
+    // (in uscita piu' in fretta: il notch intanto si stringe e il segno non deve arrivare sopra l'ora)
+    float alfaSegno(bool acceso, double t0) const { const float k = (float)std::clamp((adesso() - t0) / (acceso ? 0.3 : 0.14), 0.0, 1.0); const float e = k * k * (3 - 2 * k); return acceso ? e : 1 - e; }
     bool notificaAttiva = false; double fineNotifica = 0;
     std::wstring nApp, nTitolo, nTesto; std::vector<UINT> nPx; int nW = 0, nH = 0; bool iconaNuova = false;
     musica::Lettore lettore; musica::Brano brano; UINT versioneBrano = 0xFFFFFFFF; bool copertinaNuova = false;
@@ -648,16 +649,19 @@ private:
             case ORA:
                 ora(L, w, h, a);
                 if (!scaffale.empty()) segnoScaffale(L + 18 * d, h / 2, a);
-                {   // tazzina e luna: compaiono e spariscono con una dissolvenza e crescendo un poco
+                {   // tazzina e luna: compaiono e spariscono con una dissolvenza e crescendo un poco. Stanno attaccate ai
+                    // bordi VERI del notch (che con la molla si allarga o si stringe), non a quelli finali: prima, spegnendone
+                    // una, saltava subito verso il centro e poi spariva
                     const float as = alfaSegno(segnoSveglio, tSegnoSveglio), al = alfaSegno(segnoSilenzio, tSegnoSilenzio);
+                    const float Lv = (W2 - (float)mw.x) / 2, Rv = Lv + (float)mw.x;
                     if (as > 0.01f) {
-                        const D2D1_POINT_2F c = {L + (scaffale.empty() ? 17 : 46) * d, h / 2};
+                        const D2D1_POINT_2F c = {Lv + (scaffale.empty() ? 17 : 46) * d, h / 2};
                         rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * as, 0.6f + 0.4f * as, c));
                         tazzina(c.x, c.y, 0.8f * a * as);
                         rt->SetTransform(D2D1::Matrix3x2F::Identity());
                     }
                     if (al > 0.01f) {
-                        const D2D1_POINT_2F c = {L + w - 17 * d, h / 2};
+                        const D2D1_POINT_2F c = {Rv - 17 * d, h / 2};
                         rt->SetTransform(D2D1::Matrix3x2F::Scale(0.6f + 0.4f * al, 0.6f + 0.4f * al, c));
                         lunetta(c.x, c.y, 0.8f * a * al);
                         rt->SetTransform(D2D1::Matrix3x2F::Identity());

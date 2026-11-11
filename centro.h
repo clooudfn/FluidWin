@@ -355,8 +355,11 @@ inline auto Motore::renderPannello() -> bool {
         }
         // 2) il pulsante che cresce: da cerchio (raggio del pulsante) al rettangolo del pannello
         const float g = liscio(tratto01(u, 0.0f, 0.62f));
-        const float r0 = (controlloCompatto() ? 22 : 26) * dpi, rf = std::max(6.0f, raggio::vetro() - 6.0f) * dpi;
-        const D2D1_RECT_F da = {o.x - r0, o.y - r0, o.x + r0, o.y + r0}, a2 = {6 * dpi, 6 * dpi, PW - 6 * dpi, hv - 6 * dpi};
+        // da dove nasce: il pulsante tondo toccato, oppure (mixer) la riga "Uscita", che si allarga senza simbolo
+        const bool daRiga = interna == P_MIXER;
+        const float r0 = daRiga ? 6 * dpi : (controlloCompatto() ? 22 : 26) * dpi, rf = std::max(6.0f, raggio::vetro() - 6.0f) * dpi;
+        const D2D1_RECT_F da = daRiga ? D2D1_RECT_F{8 * dpi, o.y - 18 * dpi, PW - 8 * dpi, o.y + 18 * dpi} : D2D1_RECT_F{o.x - r0, o.y - r0, o.x + r0, o.y + r0};
+        const D2D1_RECT_F a2 = {6 * dpi, 6 * dpi, PW - 6 * dpi, hv - 6 * dpi};
         const D2D1_RECT_F rc = {da.left + (a2.left - da.left) * g, da.top + (a2.top - da.top) * g, da.right + (a2.right - da.right) * g, da.bottom + (a2.bottom - da.bottom) * g};
         const float rr = r0 + (rf - r0) * g;
         const float aForma = 1 - tratto01(u, 0.55f, 1.0f);   // la forma si scioglie mentre la vista nuova e' gia' li'
@@ -364,7 +367,7 @@ inline auto Motore::renderPannello() -> bool {
             pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * aForma) : D2D1::ColorF(0, 0, 0, 0.06f * aForma));
             dc->FillRoundedRectangle({rc, rr, rr}, pennello);
             // il simbolo del pulsante, al centro della forma: cresce e svanisce
-            const float aSimbolo = 1 - tratto01(u, 0.0f, 0.42f);
+            const float aSimbolo = daRiga ? 0.0f : 1 - tratto01(u, 0.0f, 0.42f);
             if (aSimbolo > 0.01f) {
                 const D2D1_POINT_2F c = {(rc.left + rc.right) / 2, (rc.top + rc.bottom) / 2};
                 const float sc = 1 + 1.6f * g;
@@ -375,7 +378,6 @@ inline auto Motore::renderPannello() -> bool {
                 else if (interna == P_SFONDO) simboloFreccia(c.x, c.y);
                 else if (interna == P_NOTIFICHE) simboloCampana(c.x, c.y);
                 else if (interna == P_APPUNTI) simboloAppunti(c.x, c.y);
-                else if (interna == P_MIXER) simboloVolume(c.x, c.y);
                 baseVista = D2D1::Matrix3x2F::Identity();
                 dc->SetTransform(baseVista);
             }
