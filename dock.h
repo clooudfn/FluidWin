@@ -329,6 +329,10 @@ public:
         if (appDaAggiornare) { aggiornaApp(); dirty = true; }
         if (vetroDaRiposizionare) posizionaVetri();
         aggiornaStato(false);
+        // centro di controllo aperto: il tempo del timer e lo stato del microfono si aggiornano
+        if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro)) {
+            versioneSensoriCentro = sensori::Sensori::io().versione; pDirty = true;
+        }
         // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
         if (conteggioTimer == 6) leggiAppSfondo();
         if (conteggioTimer == 12 && tutteApp.empty()) leggiTutteApp();
@@ -1392,7 +1396,7 @@ private:
     IDWriteTextFormat* fmtNotizia = nullptr;
     enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
-                  A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO };
+                  A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO };
     sistema::Sistema sis;                // Wi-Fi, Bluetooth e luminosita' (letti e cambiati in un thread a parte)
     double temaK = -1;                   // simbolo del tema: 0 sole (chiaro) .. 1 luna (scuro), animato
     bool trascinaLum = false;
@@ -1544,6 +1548,8 @@ private:
         else if (a == A_TEMA) simboloTema(cx, cy);
         else if (a == A_SVEGLIO) simboloCaffe(cx, cy);
         else if (a == A_SILENZIO) simboloLuna(cx, cy);
+        else if (a == A_TIMER) simboloTimer(cx, cy);
+        else if (a == A_MICROFONO) simboloMicrofono(cx, cy, acceso);
         else simboloGoccia(cx, cy);
         pennello->SetColor(ink);
         scrivi(titolo, fmtVoce, {cx + 26 * dpi, cy - 18 * dpi, r.right - 8 * dpi, cy});
@@ -1565,6 +1571,11 @@ private:
     void simboloLuna(float cx, float cy);
 
     void simboloCaffe(float cx, float cy);
+
+    void simboloTimer(float cx, float cy);
+
+    void simboloMicrofono(float cx, float cy, bool acceso);
+    UINT versioneSensoriCentro = 0;   // per ridisegnare il riquadro del microfono quando cambia
 
     void simboloGoccia(float cx, float cy);
 

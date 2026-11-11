@@ -32,6 +32,7 @@
 #include "musica.h"
 #include "testi.h"
 #include "comodita.h"
+#include "sensori.h"
 
 namespace notch {
 
@@ -121,18 +122,19 @@ public:
         return true;
     }
 
-    // avviso breve (1,6 s): una puntina e un testo, per esempio "Sempre in primo piano"; false se il notch non si vede
-    bool avviso(const std::wstring& testo, bool acceso) {
+    // avviso breve (1,6 s, 2,5 per batteria e cuffie): un simbolo (sensori::Simbolo) e un testo, per esempio
+    // "Sempre in primo piano" o "AirPods · 80%"; valore: la batteria (-1 se non si sa). false se il notch non si vede
+    bool avviso(const std::wstring& testo, int simbolo, int valore, bool acceso) {
         if (!visibile) return false;
-        testoAvviso = testo; avvisoAcceso = acceso;
+        testoAvviso = testo; avvisoAcceso = acceso; simboloAvviso = simbolo; valoreAvviso = valore;
         larghezzaAvviso = fOra ? larghezza(testo, fPiccolo ? fPiccolo : fOra) : 160 * dpi;
-        fineAvviso = adesso() + 1.6;
+        fineAvviso = adesso() + (simbolo == sensori::S_PUNTINA ? 1.6 : 2.5);
         bersagli(); anima();
         return true;
     }
 
 private:
-    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO };
+    enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO, TIMER, SUONA };
 
     HWND fin = nullptr;
     bool acceso = false, visibile = false;
@@ -170,6 +172,8 @@ private:
     // contenuti
     float livello = 0, livelloVis = 0; bool muto = false; double fineVolume = 0;
     std::wstring testoAvviso; bool avvisoAcceso = false; double fineAvviso = 0; float larghezzaAvviso = 0;
+    int simboloAvviso = 0, valoreAvviso = -1;
+    ULONGLONG secondoTimer = 0; UINT versioneSensori = 0;
     bool segnoSilenzio = false, segnoSveglio = false;   // lunetta e tazzina accanto all'ora (comodita.h)
     bool notificaAttiva = false; double fineNotifica = 0;
     std::wstring nApp, nTitolo, nTesto; std::vector<UINT> nPx; int nW = 0, nH = 0; bool iconaNuova = false;
@@ -221,8 +225,10 @@ private:
         const double t = adesso();
         if (t < fineVolume) return VOLUME;
         if (t < fineAvviso) return AVVISO;
+        if (comodita::timerSuona()) return SUONA;
         if (notificaAttiva) return NOTIFICA;
         if (sopra && brano.c) return APERTO;
+        if (comodita::timerAttivo()) return TIMER;
         if (brano.c && brano.suona) return MUSICA;
         return ORA;
     }
@@ -235,6 +241,8 @@ private:
             case VOLUME:   w = 292 * d; h = 32 * d; R = 14 * d; break;
             case NOTIFICA: w = 372 * d; h = 78 * d; R = 26 * d; break;
             case AVVISO:   w = std::clamp(larghezzaAvviso + 76 * d, 220 * d, 372 * d); h = 32 * d; R = 14 * d; break;
+            case TIMER:    w = largoOra + 104 * d; h = 22 * d; R = 9 * d; break;
+            case SUONA:    w = 300 * d; h = 42 * d; R = 20 * d; break;
             default:       w = largoOra; h = 22 * d; R = 9 * d;
                            if (sopra) { w += 14 * d; h += 5 * d; R = 11 * d; }   // col mouse sopra si gonfia un poco
         }
@@ -293,6 +301,14 @@ private:
             brano = std::move(b);
             ridisegnare = true;
         }
+        // timer: si ridisegna a ogni secondo che cambia; suona: a ogni giro (il cerchio pulsa)
+        if (comodita::timerAttivo()) {
+            const ULONGLONG sec = (comodita::timerResto() + 999) / 1000;
+            if (sec != secondoTimer) { secondoTimer = sec; ridisegnare = true; }
+        }
+        if (scena == SUONA) ridisegnare = true;
+        // microfono e webcam (pallini fuori dal notch)
+        if (sensori::Sensori::io().versione != versioneSensori) { versioneSensori = sensori::Sensori::io().versione; ridisegnare = true; }
         // lunetta (non disturbare) e tazzina (tieni sveglio)
         if (comodita::silenzio() != segnoSilenzio || comodita::sveglio() != segnoSveglio) {
             segnoSilenzio = comodita::silenzio(); segnoSveglio = comodita::sveglio(); ridisegnare = true;
@@ -328,7 +344,7 @@ private:
         if (ps != pulsanteSopra || sx != sopraX || dentro != mouseDentro) { pulsanteSopra = ps; sopraX = sx; mouseDentro = dentro; ridisegnare = true; }
         // scadenze: volume e notifica (ferma finche' c'e' sopra il mouse)
         if (notificaAttiva && t >= fineNotifica) { if (dentro) fineNotifica = t + 1.5; else finisciNotifica(); }
-        cliccabile(modoAtt == NORMALE && (sopra || (scena == NOTIFICA && dentro)));
+        cliccabile(modoAtt == NORMALE && (sopra || (scena == NOTIFICA && dentro) || scena == SUONA));
         const int prima = scena;
         bersagli();
         if (scena != prima) ridisegnare = false;   // ci pensa l'animazione
@@ -364,6 +380,7 @@ private:
     }
 
     void clicca(int x, int y) {
+        if (scena == SUONA) { comodita::silenziaTimer(); bersagli(); return; }   // clic: la sveglia smette
         if (scena == NOTIFICA) {
             if (sullaX(x, y)) { if (chiudiNotifica) chiudiNotifica(); }
             else if (clicNotifica) clicNotifica();
@@ -526,6 +543,13 @@ private:
                 rt->PopLayer();
                 strato->Release();
             }
+            // pallini fuori dal notch, a destra, come su iPhone: arancione il microfono, verde la webcam
+            const sensori::Sensori& se = sensori::Sensori::io();
+            if (w < 330 * dpi) {
+                float px = x1 + f + 7 * dpi;
+                if (!se.micApp.empty()) { colore(1.0f, 0.62f, 0.04f, 1); rt->FillEllipse({{px, 6 * dpi}, 3.5f * dpi, 3.5f * dpi}, pen); px += 10 * dpi; }
+                if (!se.camApp.empty()) { colore(0.2f, 0.84f, 0.29f, 1); rt->FillEllipse({{px, 6 * dpi}, 3.5f * dpi, 3.5f * dpi}, pen); }
+            }
         }
         if (g) g->Release();
         if (rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) { libera(); return; }
@@ -578,7 +602,9 @@ private:
                 break;
             case AVVISO: {
                 const float cx = L + 24 * d, cy = h / 2;
-                puntina(cx, cy, a, avvisoAcceso);
+                if (simboloAvviso == sensori::S_BATTERIA) batteriaSimbolo(cx, cy, a, valoreAvviso, avvisoAcceso);
+                else if (simboloAvviso == sensori::S_CUFFIE) cuffie(cx, cy, a);
+                else puntina(cx, cy, a, avvisoAcceso);
                 scrivi(testoAvviso, fPiccolo, {L + 44 * d, 0, L + w - 18 * d, h}, a);
                 break;
             }
@@ -591,6 +617,24 @@ private:
                 break;
             }
             case APERTO: aperto(L, w, h, a); break;
+            case TIMER: {   // ora al centro, anello del timer a sinistra e il tempo che resta a destra, in arancio
+                ora(L, w, h, a);
+                anello(L + 20 * d, h / 2, 6.5f * d, (float)comodita::timerAvanzamento(), a);
+                colore(1.0f, 0.62f, 0.04f, a);
+                const std::wstring r = comodita::durata(comodita::timerResto());
+                rt->DrawText(r.c_str(), (UINT32)r.size(), fNumero, {L + w - 70 * d, 0, L + w - 14 * d, h}, pen, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                break;
+            }
+            case SUONA: {   // timer finito: cerchio arancio che pulsa
+                const float cx = L + 26 * d, cy = h / 2;
+                const float k = (float)(0.5 + 0.5 * std::sin(adesso() * 7));
+                colore(1.0f, 0.62f, 0.04f, a * (0.25f + 0.25f * k));
+                rt->FillEllipse({{cx, cy}, (11 + 3 * k) * d, (11 + 3 * k) * d}, pen);
+                anello(cx, cy, 7.5f * d, 1, a);
+                scrivi(testi::t(L"Timer finito", L"Timer done"), fTitolo, {L + 50 * d, 0, L + w - 110 * d, h}, a);
+                scrivi(testi::t(L"Clic per fermare", L"Click to stop"), fPiccolo, {L + w - 112 * d, 0, L + w - 16 * d, h}, 0.6f * a);
+                break;
+            }
             case VOLUME: volumeScena(L, w, h, a); break;
             case NOTIFICA: notificaScena(L, w, h, a); break;
         }
@@ -655,6 +699,51 @@ private:
             colore(0, 0, 0, a); rt->DrawLine({cx - 7 * d, cy - 7 * d}, {cx + 7 * d, cy + 7 * d}, pen, 3.2f * d);
             colore(1, 1, 1, a); rt->DrawLine({cx - 6 * d, cy - 6 * d}, {cx + 6 * d, cy + 6 * d}, pen, 1.4f * d);
         }
+    }
+
+    // anello del timer: grigio pieno, arancio la parte gia' passata (da mezzogiorno in senso orario)
+    void anello(float cx, float cy, float r, float k, float a) {
+        colore(1, 1, 1, 0.22f * a);
+        rt->DrawEllipse({{cx, cy}, r, r}, pen, 2.2f * dpi);
+        k = std::clamp(k, 0.0f, 1.0f);
+        colore(1.0f, 0.62f, 0.04f, a);
+        if (k >= 0.999f) { rt->DrawEllipse({{cx, cy}, r, r}, pen, 2.2f * dpi); return; }
+        if (k <= 0.001f) return;
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+        if (FAILED(fabbriche::d2d()->CreatePathGeometry(&g)) || FAILED(g->Open(&s))) { if (g) g->Release(); return; }
+        const float ang = k * 2 * 3.14159265f;
+        s->BeginFigure({cx, cy - r}, D2D1_FIGURE_BEGIN_HOLLOW);
+        s->AddArc(D2D1::ArcSegment({cx + r * std::sin(ang), cy - r * std::cos(ang)}, {r, r}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                   k > 0.5f ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+        s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
+        rt->DrawGeometry(g, pen, 2.2f * dpi); g->Release();
+    }
+
+    // batteria: contorno, riempimento (verde in carica, rosso sotto il 20%) e il polo
+    void batteriaSimbolo(float cx, float cy, float a, int pc, bool carica) {
+        const float d = dpi, w = 18 * d, h = 9 * d, x = cx - w / 2 - 1 * d, y = cy - h / 2;
+        colore(1, 1, 1, 0.55f * a);
+        rt->DrawRoundedRectangle({{x, y, x + w, y + h}, 2.5f * d, 2.5f * d}, pen, 1.2f * d);
+        rt->FillRoundedRectangle({{x + w + 1 * d, cy - 2 * d, x + w + 2.6f * d, cy + 2 * d}, 0.8f * d, 0.8f * d}, pen);
+        const float k = std::clamp(pc < 0 ? 0.5f : pc / 100.0f, 0.08f, 1.0f);
+        if (carica) colore(0.2f, 0.84f, 0.29f, a); else if (pc >= 0 && pc <= 20) colore(1.0f, 0.27f, 0.23f, a); else colore(1, 1, 1, a);
+        rt->FillRoundedRectangle({{x + 2 * d, y + 2 * d, x + 2 * d + (w - 4 * d) * k, y + h - 2 * d}, 1.2f * d, 1.2f * d}, pen);
+    }
+
+    // cuffie: archetto e due padiglioni
+    void cuffie(float cx, float cy, float a) {
+        const float d = dpi;
+        colore(1, 1, 1, a);
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(fabbriche::d2d()->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            s->BeginFigure({cx - 7 * d, cy + 2 * d}, D2D1_FIGURE_BEGIN_HOLLOW);
+            s->AddArc(D2D1::ArcSegment({cx + 7 * d, cy + 2 * d}, {7 * d, 7 * d}, 0, D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+            s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
+            rt->DrawGeometry(g, pen, 1.6f * d);
+        }
+        if (g) g->Release();
+        rt->FillRoundedRectangle({{cx - 8.5f * d, cy + 0.5f * d, cx - 4.5f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pen);
+        rt->FillRoundedRectangle({{cx + 4.5f * d, cy + 0.5f * d, cx + 8.5f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pen);
     }
 
     // nota musicale (al posto della copertina che manca)

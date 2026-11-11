@@ -593,7 +593,7 @@ static void primoPiano() {
     std::wstring testo = era ? testi::t(L"Non più in primo piano", L"No longer on top") : testi::t(L"Sempre in primo piano", L"Always on top");
     if (t[0]) testo += std::wstring(L" · ") + t;
     logf("sempre in primo piano: %s (%ls)", era ? "tolto" : "messo", c);
-    if (gDockOk) gDock.ilNotch().avviso(testo, !era);
+    if (gDockOk) gDock.ilNotch().avviso(testo, sensori::S_PUNTINA, -1, !era);
 }
 
 static void togliPrimoPiano() {
@@ -2415,7 +2415,17 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             // GPU persa anche senza niente da disegnare (si scopre al primo Present, ma si controlla anche qui)
             if ((gGenioOk && gGenio.gpuPersa()) || (gDockOk && gDock.gpuPersa())) riavvia("la GPU e' stata persa");
-            comodita::controlla();   // tieni sveglio e non disturbare scaduti
+            comodita::controlla();   // tieni sveglio, non disturbare e timer scaduti
+            sensori::Sensori::io().controlla();   // microfono, webcam, batteria, cuffie
+            if (gLog) {
+                static std::vector<std::wstring> micPrima, camPrima;
+                const sensori::Sensori& se = sensori::Sensori::io();
+                if (se.micApp != micPrima || se.camApp != camPrima) {
+                    micPrima = se.micApp; camPrima = se.camApp;
+                    std::wstring m, c; for (auto& x : micPrima) m += x + L" "; for (auto& x : camPrima) c += x + L" ";
+                    logf("microfono in uso: [%ls] webcam: [%ls]", m.c_str(), c.c_str());
+                }
+            }
             controlloSicurezza(); if (gDockOk) {
                 const bool si = schermoInteroAttivo(); gLauncherTasto = !si;
                 const int tipo = si ? (giocoASchermoIntero() ? 2 : 1) : 0;
@@ -2591,6 +2601,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gDock.ilNotch().chiudiNotifica = []() { gBanner.togliAttuale(); };
     gDock.ilNotch().notificaFinita = []() { gBanner.notchFinito(); };
     giochiNoti();   // (nel registro: quanti giochi conosce)
+    // batteria e cuffie Bluetooth: un avviso nel notch
+    sensori::Sensori::io().avviso = [](const std::wstring& t, int s, int v, bool a) {
+        logf("avviso: %ls", t.c_str());
+        if (gDockOk) gDock.ilNotch().avviso(t, s, v, a);
+    };
     gImpostazioni.cambiato = applicaImpostazioni;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
     gDock.impostazioni = apriImpostazioni;

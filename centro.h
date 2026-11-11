@@ -237,7 +237,7 @@ inline auto Motore::chiudiPannello() -> void {
     usa(s);
 }
 
-inline auto Motore::altezzaControllo() const -> float { return std::round((444 + (sis.luminosita >= 0 ? 52 : 0)) * dpi); }
+inline auto Motore::altezzaControllo() const -> float { return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi); }
 
 inline auto Motore::nascondiPannello() -> void {
     if (pannello) ShowWindow(pannello, SW_HIDE);
@@ -671,6 +671,19 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
                comodita::descrivi(comodita::stato().svegliaFino), scuro, ink);
     piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_SILENZIO, comodita::silenzio(), testi::t(L"Silenzioso", L"Silent"),
                comodita::descrivi(comodita::stato().silenzioFino), scuro, ink);
+    // timer e microfono (sensori.h): il clic apre un menu
+    y += 64 * dpi + 10 * dpi;
+    {
+        std::wstring st = testi::t(L"Spento", L"Off");
+        if (comodita::timerSuona()) st = testi::t(L"Finito", L"Done");
+        else if (comodita::timerAttivo()) st = comodita::durata(comodita::timerResto()) + testi::t(L" rimasti", L" left");
+        piastrella({m, y, m + mezzo, y + 64 * dpi}, A_TIMER, comodita::timerAttivo() || comodita::timerSuona(), L"Timer", st, scuro, ink);
+        const sensori::Sensori& se = sensori::Sensori::io();
+        std::wstring sm = !se.micC ? std::wstring(testi::t(L"Nessuno", L"None")) : se.micMuto ? std::wstring(testi::t(L"Muto", L"Muted"))
+                        : se.micApp.empty() ? std::wstring(testi::t(L"Non in uso", L"Not in use")) : se.micApp[0];
+        piastrella({m + mezzo + 10 * dpi, y, PW - m, y + 64 * dpi}, A_MICROFONO, !se.micApp.empty() || !se.camApp.empty(),
+                   testi::t(L"Microfono", L"Microphone"), sm, scuro, ink);
+    }
 
     // volume: capsula riempita di bianco come su iOS; si trascina, la rotella regola, l'altoparlante disattiva
     y += 64 * dpi + 14 * dpi;
@@ -874,6 +887,31 @@ inline auto Motore::simboloTema(float cx, float cy) -> void {
     }
     for (IUnknown* o : std::initializer_list<IUnknown*>{a, b, g}) if (o) o->Release();
     dc->SetTransform(baseVista);
+}
+
+// timer: quadrante con una lancetta e il pulsante in cima
+inline auto Motore::simboloTimer(float cx, float cy) -> void {
+    const float d = dpi;
+    dc->DrawEllipse({{cx, cy + 1 * d}, 7.5f * d, 7.5f * d}, pennello, 1.6f * d);
+    linea(0, 1, 0, -3.5f, cx, cy, 1.6f);
+    linea(0, 1, 3, 3, cx, cy, 1.6f);
+    linea(-2.5f, -9, 2.5f, -9, cx, cy, 1.6f);
+}
+
+// microfono: capsula, archetto e asta (rosso barrato se e' muto)
+inline auto Motore::simboloMicrofono(float cx, float cy, bool) -> void {
+    const float d = dpi;
+    dc->FillRoundedRectangle({{cx - 3.5f * d, cy - 9 * d, cx + 3.5f * d, cy + 2 * d}, 3.5f * d, 3.5f * d}, pennello);
+    ID2D1PathGeometry* g = nullptr;
+    if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {
+        ID2D1GeometrySink* s = nullptr; g->Open(&s);
+        s->BeginFigure({cx - 6.5f * d, cy - 1 * d}, D2D1_FIGURE_BEGIN_HOLLOW);
+        s->AddArc(D2D1::ArcSegment({cx + 6.5f * d, cy - 1 * d}, {6.5f * d, 6.5f * d}, 0, D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+        s->EndFigure(D2D1_FIGURE_END_OPEN); s->Close(); s->Release();
+        dc->DrawGeometry(g, pennello, 1.5f * d, tratto); g->Release();
+    }
+    linea(0, 5.5f, 0, 9, cx, cy, 1.5f);
+    if (sensori::Sensori::io().micMuto) linea(-7, -8, 7, 8, cx, cy, 1.6f);
 }
 
 // tazzina di caffe' (tieni sveglio): tazza, manico e un filo di vapore
@@ -1220,6 +1258,44 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             aggiornaTemaVetri(); dirty = true; pDirty = true;
             break;
         case A_FLUIDWIN:     chiudiPannello(); if (impostazioni) impostazioni(); break;
+        case A_TIMER: {
+            std::vector<menu::Voce> voci = {menu::titolo(L"Timer")};
+            const int minuti[] = {1, 3, 5, 10, 15, 25, 30, 45, 60};
+            for (int i = 0; i < 9; i++) {
+                wchar_t b[32]; swprintf(b, 32, minuti[i] == 60 ? testi::t(L"1 ora", L"1 hour") : testi::t(L"%d minuti", L"%d minutes"), minuti[i]);
+                if (minuti[i] == 1) wcscpy(b, testi::t(L"1 minuto", L"1 minute"));
+                voci.push_back(menu::voce(b, (UINT)(i + 1)));
+            }
+            if (comodita::timerAttivo() || comodita::timerSuona()) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Ferma il timer", L"Stop the timer"), 100)); }
+            POINT pt = {(LONG)e.r.left, (LONG)e.r.bottom}; ClientToScreen(pannello, &pt);
+            const UINT s = menuScheda(voci, pt, pannello);
+            if (s == 100) comodita::fermaTimer();
+            else if (s >= 1 && s <= 9) { comodita::avviaTimer(minuti[s - 1] * 60000ULL); if (registro) { char b[48]; snprintf(b, 48, "timer: %d min", minuti[s - 1]); scrivi(b); } }
+            pDirty = true;
+            break;
+        }
+        case A_MICROFONO: {   // chi usa microfono e webcam, muto del microfono, privacy
+            sensori::Sensori& se = sensori::Sensori::io();
+            auto elenco = [](const std::vector<std::wstring>& v) { std::wstring r; for (auto& x : v) r += (r.empty() ? L"" : L", ") + x; return r; };
+            std::vector<menu::Voce> voci = {menu::titolo(testi::t(L"Microfono e webcam", L"Microphone and camera"))};
+            auto riga = [&](const wchar_t* chi, const std::vector<std::wstring>& v) {
+                menu::Voce x = menu::voce(std::wstring(chi) + L": " + (v.empty() ? std::wstring(testi::t(L"non in uso", L"not in use")) : elenco(v)), 0);
+                x.disattivata = true; voci.push_back(x);
+            };
+            riga(testi::t(L"Microfono", L"Microphone"), se.micApp);
+            riga(L"Webcam", se.camApp);
+            voci.push_back(menu::separatore());
+            if (se.micC) voci.push_back(menu::voce(se.micMuto ? testi::t(L"Riattiva il microfono", L"Unmute the microphone") : testi::t(L"Silenzia il microfono", L"Mute the microphone"), 1));
+            voci.push_back(menu::voce(testi::t(L"Privacy del microfono", L"Microphone privacy"), 2));
+            voci.push_back(menu::voce(testi::t(L"Privacy della webcam", L"Camera privacy"), 3));
+            POINT pt = {(LONG)e.r.left, (LONG)e.r.bottom}; ClientToScreen(pannello, &pt);
+            const UINT s = menuScheda(voci, pt, pannello);
+            if (s == 1) se.muta(!se.micMuto);
+            else if (s == 2) { chiudiPannello(); apriPagina(L"ms-settings:privacy-microphone"); }
+            else if (s == 3) { chiudiPannello(); apriPagina(L"ms-settings:privacy-webcam"); }
+            pDirty = true;
+            break;
+        }
         case A_SVEGLIO:
         case A_SILENZIO: {   // durate in un menu
             const bool sv = e.azione == A_SVEGLIO;
