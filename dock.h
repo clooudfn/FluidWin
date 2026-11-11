@@ -1992,7 +1992,8 @@ private:
 
     // l'icona del centro di controllo: la stessa piastrella di vetro di "App", con i due interruttori di iOS (quello in
     // alto acceso, azzurro; quello in basso spento)
-    // cestino: stesso fondo dell'icona del centro di controllo, secchio con coperchio; pieno: fogli che spuntano.
+    // cestino: stesso fondo dell'icona del centro di controllo, secchio con coperchio (pieno o vuoto, uguale:
+    // l'utente non voleva i fogli che spuntavano).
     // Con dei file trascinati sopra il coperchio si alza un poco
     void disegnaIconaCestino(const D2D1_RECT_F& r, float alfa, bool scuro, bool sopraDrop) {
         const float d = r.right - r.left;
@@ -2003,11 +2004,6 @@ private:
         const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.9f * alfa) : D2D1::ColorF(0.25f, 0.25f, 0.3f, alfa);
         const float bw = d * 0.20f, top = cy - d * 0.12f, bot = cy + d * 0.27f, sp = std::max(1.2f, d * 0.035f);
-        if (cestinoPieno) {   // fogli
-            pennello->SetColor(scuro ? D2D1::ColorF(0.85f, 0.88f, 0.95f, alfa) : D2D1::ColorF(0.55f, 0.62f, 0.75f, alfa));
-            dc->FillRoundedRectangle({{cx - bw * 0.75f, top - d * 0.08f, cx + bw * 0.05f, top + d * 0.08f}, sp, sp}, pennello);
-            dc->FillRoundedRectangle({{cx - bw * 0.05f, top - d * 0.11f, cx + bw * 0.7f, top + d * 0.08f}, sp, sp}, pennello);
-        }
         pennello->SetColor(ink);
         ID2D1PathGeometry* g = nullptr;
         if (SUCCEEDED(f2d->CreatePathGeometry(&g))) {   // secchio un poco piu' stretto in basso

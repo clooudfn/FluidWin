@@ -2184,7 +2184,14 @@ static bool uiViva() { return GetTickCount64() - gBattito.load() < 1000; }
 // (SendInput) portano la firma FIRMA_DESTRO e il gancio li lascia passare. Gli altri clic "iniettati" si prendono:
 // i programmi dei mouse (Logitech G HUB e simili) rimandano cosi' TUTTI i clic veri (visto sul PC dell'utente).
 static const UINT WM_TASTO_DESTRO = WM_APP + 13;
-static const UINT WM_ALT_LASCIATO = WM_APP + 18;   // Alt lasciato dopo Alt+Tab (panoramica: si va sulla finestra scelta)
+static const UINT WM_ALT_TAB = WM_APP + 19;         // Tab con Alt premuto (wParam 1: con Maiusc; lParam 1: il primo)
+// Alt+Tab come il selettore di Windows: la panoramica compare solo se Alt resta premuto un attimo (gAltTabAttesa);
+// lasciandolo prima si va subito alla finestra. gAltTabPassi: i Tab premuti nell'attesa (Maiusc+Tab conta -1)
+static bool gAltTabAttesa = false, gAltTabLasciato = false;
+static int gAltTabPassi = 0;
+static const UINT TIMER_ALT_TAB = 14, ATTESA_ALT_TAB_MS = 180;
+static const UINT WM_ALT_LASCIATO = WM_APP + 18;
+static void altTabVeloce();   // Alt lasciato dopo Alt+Tab (panoramica: si va sulla finestra scelta)
 static const ULONG_PTR FIRMA_DESTRO = 0x464C5744;   // "FLWD": clic destro rimandato da FluidWin
 static std::atomic<bool> gMenuDestro{false};
 static bool gDestroPreso = false;
@@ -2262,11 +2269,8 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
             // rilasciato da solo aprirebbe i menu delle app. Con un'app a schermo intero (un gioco) resta il selettore
             // di Windows. (Con Ctrl+Alt+Tab lo stesso: ha Alt premuto)
             if (!gWinGiu && gTastoPanoramica && k->vkCode == VK_TAB && (gAltMaschera || (viva && gLauncherTasto)) && ((k->flags & LLKHF_ALTDOWN) || gAltMaschera)) {
-                if (giu) {
-                    if (!gAltMaschera) PostMessageW(gMessaggi, WM_PANORAMICA, 1, 0);
-                    else if (HWND p = FindWindowW(L"FluidWin.Panoramica", nullptr); p && IsWindowVisible(p))
-                        PostMessageW(p, WM_KEYDOWN, (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? VK_LEFT : VK_TAB, 0);
-                }
+                // (ogni Tab va al thread principale: la panoramica puo' non essere ancora aperta)
+                if (giu) PostMessageW(gMessaggi, WM_ALT_TAB, (GetAsyncKeyState(VK_SHIFT) & 0x8000) ? 1 : 0, gAltMaschera ? 0 : 1);
                 gAltMaschera = true;
                 return 1;
             }
@@ -2347,6 +2351,13 @@ static DWORD WINAPI threadTasti(LPVOID) {
 static osd::Indicatore gOsd;
 static bool gOsdOk = false;
 static panoramica::Panoramica gPanoramica;
+
+// Alt+Tab veloce (Alt lasciato prima che compaia la panoramica): subito alla finestra
+static void altTabVeloce() {
+    const HWND h = gPanoramica.vaiDiretta(gAltTabPassi);
+    wchar_t c[64] = L""; if (h) GetClassNameW(h, c, 64);
+    logf("alt+tab veloce (%d): %p %ls", gAltTabPassi, h, c);
+}
 static ricerca::Ricerca gRicerca;
 static banner::Banner gBanner;
 static impostazioni::Finestra gImpostazioni;
@@ -2562,7 +2573,28 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             return 0;
         // (arriva anche mentre la panoramica e' aperta: il suo ciclo dei messaggi lo consegna qui)
-        case WM_ALT_LASCIATO: if (gPanoramica.aperta()) gPanoramica.scegliSelezionata(); return 0;
+        case WM_ALT_TAB:
+            if (gPanoramica.attiva()) {   // gia' aperta: Tab va avanti, Maiusc+Tab indietro
+                if (HWND p = FindWindowW(L"FluidWin.Panoramica", nullptr)) PostMessageW(p, WM_KEYDOWN, VK_TAB, w ? 1 : 0);
+                return 0;
+            }
+            if (!gAltTabAttesa) {
+                if (!l) return 0;   // (un Tab rimasto da un Alt+Tab gia' finito)
+                if (gRicerca.aperta()) gRicerca.chiudi(false);
+                gAltTabAttesa = true; gAltTabLasciato = false; gAltTabPassi = 0;
+                SetTimer(h, TIMER_ALT_TAB, ATTESA_ALT_TAB_MS, nullptr);
+            }
+            gAltTabPassi += w ? -1 : 1;
+            return 0;
+        case WM_ALT_LASCIATO:
+            if (gAltTabAttesa) {   // Alt+Tab veloce: subito alla finestra (o appena finisce di chiudersi la panoramica di prima)
+                gAltTabLasciato = true;
+                if (!gPanoramica.aperta()) {
+                    KillTimer(h, TIMER_ALT_TAB); gAltTabAttesa = false;
+                    altTabVeloce();
+                }
+            } else if (gPanoramica.aperta()) gPanoramica.scegliSelezionata();
+            return 0;
         case WM_PANORAMICA:
             if (gRicerca.aperta()) gRicerca.chiudi(false);
             logf("panoramica");
@@ -2576,6 +2608,18 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         case WM_TIMER:
             if (w == 13) { gBattito = GetTickCount64(); return 0; }   // battito per l'hook della tastiera (uiViva)
+            if (w == TIMER_ALT_TAB) {
+                // Alt ancora premuto: compare la panoramica. Se quella di prima si sta ancora chiudendo, si riprova tra poco
+                if (gPanoramica.aperta()) { SetTimer(h, TIMER_ALT_TAB, 30, nullptr); return 0; }
+                KillTimer(h, TIMER_ALT_TAB);
+                if (!gAltTabAttesa) return 0;
+                gAltTabAttesa = false;
+                if (gAltTabLasciato) { altTabVeloce(); return 0; }
+                logf("panoramica (alt+tab)");
+                gPanoramica.apri(true, gAltTabPassi);   // ha un suo ciclo dei messaggi finche' resta aperta
+                { wchar_t c[48] = L""; GetClassNameW(GetForegroundWindow(), c, 48); logf("panoramica (alt+tab) chiusa: %ls; in primo piano %ls", gPanoramica.diag.c_str(), c); }
+                return 0;
+            }
             if (w == 12) {
                 // Scala dello schermo principale cambiata (Impostazioni > Schermo, o un portatile attaccato a un monitor
                 // con un'altra scala): dock, pannelli, launcher e capsule hanno misure calcolate alla scala di prima.

@@ -119,7 +119,10 @@ private:
     void ciclo() {
         RoInitialize(RO_INIT_MULTITHREADED);
         while (!basta) {
-            leggi();
+            // musica che sembra fermarsi o sparire: si rilegge poco dopo per conferma. Le app (i browser soprattutto)
+            // passano per stati di un attimo ("cambiando", sessione assente, titolo non ancora pronto): presi per buoni,
+            // il notch si chiudeva e riapriva, e le barrette si fermavano (sembrava sfarfallare)
+            if (!leggi(false) && !basta) { Sleep(300); leggi(true); }
             // un comando si esegue subito; poi si rilegge presto (lo stato cambia in poco tempo)
             for (int i = 0; i < 10 && !basta; i++) {
                 const int c = daFare.exchange(NIENTE);
@@ -166,8 +169,11 @@ private:
         return s;
     }
 
-    void leggi() {
+    // false: stato da confermare (la musica sembra fermarsi o sparire), non ancora preso
+    bool leggi(bool conferma) {
         Brano b;
+        int st = -1;
+        bool proprieta = false;
         void* s = sessione();
         if (s) {
             b.c = true;
@@ -176,14 +182,15 @@ private:
             void* info = nullptr;
             abi::metodo<abi::FnPtr>(s, 9)(s, &info);   // GetPlaybackInfo
             if (abi::classe(info, L"Windows.Media.Control.GlobalSystemMediaTransportControlsSessionPlaybackInfo")) {
-                int st = 0; abi::metodo<HRESULT (STDMETHODCALLTYPE*)(void*, int*)>(info, 7)(info, &st);   // PlaybackStatus
-                b.suona = st == 4;   // Playing
+                abi::metodo<HRESULT (STDMETHODCALLTYPE*)(void*, int*)>(info, 7)(info, &st);   // PlaybackStatus
+                b.suona = st == 4;   // Playing (1 aperta, 2 cambiando, 3 fermata, 5 in pausa)
             }
             abi::rilascia(info);
             void* op = nullptr;
             abi::metodo<abi::FnPtr>(s, 7)(s, &op);   // TryGetMediaPropertiesAsync
             void* p = abi::risultato(op);
             if (abi::classe(p, L"Windows.Media.Control.GlobalSystemMediaTransportControlsSessionMediaProperties")) {
+                proprieta = true;
                 HSTRING t = nullptr;
                 if (SUCCEEDED(abi::metodo<abi::FnStr>(p, 6)(p, &t))) b.titolo = abi::testo(t);    // Title
                 t = nullptr;
@@ -205,11 +212,17 @@ private:
             abi::rilascia(s);
         }
         std::lock_guard<std::mutex> g(mx);
+        if (b.c && brano.c && b.aumid == brano.aumid) {
+            if (st == 1 || st == 2) b.suona = brano.suona;   // stato di passaggio: resta quello di prima
+            if (!proprieta) { b.titolo = brano.titolo; b.artista = brano.artista; }   // titolo non arrivato in tempo
+        }
+        if (!conferma && ((brano.suona && !b.suona) || (brano.c && !b.c))) return false;
         if (!b.c) { if (brano.c || !brano.copertina.empty()) brano.versione++; brano.copertina.clear(); chiaveCopertina.clear(); }
         if (b.titolo != brano.titolo || b.artista != brano.artista) brano.versione++;
         b.copertina = std::move(brano.copertina);
         b.versione = brano.versione;
         brano = std::move(b);
+        return true;
     }
 
     void esegui(int c) {

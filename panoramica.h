@@ -16,12 +16,45 @@ public:
     std::function<bool(HWND)> idonea;   // finestra d'app normale
     bool aperta() const { return inCorso; }
     // va sulla finestra scelta (Alt lasciato dopo Alt+Tab)
-    void scegliSelezionata() { if (inCorso && !chiudendo && sopra >= 0 && sopra < (int)el.size()) { chiudendo = true; scelta = el[sopra].h; } }
+    void scegliSelezionata() { diag += L"; alt lasciato"; if (inCorso && !chiudendo && sopra >= 0 && sopra < (int)el.size()) { chiudendo = true; scelta = el[sopra].h; } }
+    // aperta e non ancora in chiusura (un Tab con Alt premuto si puo' mandare alla finestra)
+    bool attiva() const { return inCorso && !chiudendo; }
+    std::wstring diag;   // per il registro: com'e' andata l'ultima apertura con Alt+Tab
+
+    // Alt+Tab veloce (Alt lasciato prima che la panoramica compaia): come il selettore di Windows, si va subito alla
+    // finestra, senza mostrare niente. passi = quante volte e' stato premuto Tab (1: quella usata prima). Qui contano
+    // tutte le finestre, anche ridotte e sugli altri schermi, nell'ordine di sovrapposizione (le ultime usate in cima)
+    // Windows lascia cambiare la finestra in primo piano solo a chi ha mandato l'ultimo input: FluidWin vede i tasti
+    // col gancio, ma per Windows non li ha mandati lui. Un tasto senza effetti (0xE8, lo stesso della "maschera" di
+    // Alt e Win) mandato da qui gli da' il permesso; senza, la finestra scelta a volte restava dietro
+    static void portaDavanti(HWND h) {
+        INPUT in[2]{};
+        in[0].type = in[1].type = INPUT_KEYBOARD;
+        in[0].ki.wVk = in[1].ki.wVk = 0xE8; in[1].ki.dwFlags = KEYEVENTF_KEYUP;
+        SendInput(2, in, sizeof(INPUT));
+        if (!SetForegroundWindow(h) || GetForegroundWindow() != h) SwitchToThisWindow(h, TRUE);
+    }
+
+    HWND vaiDiretta(int passi) {
+        std::vector<HWND> f;
+        const HWND fg = GetAncestor(GetForegroundWindow(), GA_ROOT);
+        for (HWND h = GetTopWindow(nullptr); h; h = GetWindow(h, GW_HWNDNEXT)) {
+            if (h == fg || !IsWindowVisible(h) || (idonea && !idonea(h))) continue;
+            DWORD cl = 0; DwmGetWindowAttribute(h, DWMWA_CLOAKED, &cl, sizeof(cl));
+            if (!cl) f.push_back(h);
+        }
+        if (f.empty()) return nullptr;
+        const int n = (int)f.size();
+        const HWND h = f[(((passi - 1) % n) + n) % n];
+        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+        portaDavanti(h);
+        return h;
+    }
 
     // Apre la panoramica e ne gestisce i messaggi finche' non si chiude (come un menu). Se e' gia' aperta la chiude.
     // daAltTab: aperta con Alt+Tab, parte con la finestra di prima gia' scelta (come il selettore di Windows: Tab va
     // avanti, lasciando Alt si va su quella scelta; il gancio della tastiera manda Tab e Invio)
-    void apri(bool daAltTab = false) {
+    void apri(bool daAltTab = false, int passi = 1) {
         if (inCorso) { chiudendo = true; scelta = nullptr; return; }
         if (!v.fin && !v.crea(L"FluidWin.Panoramica", vetro::procedura<Panoramica>, this, true, 1)) return;
         raccogli();
@@ -37,10 +70,19 @@ public:
         for (Elemento* e : perZ) if (FAILED(DwmRegisterThumbnail(v.fin, e->h, &e->th))) e->th = nullptr;
         prima = GetForegroundWindow();
         inCorso = true; chiudendo = false; scelta = nullptr; sopra = -1; k = 0;
-        if (daAltTab) {   // la seconda dall'alto nell'ordine di sovrapposizione (la prima e' quella in primo piano)
-            std::vector<int> ord(el.size()); for (size_t i = 0; i < el.size(); i++) ord[i] = (int)i;
-            std::sort(ord.begin(), ord.end(), [this](int a, int b) { return el[a].z < el[b].z; });
-            sopra = ord.size() > 1 ? ord[1] : ord[0];
+        altTab = daAltTab; ordZ.clear(); GetCursorPos(&mouseInizio);
+        if (daAltTab) {
+            // Tab va avanti nell'ordine di sovrapposizione (le ultime usate prima), non in quello della griglia; la
+            // finestra in primo piano va in fondo. Si parte da quella usata prima (passi: i Tab gia' premuti)
+            for (size_t i = 0; i < el.size(); i++) ordZ.push_back((int)i);
+            std::sort(ordZ.begin(), ordZ.end(), [this](int a, int b) { return el[a].z < el[b].z; });
+            const HWND fg = GetAncestor(prima, GA_ROOT);
+            auto it = std::find_if(ordZ.begin(), ordZ.end(), [&](int i) { return el[i].h == fg; });
+            if (it != ordZ.end()) std::rotate(it, it + 1, ordZ.end());
+            const int n = (int)ordZ.size();
+            sopra = ordZ[(((passi - 1) % n) + n) % n];
+            diag = L"ordine:"; for (int i : ordZ) { wchar_t c[48] = L""; GetClassNameW(el[i].h, c, 48); diag += L" "; diag += c; }
+            diag += L" partenza " + std::to_wstring(sopra);
         }
         v.alfa(1);
         SetForegroundWindow(v.fin);
@@ -51,8 +93,13 @@ public:
         inCorso = false;
         if (scelta && IsWindow(scelta)) {
             if (IsIconic(scelta)) ShowWindow(scelta, SW_RESTORE);
-            SwitchToThisWindow(scelta, TRUE);
-        } else if (prima && IsWindow(prima)) SetForegroundWindow(prima);
+            portaDavanti(scelta);
+            wchar_t c[48] = L""; GetClassNameW(scelta, c, 48);
+            diag += L"; scelta " + std::wstring(c) + (GetForegroundWindow() == scelta ? L" (davanti)" : L" (NON davanti)");
+        } else {
+            diag += L"; nessuna scelta";
+            if (prima && IsWindow(prima)) SetForegroundWindow(prima);
+        }
     }
 
     bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
@@ -60,6 +107,9 @@ public:
         switch (m) {
             case WM_PAINT: disegna(); return true;
             case WM_MOUSEMOVE: {
+                // aperta con Alt+Tab: il mouse sceglie solo quando si muove davvero (comparendo sotto il cursore fermo
+                // la finestra riceve comunque un movimento, e la scelta saltava sulla miniatura li' sotto)
+                if (altTab) { POINT c; GetCursorPos(&c); if (c.x == mouseInizio.x && c.y == mouseInizio.y) return true; mouseInizio = {-99999, -99999}; }
                 const int s = elementoIn(GET_X_LPARAM(l), GET_Y_LPARAM(l));
                 if (s != sopra) { sopra = s; disegna(); }
                 return true;
@@ -75,10 +125,19 @@ public:
             case WM_KEYDOWN:
                 if (w == VK_ESCAPE) { chiudendo = true; scelta = nullptr; }
                 else if (w == VK_RETURN && sopra >= 0 && sopra < (int)el.size()) { chiudendo = true; scelta = el[sopra].h; }
+                else if (w == VK_TAB && altTab && !ordZ.empty()) {   // Alt+Tab (l = 1: con Maiusc, indietro)
+                    const int n = (int)ordZ.size();
+                    const int pos = (int)(std::find(ordZ.begin(), ordZ.end(), sopra) - ordZ.begin());
+                    sopra = ordZ[pos >= n ? 0 : (pos + (l ? n - 1 : 1)) % n];
+                    diag += (l ? L" indietro" : L" avanti") + std::to_wstring(sopra);
+                    disegna();
+                }
                 else if (!el.empty() && (w == VK_RIGHT || w == VK_TAB || w == VK_DOWN)) { sopra = (sopra + 1) % (int)el.size(); disegna(); }
                 else if (!el.empty() && (w == VK_LEFT || w == VK_UP)) { sopra = (sopra - 1 + (int)el.size()) % (int)el.size(); disegna(); }
                 return true;
-            case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && inCorso) { chiudendo = true; scelta = nullptr; } return true;
+            // un'altra finestra in primo piano: si chiude senza scegliere. Non se si sta gia' chiudendo con una scelta
+            // (Alt lasciato): la scelta si perdeva e si tornava alla finestra di prima
+            case WM_ACTIVATE: if (LOWORD(w) == WA_INACTIVE && inCorso && !chiudendo) { diag += L"; disattivata"; chiudendo = true; scelta = nullptr; } return true;
             case WM_CLOSE: if (inCorso) { chiudendo = true; scelta = nullptr; } return true;
         }
         return false;
@@ -97,6 +156,9 @@ private:
     vetro::Finestra v;
     IDWriteTextFormat* fTitolo = nullptr;
     std::vector<Elemento> el;
+    bool altTab = false;        // aperta con Alt+Tab
+    std::vector<int> ordZ;      // con Alt+Tab: l'ordine in cui Tab scorre le finestre
+    POINT mouseInizio{};        // con Alt+Tab: dov'era il mouse all'apertura
     RECT schermo{};
     HWND prima = nullptr, scelta = nullptr;
     bool inCorso = false, chiudendo = false;

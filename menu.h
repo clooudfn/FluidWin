@@ -101,6 +101,10 @@ private:
     BYTE alfa = 0;
     Menu* padre = nullptr;
     int aperto = -1;   // voce con il sottomenu aperto
+    // sottomenu: da quando il mouse sta sul menu padre sopra un'altra voce (0: no). Si chiude solo se ci resta un
+    // attimo: andando in diagonale verso una voce del sottomenu si passa per forza sopra le voci sotto quella aperta
+    ULONGLONG tAltrove = 0;
+    static constexpr ULONGLONG ATTESA_ALTROVE_MS = 350;
     bool inSotto = false;
     // riga dei pulsanti in cima e freccia in fondo che allunga il menu con le voci "extra"
     D2D1_RECT_F rettFreccia{};
@@ -451,8 +455,14 @@ private:
         const UINT id = s.esegui({r.right - (LONG)(4 * dpi), r.top + (LONG)rett[i].top - (LONG)(6 * dpi)}, false, this);
         inSotto = false;
         aperto = -1;
-        if (id) { scelta = id; fine = true; }
-        else { SetCapture(fin); disegna(); }
+        if (id) { scelta = id; fine = true; return; }
+        SetCapture(fin);
+        // chiuso perche' il mouse e' rimasto su un'altra voce: si evidenzia quella (e se ha un sottomenu si apre)
+        POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
+        RECT cr; GetClientRect(fin, &cr);
+        const int qui = PtInRect(&cr, c) ? voceIn(c.x, c.y) : -1;
+        if (qui >= 0 && qui != i && !fine) { sopra = qui; disegna(); if (voci[qui].sotto) apriSotto(qui); return; }
+        disegna();
     }
 
     // posizione durante le animazioni: k 0..1 (1 = al suo posto), alfa insieme
@@ -494,6 +504,7 @@ private:
             // FluidWin puo' non essere in primo piano (menu del tasto destro sopra Esplora file): la cattura del mouse
             // allora non porta i clic fuori dal menu, ne' l'Esc. Si guardano i tasti direttamente
             fuoriOEsc();
+            if (padre && tAltrove) controllaPadre();
             if (fine) break;
             if (espanso && kEsp < 1) { passoEspansione(); if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue; }
             // apertura: dissolvenza e scivolata (150 ms)
@@ -511,6 +522,23 @@ private:
         ReleaseCapture();
         chiudiAnimato();
         return scelta;
+    }
+
+    // sottomenu: il mouse e' sul menu padre sopra un'altra voce da ATTESA_ALTROVE_MS? allora si chiude (anche se il
+    // mouse si e' fermato: lo chiama anche il ciclo)
+    void controllaPadre() {
+        POINT c; GetCursorPos(&c);
+        RECT cr; GetWindowRect(fin, &cr);
+        bool altrove = false;
+        if (!PtInRect(&cr, c)) {
+            POINT s = c; ScreenToClient(padre->fin, &s);
+            RECT pr; GetClientRect(padre->fin, &pr);
+            altrove = PtInRect(&pr, s) && padre->voceIn(s.x, s.y) != padre->aperto;
+        }
+        if (!altrove) { tAltrove = 0; return; }
+        const ULONGLONG t = GetTickCount64();
+        if (!tAltrove) tAltrove = t;
+        else if (t - tAltrove >= ATTESA_ALTROVE_MS) { fine = true; scelta = 0; }
     }
 
     // clic (di qualsiasi tasto) fuori da questo menu e dai suoi padri, o Esc: si chiude tutto
@@ -537,11 +565,8 @@ private:
                 RECT cr; GetClientRect(fin, &cr);
                 const bool dentro = PtInRect(&cr, p);
                 if (msg.message == WM_MOUSEMOVE) {
-                    if (!dentro && padre) {   // mouse tornato sul menu padre: il sottomenu si chiude
-                        POINT s = p; MapWindowPoints(fin, padre->fin, &s, 1);
-                        RECT pr; GetClientRect(padre->fin, &pr);
-                        if (PtInRect(&pr, s) && padre->voceIn(s.x, s.y) != padre->aperto) { fine = true; scelta = 0; }
-                    }
+                    if (padre) controllaPadre();   // mouse tornato sul menu padre, su un'altra voce: il sottomenu si chiude
+                    if (fine) return true;
                     // sulla freccia in fondo, senza cliccare: il menu si allunga con le altre voci
                     if (dentro && conFreccia && !espanso && p.y >= rettFreccia.top - 2 && p.y < rettFreccia.bottom + 4) { espanso = true; tEsp = GetTickCount64(); }
                     const int s = dentro ? voceIn(p.x, p.y) : -1;
