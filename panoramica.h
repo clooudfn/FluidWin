@@ -63,6 +63,15 @@ public:
         schermo = vetro::areaPrincipale();
         v.posiziona(schermo.left, schermo.top, schermo.right - schermo.left, schermo.bottom - schermo.top, HWND_TOPMOST, SWP_SHOWWINDOW);
         if (!fTitolo) fTitolo = v.formato(12.5f * v.dpi, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+        // con Alt+Tab la griglia e' nell'ordine in cui Tab le scorre, come il selettore di Windows: prima quella in primo
+        // piano, poi le altre dalla piu' recente. Nell'ordine di lettura (raccogli) Tab saltava qua e la' nella griglia.
+        // Dall'angolo resta l'ordine di lettura, con meno incroci mentre le finestre si dispongono
+        if (daAltTab) {
+            std::stable_sort(el.begin(), el.end(), [](const Elemento& a, const Elemento& b) { return a.z < b.z; });
+            const HWND fg = GetAncestor(GetForegroundWindow(), GA_ROOT);
+            auto it = std::find_if(el.begin(), el.end(), [&](const Elemento& e) { return e.h == fg; });
+            if (it != el.end()) std::rotate(el.begin(), it, it + 1);
+        }
         disponi();
         // dal basso verso l'alto nell'ordine di sovrapposizione: le miniature registrate dopo stanno sopra
         std::vector<Elemento*> perZ; for (auto& e : el) perZ.push_back(&e);
@@ -72,8 +81,8 @@ public:
         inCorso = true; chiudendo = false; scelta = nullptr; sopra = -1; k = 0;
         altTab = daAltTab; ordZ.clear(); GetCursorPos(&mouseInizio);
         if (daAltTab) {
-            // Tab va avanti nell'ordine di sovrapposizione (le ultime usate prima), non in quello della griglia; la
-            // finestra in primo piano va in fondo. Si parte da quella usata prima (passi: i Tab gia' premuti)
+            // Tab va avanti nell'ordine di sovrapposizione (le ultime usate prima), che e' anche quello della griglia;
+            // la finestra in primo piano va in fondo. Si parte da quella usata prima (passi: i Tab gia' premuti)
             for (size_t i = 0; i < el.size(); i++) ordZ.push_back((int)i);
             std::sort(ordZ.begin(), ordZ.end(), [this](int a, int b) { return el[a].z < el[b].z; });
             const HWND fg = GetAncestor(prima, GA_ROOT);
