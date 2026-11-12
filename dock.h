@@ -77,7 +77,10 @@ static void togliAppbarRimasta() {
     DWORD h = 0, n = sizeof(h);
     if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar", RRF_RT_REG_DWORD, nullptr, &h, &n) != ERROR_SUCCESS) return;
     APPBARDATA ab{}; ab.cbSize = sizeof(ab); ab.hWnd = (HWND)(ULONG_PTR)h;
-    SHAppBarMessage(ABM_REMOVE, &ab);
+    // solo se quell'HWND non c'e' piu' o e' ancora il dock: un numero riusato da un'altra finestra (magari la barra di
+    // un altro programma) non va toccato
+    wchar_t c[64] = L"";
+    if (!IsWindow(ab.hWnd) || (GetClassNameW(ab.hWnd, c, 64) && !wcscmp(c, L"FluidWin.DockIcone"))) SHAppBarMessage(ABM_REMOVE, &ab);
     RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar");
 }
 static const UINT_PTR TIMER_INVIO = 7;   // "icone nascoste": Invio poco dopo Win+B
