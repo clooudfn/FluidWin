@@ -1160,11 +1160,15 @@ private:
                 pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
                 scrivi(b, fmtNome, {bx, by, bx + lb, by + 2 * rb});
             }
-            // pallino delle app aperte
-            // (anche sotto App e il centro di controllo mentre sono aperti)
+            // pallino delle app aperte: uno per finestra, al massimo tre
+            // (uno anche sotto App e il centro di controllo mentre sono aperti)
             if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda()) || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
-                dc->FillEllipse({{x + d / 2, yb + PAD * 0.55f}, 2.0f * dpi, 2.0f * dpi}, pennello);
+                const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
+                for (int k = 0; k < punti; k++) {
+                    const float dx = (k - (punti - 1) / 2.0f) * 6.0f * dpi;
+                    dc->FillEllipse({{x + d / 2 + dx, yb + PAD * 0.55f}, 2.0f * dpi, 2.0f * dpi}, pennello);
+                }
             }
         }
 
@@ -2121,17 +2125,21 @@ private:
         // Le app avviate come amministratore (Gestione attivita', o qualsiasi app con "Esegui come amministratore"):
         // Windows non lascia a FluidWin ripristinarle con ShowWindow (errore 203, protezione UIPI) e il clic non faceva
         // niente. SwitchToThisWindow, quello di Alt+Tab e della barra di Windows, invece funziona
-        if (scelta) {
-            if (!ShowWindow(scelta, SW_RESTORE) && IsIconic(scelta)) {
-                SwitchToThisWindow(scelta, TRUE);
-                if (registro) scrivi("clic dock: finestra di un'app amministratore, ripristinata come fa Alt+Tab");
-            } else SetForegroundWindow(scelta);
-            return;
-        }
+        if (scelta) { portaDavanti(scelta); return; }
         // la finestra piu' in alto fra quelle dell'app
         for (HWND h = GetTopWindow(nullptr); h; h = GetWindow(h, GW_HWNDNEXT))
             if (std::find(v.finestre.begin(), v.finestre.end(), h) != v.finestre.end()) { scelta = h; break; }
-        if (scelta && !SetForegroundWindow(scelta)) SwitchToThisWindow(scelta, TRUE);
+        if (scelta) portaDavanti(scelta);
+    }
+
+    // porta in primo piano una finestra dell'app, ripristinandola se e' ridotta a icona
+    void portaDavanti(HWND h) {
+        if (IsIconic(h)) {
+            if (!ShowWindow(h, SW_RESTORE) && IsIconic(h)) {
+                SwitchToThisWindow(h, TRUE);
+                if (registro) scrivi("clic dock: finestra di un'app amministratore, ripristinata come fa Alt+Tab");
+            } else SetForegroundWindow(h);
+        } else if (!SetForegroundWindow(h)) SwitchToThisWindow(h, TRUE);
     }
 
     void menu(int i, POINT pt) {
@@ -2155,7 +2163,25 @@ private:
                              GetFileAttributesW(v.exe.c_str()) != INVALID_FILE_ATTRIBUTES;
         const bool store = v.avvio.rfind(L"shell:", 0) == 0;
         const bool collegamento = v.fissata && v.avvio.size() > 4 && minuscolo(v.avvio.substr(v.avvio.size() - 4)) == L".lnk";
-        std::vector<menu::Voce> voci = {menu::titolo(v.nome), menu::voce(testi::t(L"Apri nuova finestra", L"Open new window"), 1)};
+        std::vector<menu::Voce> voci = {menu::titolo(v.nome)};
+        // con piu' finestre, le finestre per titolo (dalla piu' recente; spuntata quella in primo piano): una si sceglie
+        // e viene davanti. Il clic sull'icona porta solo quella piu' in alto
+        std::vector<HWND> elenco;
+        if (v.finestre.size() > 1) {
+            for (HWND h = GetTopWindow(nullptr); h; h = GetWindow(h, GW_HWNDNEXT))
+                if (std::find(v.finestre.begin(), v.finestre.end(), h) != v.finestre.end()) elenco.push_back(h);
+            const HWND fg = GetForegroundWindow();
+            for (size_t k = 0; k < elenco.size(); k++) {
+                wchar_t t[256] = L""; GetWindowTextW(elenco[k], t, 256);
+                std::wstring s = t[0] ? t : v.nome;
+                if (s.size() > 60) s = s.substr(0, 59) + L"…";
+                auto x = menu::voce(s, 100 + (UINT)k);
+                x.spuntata = elenco[k] == fg;
+                voci.push_back(x);
+            }
+            voci.push_back(menu::separatore());
+        }
+        voci.push_back(menu::voce(testi::t(L"Apri nuova finestra", L"Open new window"), 1));
         if (!store || exeVero) voci.push_back(menu::voce(testi::t(L"Esegui come amministratore", L"Run as administrator"), 3));
         if (exeVero) voci.push_back(menu::voce(testi::t(L"Apri percorso file", L"Open file location"), 4));
         if (collegamento) { voci.push_back(menu::separatore()); voci.push_back(menu::voce(testi::t(L"Rimuovi dal dock", L"Remove from dock"), 5)); }
@@ -2177,6 +2203,7 @@ private:
         else if (s == 4) ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + v.exe + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
         else if (s == 5) { DeleteFileW(v.avvio.c_str()); appDaAggiornare = true; dirty = true; }   // come "Rimuovi dalla barra"
         else if (s == 6) aggiungiAlDock(v.nome, exeVero ? v.exe : L"", v.aumid, v.avvio);
+        else if (s >= 100 && s - 100 < (int)elenco.size() && IsWindow(elenco[s - 100])) portaDavanti(elenco[s - 100]);
     }
 
     static LRESULT CALLBACK procVetro(HWND h, UINT m, WPARAM w, LPARAM l) {
