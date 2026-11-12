@@ -2725,7 +2725,18 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                     logf("microfono in uso: [%ls] webcam: [%ls]", m.c_str(), c.c_str());
                 }
             }
-            controlloSicurezza(); if (gDockOk) {
+            controlloSicurezza();
+            if (gLog && gBanner.attivo) {   // diagnosi: notifiche ferme (banner bloccato in uno stato, lettura morta)
+                static ULONGLONG tStato = 0, tAvviso = 0; static int statoPrima = 0;
+                const ULONGLONG ora = GetTickCount64(); const int st = gBanner.statoOra();
+                if (st != statoPrima || st == 0) { statoPrima = st; tStato = ora; }
+                const ULONGLONG lett = gBanner.ultimaLettura();
+                if (ora - tAvviso > 30000 && ((st != 0 && ora - tStato > 30000) || (lett && ora - lett > 15000))) {
+                    tAvviso = ora;
+                    logf("notifiche ferme? stato %d da %llu s, in coda %zu, ultima lettura %llu s fa", st, (ora - tStato) / 1000, gBanner.inCoda(), lett ? (ora - lett) / 1000 : 0);
+                }
+            }
+            if (gDockOk) {
                 rinascondiBarreWindows();
                 const bool si = schermoInteroAttivo(); gLauncherTasto = !si;
                 const int tipo = si ? (giocoASchermoIntero() ? 2 : 1) : 0;
@@ -2900,7 +2911,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     };
     gDock.ilNotch().clicNotifica = []() { gBanner.apriAttuale(); };
     gDock.ilNotch().chiudiNotifica = []() { gBanner.togliAttuale(); };
-    gDock.ilNotch().notificaFinita = []() { gBanner.notchFinito(); };
+    gDock.ilNotch().notificaFinita = []() { if (gLog) logf("notifica: il notch ha finito (stato %d)", gBanner.statoOra()); gBanner.notchFinito(); };
+    gBanner.registro = [](const char* s) { if (gLog) logf("%s", s); };
+    gBanner.notchOccupato = []() { return gDockOk && gDock.ilNotch().notificaInCorso(); };
     gBanner.exeApp = [](const std::wstring& a, const std::wstring& n) { return gDockOk ? gDock.exeDiApp(a, n) : std::wstring(); };
     gBanner.conteggi = [](const std::unordered_map<std::wstring, int>& c) { if (gDockOk) gDock.numeriNotificheNuovi(c); };
     giochiNoti();   // (nel registro: quanti giochi conosce)

@@ -130,6 +130,9 @@ public:
         return true;
     }
 
+    // c'e' una notifica in mostra (o in attesa che il mouse lasci il notch)
+    bool notificaInCorso() const { return notificaAttiva; }
+
     // avviso breve (1,6 s, 2,5 per batteria e cuffie): un simbolo (sensori::Simbolo) e un testo, per esempio
     // "Sempre in primo piano" o "AirPods · 80%"; valore: la batteria (-1 se non si sa). false se il notch non si vede
     bool avviso(const std::wstring& testo, int simbolo, int valore, bool acceso) {

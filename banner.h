@@ -128,9 +128,14 @@ public:
     // mostra la notifica nel notch (false se il notch non c'e': allora il banner di vetro); quando il notch ha
     // finito chiama notchFinito()
     std::function<bool(const notifiche::Notifica&, const std::vector<UINT>&, int, int)> nelNotch;
+    std::function<bool()> notchOccupato;   // il notch sta ancora mostrando la notifica che gli abbiamo dato
     // quante notifiche ha ogni app (AppUserModelID minuscolo), a ogni lettura: i numeri sulle icone del dock
     std::function<void(const std::unordered_map<std::wstring, int>&)> conteggi;
     bool attivo = false;
+    std::function<void(const char*)> registro;   // righe per il registro (diagnosi)
+    int statoOra() const { return stato; }
+    size_t inCoda() const { return coda.size(); }
+    ULONGLONG ultimaLettura() const { return tLettura; }
 
     // dal notch: la notifica mostrata e' sparita (si passa alla prossima), clic per aprirla, x per toglierla
     void notchFinito() { if (stato == 4) { stato = 0; if (attivo && !coda.empty()) entra(); } }
@@ -211,6 +216,7 @@ private:
     std::mutex mx;
     std::vector<notifiche::Notifica> letta;
     bool nuova = false;
+    std::atomic<ULONGLONG> tLettura{0};   // ultima lettura riuscita (il thread di lettura e' vivo)
 
     void avviaLettura() {
         if (lavoro.joinable()) return;
@@ -221,7 +227,7 @@ private:
                 notifiche::Lettore l;
                 while (!basta) {
                     std::vector<notifiche::Notifica> lista;
-                    if (l.leggi(lista)) { std::lock_guard<std::mutex> g(mx); letta = std::move(lista); nuova = true; }
+                    if (l.leggi(lista)) { std::lock_guard<std::mutex> g(mx); letta = std::move(lista); nuova = true; tLettura = GetTickCount64(); }
                     for (int i = 0; i < 15 && !basta; i++) Sleep(100);
                 }
             }
@@ -236,6 +242,7 @@ private:
     }
 
     void controlla() {
+        sblocca();
         std::vector<notifiche::Notifica> lista;
         {
             std::lock_guard<std::mutex> g(mx);
@@ -253,12 +260,16 @@ private:
             conteggi(c);
         }
         std::unordered_set<UINT32> ora;
-        for (const auto& n : lista) {
+        for (auto it = lista.rbegin(); it != lista.rend(); ++it) {   // dalla piu' vecchia: in coda nell'ordine di arrivo
+            const auto& n = *it;
             ora.insert(n.id);
             if (diSistema(n.aumid)) continue;   // le mostra Windows
             spegniBannerWindows(n.aumid);   // da qui in poi le notifiche di quest'app le mostra FluidWin
             // alla prima lettura quelle gia' presenti non si mostrano
-            if (!primaLettura && !zitto && !viste.count(n.id)) coda.push_back(n);
+            if (!primaLettura && !zitto && !viste.count(n.id)) {
+                coda.push_back(n);
+                if (registro) { char t[160]; snprintf(t, sizeof t, "notifica nuova (id %u), stato %d, in coda %zu", n.id, stato, coda.size()); registro(t); }
+            }
         }
         viste = std::move(ora);
         primaLettura = false;
@@ -266,12 +277,27 @@ private:
         if (stato == 0 && !coda.empty()) entra();
     }
 
+    // Sicurezze: se la notifica in mostra resta "in corso" senza esserlo, la coda si fermava per sempre (le notifiche
+    // smettevano di uscire finche' FluidWin non veniva riavviato). Il notch che non la mostra piu', il banner di vetro
+    // senza animazione da piu' di 5 s o fermo da molto oltre la sua scadenza: si passa alla prossima
+    void sblocca() {
+        const ULONGLONG ora = vetro::ms();
+        const char* perche = nullptr;
+        if (stato == 4) { if (notchOccupato && !notchOccupato()) perche = "il notch non la mostra piu'"; }
+        else if (stato == 1 || stato == 3) { if (ora - t0 > 5000) perche = "animazione del banner ferma"; }
+        else if (stato == 2) { if (!IsWindowVisible(v.fin)) perche = "banner nascosto"; else if (ora > tFine + 60000) perche = "banner fermo da un minuto"; }
+        if (!perche) return;
+        if (registro) { char t[120]; snprintf(t, sizeof t, "notifiche: sbloccate (stato %d: %s)", stato, perche); registro(t); }
+        if (stato == 4) stato = 0; else { dentro = false; nascondi(); }
+        if (attivo && !coda.empty()) entra();
+    }
+
     void entra() {
         attuale = coda.front(); coda.pop_front();
         if (nelNotch) {   // dal notch, se si vede
             std::vector<UINT> px; int iw = 0, ih = 0;
             iconaPer(attuale, px, iw, ih);
-            if (nelNotch(attuale, px, iw, ih)) { stato = 4; return; }
+            if (nelNotch(attuale, px, iw, ih)) { stato = 4; if (registro) registro("notifica: nel notch"); return; }
         }
         v.aggiornaTema();
         const RECT is = isola ? isola() : vetro::areaPrincipale(true);
@@ -288,6 +314,7 @@ private:
         if (icona) { icona->Release(); icona = nullptr; }
         caricaIcona();
         stato = 1; t0 = vetro::ms(); tFine = t0 + 5500; k = 0;
+        if (registro) registro("notifica: banner di vetro");
         vetro::battito(v.fin, 1);
         disegna();
     }
