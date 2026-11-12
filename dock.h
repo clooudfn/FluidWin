@@ -90,6 +90,13 @@ struct Voce {
     std::wstring exe;          // percorso dell'eseguibile, minuscolo (per riconoscere le finestre)
     std::wstring aumid;        // AppUserModelID, se c'e'
     std::wstring avvio;        // cosa aprire al clic (collegamento .lnk o shell:AppsFolder\...)
+    // app installate con Squirrel (Discord, Slack...): il collegamento apre "<cartella>\Update.exe --processStart X.exe"
+    // o il lanciatore "<cartella>\X.exe", ma le finestre sono di "<cartella>\app-<versione>\X.exe". Qui "<cartella>\app-" e "\X.exe" (minuscoli), vuoti
+    // per le altre app (vedi exeSquirrel)
+    std::wstring sqPrima, sqDopo;
+    // app di pacchetto (Teams...) fissata: "shell:AppsFolder\<AUMID>", per aprirla e per l'icona. Il collegamento
+    // punta all'exe di una versione precisa (WindowsApps\<nome>_<versione>_...), che sparisce a ogni aggiornamento
+    std::wstring pacchetto;
     bool fissata = false;      // aggiunta alla barra
     ID2D1Bitmap1* icona = nullptr;
     std::vector<HWND> finestre;
@@ -100,6 +107,58 @@ struct Voce {
 };
 
 static std::wstring minuscolo(std::wstring s) { for (auto& c : s) c = (wchar_t)towlower(c); return s; }
+
+// Collegamento di Squirrel: prima = "<cartella>\app-", dopo = "\x.exe". Due forme:
+//  - "<cartella>\update.exe" con argomenti "--processStart X.exe" (installazioni piu' vecchie);
+//  - "<cartella>\X.exe", un piccolo lanciatore accanto a update.exe che avvia app-<versione>\X.exe (Discord oggi; il
+//    collegamento passa da una forma all'altra con gli aggiornamenti).
+// exe e' gia' minuscolo. false se non e' un collegamento di Squirrel
+static bool exeSquirrel(const std::wstring& exe, const std::wstring& argomenti, std::wstring& prima, std::wstring& dopo) {
+    const size_t barra = exe.find_last_of(L'\\');
+    if (barra == std::wstring::npos) return false;
+    if (exe.compare(barra + 1, std::wstring::npos, L"update.exe")) {
+        // lanciatore: c'e' update.exe nella stessa cartella
+        if (GetFileAttributesW((exe.substr(0, barra + 1) + L"update.exe").c_str()) == INVALID_FILE_ATTRIBUTES) return false;
+        prima = exe.substr(0, barra + 1) + L"app-";
+        dopo = exe.substr(barra);
+        return true;
+    }
+    const std::wstring a = minuscolo(argomenti);
+    size_t i = a.find(L"--processstart");
+    if (i == std::wstring::npos) return false;
+    i += 14;
+    while (i < a.size() && (a[i] == L' ' || a[i] == L'=')) i++;
+    std::wstring nome;
+    if (i < a.size() && a[i] == L'"') { const size_t f = a.find(L'"', i + 1); nome = a.substr(i + 1, f == std::wstring::npos ? f : f - i - 1); }
+    else nome = a.substr(i, a.find(L' ', i) == std::wstring::npos ? std::wstring::npos : a.find(L' ', i) - i);
+    if (nome.empty() || nome.find_first_of(L"\\/") != std::wstring::npos) return false;
+    prima = exe.substr(0, barra + 1) + L"app-";
+    dopo = L"\\" + nome;
+    return true;
+}
+
+// exe di un'app di pacchetto senza la versione: "...\windowsapps\msteams_26276.513_x64__8wekyb3d8bbwe\ms-teams.exe"
+// -> "...\windowsapps\msteams__8wekyb3d8bbwe\ms-teams.exe" (nome e editore restano). Le altre restano come sono
+static std::wstring senzaVersione(const std::wstring& exe) {
+    const size_t p = exe.find(L"\\windowsapps\\");
+    if (p == std::wstring::npos) return exe;
+    const size_t a = p + 13, b = exe.find(L'\\', a);
+    if (b == std::wstring::npos) return exe;
+    const size_t u = exe.find(L'_', a), e = exe.rfind(L"__", b);
+    if (u == std::wstring::npos || e == std::wstring::npos || u >= e || e < a) return exe;
+    return exe.substr(0, u) + exe.substr(e);
+}
+
+// la finestra con questo eseguibile e' dell'app 'voce' (stesso exe, anche di un'altra versione se e' un'app di
+// pacchetto, o la versione di Squirrel che il collegamento apre)
+static bool stessoExe(const std::wstring& voce, const std::wstring& prima, const std::wstring& dopo, const std::wstring& exe) {
+    if (!voce.empty() && voce == exe) return true;
+    if (!voce.empty() && voce.find(L"\\windowsapps\\") != std::wstring::npos && senzaVersione(voce) == senzaVersione(exe)) return true;
+    if (prima.empty() || exe.size() <= prima.size() + dopo.size()) return false;
+    if (exe.compare(0, prima.size(), prima) || exe.compare(exe.size() - dopo.size(), dopo.size(), dopo)) return false;
+    // in mezzo solo la versione, senza altre cartelle
+    return exe.find(L'\\', prima.size()) == exe.size() - dopo.size();
+}
 
 // AppUserModelID di una finestra (come la raggruppa la barra di Windows)
 static std::wstring aumidFinestra(HWND h) {
@@ -434,7 +493,7 @@ public:
         const std::wstring exe = exeProcesso(h), id = aumidFinestra(h);
         for (size_t k = 0; k < lanci.size(); k++) {
             const Lancio& l = lanci[k];
-            if (!((!l.exe.empty() && l.exe == exe) || (!l.aumid.empty() && l.aumid == id))) continue;
+            if (!(stessoExe(l.exe, l.sqPrima, l.sqDopo, exe) || (!l.aumid.empty() && l.aumid == id))) continue;
             const std::wstring c = l.chiave;
             lanci.erase(lanci.begin() + k);
             for (size_t i = 0; i < voci.size(); i++) if (!voci[i].uscente && chiave(voci[i]) == c) return rettIcona(i, out);
@@ -531,9 +590,9 @@ private:
     static Motore*& gIstanza() { static Motore* m = nullptr; return m; }
 
     // app lanciate dal dock e non ancora comparse (per il genio d'apertura)
-    struct Lancio { std::wstring chiave, exe, aumid; double t; };
+    struct Lancio { std::wstring chiave, exe, aumid; double t; std::wstring sqPrima, sqDopo; };
     std::vector<Lancio> lanci;
-    void segnaLancio(const Voce& v) { lanci.push_back({chiave(v), v.exe, v.aumid, adesso()}); }
+    void segnaLancio(const Voce& v) { lanci.push_back({chiave(v), v.exe, v.aumid, adesso(), v.sqPrima, v.sqDopo}); }
 
     // icona i del dock a riposo (senza ingrandimento), in coordinate schermo: cosi' il bersaglio del genio non si
     // muove durante l'animazione. Dock nascosto: risale per qualche istante, il tempo che la finestra entri o esca
@@ -762,7 +821,10 @@ private:
         wchar_t c[64]; GetClassNameW(h, c, 64);
         if (!wcscmp(c, L"Shell_TrayWnd") || !wcscmp(c, L"Progman") || !wcscmp(c, L"WorkerW") ||
             !wcscmp(c, L"FluidWin.DockIcone") || !wcscmp(c, L"FluidWin.DockVetro") || !wcscmp(c, L"Windows.UI.Core.CoreWindow")) return false;
-        if (GetWindowTextLengthW(h) == 0) return false;
+        // senza titolo di solito non e' una finestra d'app, ma con WS_EX_APPWINDOW la barra di Windows la mostra lo
+        // stesso: alcune app (Mailbird, Avalonia) non danno un titolo alla finestra principale, e senza questa il dock
+        // non la vedeva e a ogni clic rilanciava l'app
+        if (GetWindowTextLengthW(h) == 0 && !(ex & WS_EX_APPWINDOW)) return false;
         return true;
     }
 
@@ -813,6 +875,8 @@ private:
                         if (SUCCEEDED(sl->GetPath(dest, MAX_PATH, nullptr, SLGP_RAWPATH))) {
                             wchar_t esp[MAX_PATH]; ExpandEnvironmentStringsW(dest, esp, MAX_PATH);
                             v.exe = minuscolo(esp);
+                            wchar_t arg[1024] = L"";
+                            if (SUCCEEDED(sl->GetArguments(arg, 1024))) exeSquirrel(v.exe, arg, v.sqPrima, v.sqDopo);
                         }
                         IPropertyStore* ps = nullptr;
                         if (SUCCEEDED(sl->QueryInterface(IID_PPV_ARGS(&ps)))) {
@@ -823,6 +887,18 @@ private:
                     }
                     if (pf) pf->Release();
                     sl->Release();
+                }
+                // Esplora file: il collegamento non ha un exe (punta a una cartella della shell), solo l'AUMID; le sue
+                // finestre invece non hanno AUMID. Senza questo comparivano due icone: "File Explorer" e "Windows Explorer"
+                if (v.exe.empty() && v.aumid == L"Microsoft.Windows.Explorer") {
+                    wchar_t w[MAX_PATH]; if (GetWindowsDirectoryW(w, MAX_PATH)) v.exe = minuscolo(std::wstring(w) + L"\\explorer.exe");
+                }
+                // app di pacchetto aggiornata dopo che la si e' fissata: l'exe del collegamento non c'e' piu' (niente
+                // icona, il clic non la apre). Si apre (e prende l'icona) dalla cartella delle app, che vale per ogni
+                // versione. Solo in questo caso: la prima volta avvioPacchetto elenca tutte le app (~1 s)
+                if (v.exe.find(L"\\windowsapps\\") != std::wstring::npos && GetFileAttributesW(v.exe.c_str()) == INVALID_FILE_ATTRIBUTES) {
+                    v.pacchetto = avvioPacchetto(v.exe);
+                    if (v.aumid.empty() && v.pacchetto.size() > 17) v.aumid = v.pacchetto.substr(17);   // dopo "shell:AppsFolder\"
                 }
                 nuove.push_back(std::move(v));
             }
@@ -844,7 +920,7 @@ private:
             if (exe.empty()) continue;
             Voce* trovata = nullptr;
             for (auto& v : nuove) {
-                if ((!id.empty() && !v.aumid.empty() && id == v.aumid) || (!v.exe.empty() && v.exe == exe)) { trovata = &v; break; }
+                if ((!id.empty() && !v.aumid.empty() && id == v.aumid) || stessoExe(v.exe, v.sqPrima, v.sqDopo, exe)) { trovata = &v; break; }
             }
             if (!trovata) {
                 Voce v; v.exe = exe; v.aumid = id;
@@ -2104,7 +2180,7 @@ private:
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
             segnaLancio(v);   // la sua prima finestra uscira' dall'icona col genio
-            ShellExecuteW(nullptr, L"open", v.avvio.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            ShellExecuteW(nullptr, L"open", (v.pacchetto.empty() ? v.avvio : v.pacchetto).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             v.rimbalzoT0 = ultimoT;   // rimbalza finche' l'app non si apre
             appDaAggiornare = true;
             return;
