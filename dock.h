@@ -1017,7 +1017,9 @@ private:
     }
 
     // ora e data in fondo al dock: separatore e testo (larghezzaOra la misura render quando il testo cambia)
-    float larghezzaCoda() const { return oraNelDock && larghezzaOra > 0 ? GAP * 2 + 1 + larghezzaOra + 16 * dpi : 0; }
+    float larghezzaCoda() const { return oraNelDock && larghezzaOra > 0 ? GAP * 2 + 1 + (larghezzaOra + 16 * dpi) * scalaOra() : 0; }
+    // le due righe dell'ora (~34 px) devono stare nell'altezza delle icone: con icone piccole il testo si rimpicciolisce
+    float scalaOra() const { return std::clamp((S - 6 * dpi) / (34 * dpi), 0.7f, 1.0f); }
 
     // x di ogni icona a riposo; lo spazio prima di un'icona cresce e cala con lei
     std::vector<float> posizioniRiposo() const { return disponi(std::vector<float>(voci.size(), S)); }
@@ -1199,26 +1201,39 @@ private:
             const D2D1_RECT_F r = {x0 + GAP * 2 + 1, yb - S, x0 + coda, yb};
             isola = {r.left, fondoT, r.right + PAD, fondoB};   // il suo posto per il mouse (vedi oraNelDock)
             rettStato[ORA] = r; rettStato[CONTROLLO] = {};
-            // fondo dell'ora: un velo suo, sempre pieno, cosi' si legge anche col vetro del dock quasi trasparente
-            pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.55f) : D2D1::ColorF(1, 1, 1, 0.62f));
-            dc->FillRoundedRectangle({{r.left - 2 * dpi, r.top + 2 * dpi, r.right + 2 * dpi, r.bottom - 2 * dpi}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
             const double e = verso(evidenza[ORA], (statoSopra == ORA && mouseDentro) ? 1.0 : 0.0, 0.05);
             if (e != evidenza[ORA]) movimento = true;
             evidenza[ORA] = e;
             const float s = statoPremuto == ORA ? 0.92f : 1.0f;   // si "schiaccia" un poco alla pressione
+            const float k = scalaOra();                          // icone piccole: testo piu' piccolo (vedi scalaOra)
             const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-            if (e > 0.01) {
-                const float hw = (r.right - r.left) / 2 * s, hh = (r.bottom - r.top) / 2 * s;
-                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * (float)e) : D2D1::ColorF(1, 1, 1, 0.55f * (float)e));
-                dc->FillRoundedRectangle({{cx - hw, cy - hh, cx + hw, cy + hh}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
+            const float h2 = 17 * dpi;                           // altezza di una riga (a grandezza piena)
+            // capsula attorno al testo: la stessa per il fondo e per l'evidenza del mouse
+            const float pw = (larghezzaOra / 2 + 8 * dpi) * k * s, ph = (h2 + 3 * dpi) * k * s;
+            const D2D1_ROUNDED_RECT capsula = {{cx - pw, cy - ph, cx + pw, cy + ph}, std::min(9 * dpi, ph), std::min(9 * dpi, ph)};
+            // fondo: compare solo quanto il vetro del dock e' trasparente (opacita' nelle impostazioni), cosi' l'ora si legge
+            // anche sopra una finestra chiara; col vetro pieno non c'e'. Lo dice la trasparenza della finestra del vetro
+            {
+                BYTE av = 255; DWORD fl = 0;
+                if (!GetLayeredWindowAttributes(vetro, nullptr, &av, &fl) || !(fl & LWA_ALPHA)) av = 255;
+                const float quanto = std::clamp((1 - av / 255.0f) / 0.8f, 0.0f, 1.0f);
+                if (quanto > 0.02f) {
+                    pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.5f * quanto) : D2D1::ColorF(1, 1, 1, 0.6f * quanto));
+                    dc->FillRoundedRectangle(capsula, pennello);
+                }
             }
-            dc->SetTransform(D2D1::Matrix3x2F::Scale(s, s, {cx, cy}));
+            if (e > 0.01) {
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * (float)e) : D2D1::ColorF(1, 1, 1, 0.55f * (float)e));
+                dc->FillRoundedRectangle(capsula, pennello);
+            }
+            // testo disegnato a grandezza piena e rimpicciolito attorno al centro (pressione e icone piccole)
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(s * k, s * k, {cx, cy}));
             const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.86f);
-            const float h2 = 17 * dpi;
+            const float lt = larghezzaOra / 2 + 8 * dpi;
             pennello->SetColor(ink);
-            dc->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fmtOra, {r.left, cy - h2 - 1 * dpi, r.right, cy + 1 * dpi}, pennello);
+            dc->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fmtOra, {cx - lt, cy - h2 - 1 * dpi, cx + lt, cy + 1 * dpi}, pennello);
             pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.72f});
-            dc->DrawText(testoData.c_str(), (UINT32)testoData.size(), fmtData, {r.left, cy + 1 * dpi, r.right, cy + h2 - 1 * dpi}, pennello);
+            dc->DrawText(testoData.c_str(), (UINT32)testoData.size(), fmtData, {cx - lt, cy + 1 * dpi, cx + lt, cy + h2 - 1 * dpi}, pennello);
             dc->SetTransform(D2D1::Matrix3x2F::Identity());
         }
 
