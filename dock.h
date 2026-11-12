@@ -246,6 +246,7 @@ public:
         SHAppBarMessage(ABM_SETSTATE, &tb);
 
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
+        ascoltaRete(true);   // la rete si rilegge quando Windows avvisa che e' cambiata
         aggiornaStato(true);
         aggiornaApp();
         attivo = true;
@@ -260,6 +261,7 @@ public:
 
     void chiudi() {
         fermaIcone();
+        ascoltaRete(false);
         if (!attivo) return;
         attivo = false;
         APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima;
@@ -886,9 +888,10 @@ private:
                 }
             }
             if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO) {
-                // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
-                if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
-                else chiediIcona(sorgenteIcona(v), 256);
+                // sempre dal thread delle icone, anche all'avvio: prima la prima volta si caricavano qui una per una
+                // (~25 ms ciascuna dalla shell) e FluidWin restava fermo ~0,7-1,6 s prima di mostrare il dock; ora il
+                // dock compare subito e le icone arrivano man mano
+                chiediIcona(sorgenteIcona(v), 256);
                 if (!vecchiaTrovata && !primaVolta) v.scala = 0;   // voce nuova: cresce da zero
             }
         }
@@ -1434,13 +1437,20 @@ private:
             if (GetDateFormatEx(loc, 0, &st, testi::t(L"dddd d MMMM", L"dddd, MMMM d"), b, 96, nullptr)) { testoNotch = b; if (!testoNotch.empty()) testoNotch[0] = (wchar_t)towupper(testoNotch[0]); }
             notch.testi(testoOra, testoNotch);   // il notch mostra ora e data
         }
-        const float v0 = volume; const bool m0 = muto, ok0 = audioOk;
-        leggiVolume();
-        cambiato |= (std::abs(v0 - volume) > 0.004f || m0 != muto || ok0 != audioOk);
-        if (tutto || ++conteggioTimer % 4 == 0) {
+        usa(0);   // controllo, widget: la scheda 0
+        // volume: lo mostra solo il centro di controllo (i tasti e la rotella lo leggono da se'). Prima si leggeva ogni
+        // 500 ms, chiedendo ogni volta a Windows il dispositivo audio
+        if (tutto || (pannelloTipo == P_CONTROLLO && !pChiusura)) {
+            const float v0 = volume; const bool m0 = muto, ok0 = audioOk;
+            leggiVolume();
+            cambiato |= (std::abs(v0 - volume) > 0.004f || m0 != muto || ok0 != audioOk);
+        }
+        // rete: quando Windows avvisa che un'interfaccia o un percorso e' cambiato (vedi suRete), con una rilettura di
+        // riserva ogni 30 s. Prima ogni 2 s, ~7 ms ciascuna (GetAdaptersAddresses)
+        ++conteggioTimer;
+        if (tutto || reteCambiata.exchange(false) || conteggioTimer % 60 == 0) {
             const int r0 = rete; leggiRete(); cambiato |= r0 != rete;
         }
-        usa(0);   // controllo, widget: la scheda 0
         if (cambiato) { dirty = true; if (pannelloTipo == P_CONTROLLO) pDirty = true; }
         if (pannelloTipo == P_CONTROLLO && !pChiusura) {   // l'uscita audio puo' cambiare (cuffie collegate)
             const std::wstring u0 = nomeUscita; leggiUscita(); if (u0 != nomeUscita) pDirty = true;
@@ -1486,6 +1496,22 @@ private:
     }
 
     // connessione attiva: una scheda accesa con un gateway (Wi-Fi o cavo)
+    // avvisi di Windows sulla rete (interfacce accese o spente, gateway che compaiono o spariscono): arrivano da un
+    // thread del sistema, qui si segna soltanto; la rilettura la fa aggiornaStato
+    std::atomic<bool> reteCambiata{false};
+    HANDLE avvisoInterfacce = nullptr, avvisoPercorsi = nullptr;
+    static void WINAPI suInterfaccia(PVOID c, PMIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE) { ((Motore*)c)->reteCambiata = true; }
+    static void WINAPI suPercorso(PVOID c, PMIB_IPFORWARD_ROW2, MIB_NOTIFICATION_TYPE) { ((Motore*)c)->reteCambiata = true; }
+    void ascoltaRete(bool si) {
+        if (si) {
+            if (!avvisoInterfacce) NotifyIpInterfaceChange(AF_UNSPEC, suInterfaccia, this, FALSE, &avvisoInterfacce);
+            if (!avvisoPercorsi) NotifyRouteChange2(AF_UNSPEC, suPercorso, this, FALSE, &avvisoPercorsi);
+        } else {
+            if (avvisoInterfacce) { CancelMibChangeNotify2(avvisoInterfacce); avvisoInterfacce = nullptr; }
+            if (avvisoPercorsi) { CancelMibChangeNotify2(avvisoPercorsi); avvisoPercorsi = nullptr; }
+        }
+    }
+
     void leggiRete() {
         Cronometro cr(this, "leggiRete");
         ULONG n = 16 * 1024;

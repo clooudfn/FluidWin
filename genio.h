@@ -19,6 +19,10 @@
 #include <algorithm>
 #include "stampa.h"
 #include "gpu.h"
+// bytecode degli shader compilato insieme a FluidWin (compila.ps1, genera_shader.cpp); se manca si compila all'avvio
+#if !defined(FLUIDWIN_GENERA_SHADER) && __has_include("shader_compilati.h")
+#include "shader_compilati.h"
+#endif
 
 namespace genio {
 
@@ -52,7 +56,8 @@ static const int RIGHE = 160;   // righe della griglia: piu' righe = curve piu' 
 
 struct Costanti { float origine[2]; float dimensione[2]; float alfa; float raggio; float texDim[2]; float ombra; float pad[3]; };
 
-static const char* SHADER = R"(
+// (con shader_compilati.h questo testo lo usa solo genera_shader.cpp)
+[[maybe_unused]] static const char* SHADER = R"(
 cbuffer C : register(b0) { float2 origine; float2 dimensione; float alfa; float raggio; float2 texDim; float ombra; float alza; float raggioY; };
 Texture2D tex : register(t0);
 SamplerState camp : register(s0);
@@ -146,17 +151,27 @@ public:
         ID3D11Texture2D* bb = nullptr; sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
         dev->CreateRenderTargetView(bb, nullptr, &rtv); bb->Release();
 
+        // shader: gia' compilati con FluidWin (shader_compilati.h), altrimenti qui (~19 ms)
+#ifdef FLUIDWIN_SHADER_COMPILATI
+        const void *cvs = shader_compilati::GENIO_VS, *cps = shader_compilati::GENIO_PS;
+        const SIZE_T nvs = sizeof(shader_compilati::GENIO_VS), nps = sizeof(shader_compilati::GENIO_PS);
+#else
         ID3DBlob *bvs = nullptr, *bps = nullptr, *err = nullptr;
         if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "vs", "vs_4_0", 0, 0, &bvs, &err))) return false;
-        if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "ps", "ps_4_0", 0, 0, &bps, &err))) return false;
-        dev->CreateVertexShader(bvs->GetBufferPointer(), bvs->GetBufferSize(), nullptr, &vs);
-        dev->CreatePixelShader(bps->GetBufferPointer(), bps->GetBufferSize(), nullptr, &ps);
+        if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "ps", "ps_4_0", 0, 0, &bps, &err))) { bvs->Release(); return false; }
+        const void *cvs = bvs->GetBufferPointer(), *cps = bps->GetBufferPointer();
+        const SIZE_T nvs = bvs->GetBufferSize(), nps = bps->GetBufferSize();
+#endif
+        dev->CreateVertexShader(cvs, nvs, nullptr, &vs);
+        dev->CreatePixelShader(cps, nps, nullptr, &ps);
         D3D11_INPUT_ELEMENT_DESC el[] = {
             {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
             {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
         };
-        dev->CreateInputLayout(el, 2, bvs->GetBufferPointer(), bvs->GetBufferSize(), &layout);
+        dev->CreateInputLayout(el, 2, cvs, nvs, &layout);
+#ifndef FLUIDWIN_SHADER_COMPILATI
         bvs->Release(); bps->Release();
+#endif
 
         D3D11_BUFFER_DESC vb{}; vb.ByteWidth = sizeof(Vertice) * RIGHE * 2; vb.Usage = D3D11_USAGE_DYNAMIC;
         vb.BindFlags = D3D11_BIND_VERTEX_BUFFER; vb.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;

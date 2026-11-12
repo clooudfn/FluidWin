@@ -126,7 +126,7 @@ inline auto Motore::preparaVista(int tipo) -> void {
     if (tipo == P_SFONDO) leggiAppSfondo();   // l'elenco nuovo arriva dal thread e l'altezza si adatta
     else if (tipo == P_WIDGET) { widD.aggiorna(); wid = widD.copia(); }
     else if (tipo == P_NOTIFICHE) { Cronometro cr(this, "notifiche"); permessoN = lettoreN.leggi(listaN); }
-    else if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
+    else if (tipo == P_CONTROLLO) { leggiUscita(); leggiVolume(); leggiRete(); sis.avvia(); sis.rileggi(); }   // (volume e rete: freschi)
     else if (tipo == P_MIXER) mix.leggi();
     else if (tipo == P_APPUNTI) versioneAppunti = appunti::Cronologia::io().versione;
 }
