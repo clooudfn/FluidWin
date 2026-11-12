@@ -114,6 +114,11 @@ private:
     ULONGLONG tEsp = 0; double kEsp = 0;
     bool premutoPrima = true, escPrima = true;
     bool conSimboli = false, versoAltoM = false;   // qualche voce ha l'icona (il testo si sposta); il menu si apre verso l'alto
+    // menu piu' alto dello schermo (tutte le "altre opzioni" della shell): la finestra si ferma all'altezza dello
+    // schermo e le voci scorrono (rotella, mouse fermo sulla fascia in alto o in basso, frecce della tastiera)
+    int hMax = 0;           // altezza massima della finestra
+    float scorri = 0;       // di quanto sono salite le voci
+    ULONGLONG tScorri = 0;  // ultimo passo dello scorrimento dai bordi
 
     Menu(const std::vector<Voce>& v, HWND p, std::function<void(HMENU)> pr) : voci(v), proprietario(p), prepara(pr) {}
     ~Menu() {
@@ -207,9 +212,10 @@ private:
             for (size_t i = 0; i < voci.size(); i++) if (voci[i].extra) { const float a = altezza(voci[i]); rett[i] = {6 * dpi, yy, W - 6 * dpi, yy + a}; yy += a; }
             hPieno = yy + 6 * dpi;
         }
-        H = (int)std::ceil(hCompatto);
         // dentro lo schermo
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(mon, &mi);
+        hMax = (int)(mi.rcWork.bottom - mi.rcWork.top);
+        H = std::min((int)std::ceil(hCompatto), hMax);
         int x = pt.x, y = versoAlto ? pt.y - H : pt.y;
         if (x + W > mi.rcWork.right) x = std::max((int)mi.rcWork.left, (padre ? (int)padre->sinistraFin() - W : (int)mi.rcWork.right - W));
         if (y + H > mi.rcWork.bottom) y = mi.rcWork.bottom - H;
@@ -237,12 +243,13 @@ private:
     void passoEspansione() {
         kEsp = std::min(1.0, (GetTickCount64() - tEsp) / 170.0);
         const double e = 1 - std::pow(1 - kEsp, 3);
-        const int h = (int)std::ceil(hCompatto + (hPieno - hCompatto) * e);
+        const int h = std::min((int)std::ceil(hCompatto + (hPieno - hCompatto) * e), hMax);
         MONITORINFO mi{}; mi.cbSize = sizeof(mi); GetMonitorInfoW(MonitorFromWindow(fin, MONITOR_DEFAULTTONEAREST), &mi);
         const int y = std::max((int)mi.rcWork.top, std::min(y0, (int)mi.rcWork.bottom - h));
         if (alfa < 255) posa(1);   // (se l'apertura non era finita, la si chiude qui)
         SetWindowPos(fin, HWND_TOPMOST, x0, y, W, h, SWP_NOACTIVATE);
         H = h;
+        scorri = std::min(scorri, maxScorri());
         if (rt) rt->Resize(D2D1::SizeU(W, H));
         disegna();
     }
@@ -251,10 +258,53 @@ private:
 
     bool selezionabile(int i) const { return i >= 0 && i < (int)voci.size() && !voci[i].separatore && !voci[i].titolo && !voci[i].disattivata && (!voci[i].extra || espanso); }
 
+    // x, y: coordinate della finestra (le voci sono spostate di 'scorri'); niente voci sotto le fasce di scorrimento
     int voceIn(int x, int y) const {
+        if (fasciaSu() && y < FASCIA * dpi) return -1;
+        if (fasciaGiu() && y >= H - FASCIA * dpi) return -1;
+        const float yc = y + scorri;
         for (int i = 0; i < (int)rett.size(); i++)
-            if (x >= rett[i].left && x < rett[i].right && y >= rett[i].top && y < rett[i].bottom) return selezionabile(i) ? i : -1;
+            if (x >= rett[i].left && x < rett[i].right && yc >= rett[i].top && yc < rett[i].bottom) return selezionabile(i) ? i : -1;
         return -1;
+    }
+
+    // ---- scorrimento (menu piu' alto dello schermo) ----
+    static constexpr float FASCIA = 18;   // fasce in alto e in basso con la freccia, quando c'e' altro da vedere
+    float maxScorri() const { return std::max(0.0f, (espanso ? hPieno : hCompatto) - (float)H); }
+    bool fasciaSu() const { return scorri > 0.5f; }
+    bool fasciaGiu() const { return scorri < maxScorri() - 0.5f; }
+    // porta lo scorrimento a y; la voce sotto il mouse cambia con le voci
+    void scorriA(float y) {
+        const float n = std::clamp(y, 0.0f, maxScorri());
+        if (std::fabs(n - scorri) < 0.01f) return;
+        scorri = n;
+        POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
+        RECT cr; GetClientRect(fin, &cr);
+        sopra = PtInRect(&cr, c) ? voceIn(c.x, c.y) : sopra;
+        disegna();
+    }
+    // la voce i tutta dentro la finestra (spostandosi con la tastiera)
+    void mostraVoce(int i) {
+        if (i < 0 || i >= (int)rett.size() || maxScorri() <= 0) return;
+        const float m = FASCIA * dpi;
+        if (rett[i].top - scorri < m) scorriA(rett[i].top - m);
+        else if (rett[i].bottom - scorri > H - m) scorriA(rett[i].bottom - H + m);
+    }
+    // mouse fermo su una delle due fasce: scorre da solo (la rotella puo' finire a un'altra finestra se FluidWin non e'
+    // in primo piano). true se sta scorrendo
+    bool scorriDaiBordi() {
+        if (maxScorri() <= 0) { tScorri = 0; return false; }
+        POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
+        float verso = 0;
+        if (c.x >= 0 && c.x < W) {
+            if (fasciaSu() && c.y >= 0 && c.y < FASCIA * dpi) verso = -1;
+            else if (fasciaGiu() && c.y < H && c.y >= H - FASCIA * dpi) verso = 1;
+        }
+        const ULONGLONG t = GetTickCount64();
+        if (!verso) { tScorri = 0; return false; }
+        if (tScorri) scorriA(scorri + verso * 0.9f * dpi * (float)std::min<ULONGLONG>(t - tScorri, 50));   // ~900 px/s
+        tScorri = t;
+        return true;
     }
 
     void disegna() {
@@ -266,7 +316,7 @@ private:
         rt->FillRectangle({0, 0, (float)W, (float)H}, pen);
         const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.9f);
         if (conFreccia) {   // freccia: giu' da chiusa, su da aperta (gira mentre il menu si allunga)
-            const D2D1_RECT_F& r = rettFreccia;
+            const D2D1_RECT_F r = {rettFreccia.left, rettFreccia.top - scorri, rettFreccia.right, rettFreccia.bottom - scorri};
             const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
             pen->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.08f));
             rt->DrawLine({r.left + 8 * dpi, r.top + 1}, {r.right - 8 * dpi, r.top + 1}, pen, 1.0f);
@@ -278,8 +328,8 @@ private:
         }
         for (int i = 0; i < (int)voci.size(); i++) {
             const Voce& v = voci[i];
-            const D2D1_RECT_F& r = rett[i];
-            if (v.extra && r.top > H) continue;
+            const D2D1_RECT_F r = {rett[i].left, rett[i].top - scorri, rett[i].right, rett[i].bottom - scorri};   // spostata dallo scorrimento
+            if (r.top > H || r.bottom < 0) continue;
             if (v.pulsante) {   // pulsante con icona (riga in cima)
                 const bool ev = i == sopra;
                 if (ev) { pen->SetColor(D2D1::ColorF(0.04f, 0.52f, 1.0f, 1)); rt->FillRoundedRectangle({r, 8 * dpi, 8 * dpi}, pen); }
@@ -325,6 +375,17 @@ private:
                 rt->DrawLine({cx - 2 * dpi, cy - 4 * dpi}, {cx + 2 * dpi, cy}, pen, 1.5f * dpi);
                 rt->DrawLine({cx + 2 * dpi, cy}, {cx - 2 * dpi, cy + 4 * dpi}, pen, 1.5f * dpi);
             }
+        }
+        // fasce di scorrimento: coprono le voci che passano sotto, con una freccia verso il resto del menu
+        for (int lato = 0; lato < 2; lato++) {
+            if (lato == 0 ? !fasciaSu() : !fasciaGiu()) continue;
+            const float a = FASCIA * dpi, y = lato == 0 ? 0 : H - a, cx = W / 2.0f, cy = y + a / 2;
+            pen->SetColor(scuro ? D2D1::ColorF(0.13f, 0.13f, 0.15f, 0.96f) : D2D1::ColorF(0.97f, 0.97f, 0.98f, 0.96f));
+            rt->FillRectangle({0, y, (float)W, y + a}, pen);
+            pen->SetColor({ink.r, ink.g, ink.b, ink.a * 0.6f});
+            const float s = lato == 0 ? -1.0f : 1.0f;   // punta in su o in giu'
+            rt->DrawLine({cx - 5 * dpi, cy - 2 * s * dpi}, {cx, cy + 3 * s * dpi}, pen, 1.6f * dpi);
+            rt->DrawLine({cx, cy + 3 * s * dpi}, {cx + 5 * dpi, cy - 2 * s * dpi}, pen, 1.6f * dpi);
         }
         rt->EndDraw();
         ValidateRect(fin, nullptr);
@@ -452,7 +513,7 @@ private:
         s.padre = this;
         RECT r; GetWindowRect(fin, &r);
         inSotto = true;   // il sottomenu prende il mouse: per questo menu non e' un motivo per chiudersi
-        const UINT id = s.esegui({r.right - (LONG)(4 * dpi), r.top + (LONG)rett[i].top - (LONG)(6 * dpi)}, false, this);
+        const UINT id = s.esegui({r.right - (LONG)(4 * dpi), r.top + (LONG)(rett[i].top - scorri) - (LONG)(6 * dpi)}, false, this);
         inSotto = false;
         aperto = -1;
         if (id) { scelta = id; fine = true; return; }
@@ -513,6 +574,8 @@ private:
                 if (!animazioni() && MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue;
             }
             // animazioni di FluidWin in corso: prima i messaggi in coda, poi un fotogramma (che aspetta il vblank)
+            // mouse sulla fascia in alto o in basso: le voci scorrono (un passo ogni 8 ms circa)
+            if (scorriDaiBordi() && !animazioni() && MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue;
             if (animazioni() && !PeekMessageW(&msg, nullptr, 0, 0, PM_NOREMOVE)) { passoAnimazioni(); continue; }
             if (!PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) { MsgWaitForMultipleObjects(0, nullptr, FALSE, 25, QS_ALLINPUT); continue; }
             if (msg.message == WM_QUIT) { PostQuitMessage((int)msg.wParam); break; }
@@ -568,7 +631,7 @@ private:
                     if (padre) controllaPadre();   // mouse tornato sul menu padre, su un'altra voce: il sottomenu si chiude
                     if (fine) return true;
                     // sulla freccia in fondo, senza cliccare: il menu si allunga con le altre voci
-                    if (dentro && conFreccia && !espanso && p.y >= rettFreccia.top - 2 && p.y < rettFreccia.bottom + 4) { espanso = true; tEsp = GetTickCount64(); }
+                    if (dentro && conFreccia && !espanso && p.y + scorri >= rettFreccia.top - 2 && p.y + scorri < rettFreccia.bottom + 4) { espanso = true; tEsp = GetTickCount64(); }
                     const int s = dentro ? voceIn(p.x, p.y) : -1;
                     if (s != sopra) {
                         sopra = s; disegna();
@@ -601,11 +664,15 @@ private:
                         s = (s + (k == VK_DOWN ? 1 : -1) + (int)voci.size()) % (int)voci.size();
                         if (selezionabile(s)) break;
                     }
-                    sopra = s; disegna(); return true;
+                    sopra = s; mostraVoce(s); disegna(); return true;
                 }
                 if (k == VK_RETURN || k == VK_SPACE || (k == VK_RIGHT && sopra >= 0 && voci[sopra].sotto)) { scegli(sopra); return true; }
                 return true;
             }
+            // rotella: arriva alla finestra col fuoco (quella di FluidWin dietro al menu) o a quella sotto il mouse
+            case WM_MOUSEWHEEL:
+                if (maxScorri() > 0) scorriA(scorri - GET_WHEEL_DELTA_WPARAM(msg.wParam) / 120.0f * 90 * dpi);
+                return true;
             case WM_CHAR: case WM_SYSCHAR: case WM_KEYUP: case WM_SYSKEYUP: return true;
             case WM_CAPTURECHANGED: break;
             case WM_ACTIVATEAPP: if (!msg.wParam) { fine = true; scelta = 0; } break;
