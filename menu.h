@@ -28,6 +28,13 @@ namespace menu {
 // gelatina, dock) le fa avanzare il ciclo del menu, con queste due funzioni di FluidWin. Il passo aspetta lui il vblank
 inline bool (*animazioniInCorso)() = nullptr;
 inline void (*passoAnimazioni)() = nullptr;
+
+// Menu aperti adesso (con i sottomenu) e richiesta di chiuderli tutti. Un clic destro che arriva mentre un menu e'
+// aperto (il gancio del mouse lo trattiene, quindi il menu non lo vede come clic fuori) passa dal ciclo del menu:
+// invece di aprire un secondo menu sopra il primo, FluidWin chiude quelli aperti e poi apre il nuovo (come Windows)
+inline int aperti = 0;
+inline bool chiudiTutti = false;
+inline void chiudi() { if (aperti > 0) chiudiTutti = true; }
 inline bool animazioni() { return animazioniInCorso && passoAnimazioni && animazioniInCorso(); }
 
 struct Voce {
@@ -517,6 +524,7 @@ private:
         inSotto = false;
         aperto = -1;
         if (id) { scelta = id; fine = true; return; }
+        if (chiudiTutti) { fine = true; scelta = 0; return; }   // (chiusi tutti: niente altro sottomenu)
         SetCapture(fin);
         // chiuso perche' il mouse e' rimasto su un'altra voce: si evidenzia quella (e se ha un sottomenu si apre)
         POINT c; GetCursorPos(&c); ScreenToClient(fin, &c);
@@ -554,6 +562,7 @@ private:
         versoAltoM = versoAlto;
         crea(pt, versoAlto);
         if (!fin || !rt) return 0;   // (grafica non disponibile: niente menu, come se fosse stato annullato)
+        struct Conta { Conta() { aperti++; } ~Conta() { if (--aperti == 0) chiudiTutti = false; } } conta;
         ShowWindow(fin, SW_SHOWNOACTIVATE);
         disegna();
         SetCapture(fin);
@@ -566,6 +575,7 @@ private:
             // allora non porta i clic fuori dal menu, ne' l'Esc. Si guardano i tasti direttamente
             fuoriOEsc();
             if (padre && tAltrove) controllaPadre();
+            if (chiudiTutti) { fine = true; scelta = 0; }   // chiusi tutti da fuori (vedi menu::chiudi)
             if (fine) break;
             if (espanso && kEsp < 1) { passoEspansione(); if (MsgWaitForMultipleObjects(0, nullptr, FALSE, 8, QS_ALLINPUT) == WAIT_TIMEOUT) continue; }
             // apertura: dissolvenza e scivolata (150 ms)
