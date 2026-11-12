@@ -110,6 +110,9 @@ public:
         bersagli(); ridisegna();
     }
 
+    // il mouse e' arrivato nella fascia in alto dello schermo (gancio del mouse in fluidwin.cpp): controlli veloci
+    void sveglia() { if (visibile) ritmo(true); }
+
     // volume 0..1 dai tasti; false se il notch non si vede (allora lo mostra l'indicatore di vetro)
     bool volume(float liv, bool muto) {
         if (!visibile) return false;
@@ -200,17 +203,27 @@ private:
 
     static double adesso() { return vetro::ms() / 1000.0; }
 
+    // Ritmo dei controlli (timer 2): 50 ms mentre succede qualcosa (mouse vicino, barrette della musica, timer, notifica,
+    // volume, avviso, animazioni), altrimenti 1 s, che basta per accorgersi di una canzone nuova o del microfono acceso.
+    // Prima sempre 50 ms: 20 risvegli al secondo anche col PC fermo. Il mouse che arriva in alto lo sveglia (sveglia)
+    bool veloce = false;
+    void ritmo(bool v) {
+        if (v == veloce && visibile) return;
+        veloce = v;
+        SetTimer(fin, 2, v ? 50 : 1000, nullptr);
+    }
+
     void visibilita() {
         const bool si = acceso && modoAtt != NASCOSTO && fin;
         if (si == visibile) return;
         visibile = si;
         if (si) {
-            KillTimer(fin, 2); SetTimer(fin, 2, 50, nullptr);   // mouse, musica, scadenze
+            ritmo(true);   // mouse, musica, scadenze (vedi ritmo)
             bersagli(true); ridisegna();
             ShowWindow(fin, SW_SHOWNOACTIVATE);
             SetWindowPos(fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         } else {
-            KillTimer(fin, 2); vetro::fermaBattito(fin, 1); animando = false;
+            KillTimer(fin, 2); veloce = false; vetro::fermaBattito(fin, 1); animando = false;
             sopra = false; attesa = 0; cliccabile(false);
             finisciNotifica(); fineVolume = 0; fineAvviso = 0;
             ShowWindow(fin, SW_HIDE);
@@ -376,6 +389,12 @@ private:
         else if (brano.suona && (scena == MUSICA || scena == APERTO) && !animando) ridisegnaBarrette();
         // ogni 2 s di nuovo in cima (un'app sempre in primo piano aperta dopo poteva coprirlo)
         if (GetTickCount64() - tCima > 2000) { tCima = GetTickCount64(); SetWindowPos(fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE); }
+        // ritmo: veloce finche' succede qualcosa o il mouse e' vicino (fascia di 220 px attorno al notch)
+        const LONG vicino = (LONG)(220 * dpi);
+        const bool mouseVicino = p.x >= c.left - vicino && p.x <= c.right + vicino && p.y <= c.bottom + vicino;
+        ritmo(mouseVicino || sopra || attesa > 0 || scena != ORA || animando || notificaAttiva || brano.suona ||
+              comodita::timerAttivo() || comodita::timerSuona() || t < fineVolume || t < fineAvviso);
+        // (con un'app a schermo intero la trasparenza segue il mouse solo da vicino: basta mouseVicino)
     }
 
     // ---- disposizione dei contenuti (coordinate della finestra) ----

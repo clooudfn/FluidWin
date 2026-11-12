@@ -73,6 +73,7 @@ inline auto Motore::creaPannello(HINSTANCE inst) -> bool {
 }
 
 inline auto Motore::apriPannello(int tipo) -> void {
+    svegliaBordo();   // (il timer del bordo chiude il pannello al clic fuori)
     const int slot = slotDiTipo(tipo);
     usa(1 - slot);
     const bool altraAperta = pannelloTipo != P_NESSUNO && !pChiusura;
@@ -1764,6 +1765,7 @@ inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= 
 // Il centro di controllo (icona a destra nel dock, notch, Win+N...): si apre sulla vista chiesta. Gia' aperto: la
 // stessa vista lo chiude, un'altra ci passa dentro la stessa finestra. Col launcher aperto prima si chiude lui
 inline auto Motore::apriCentro(int tipo) -> void {
+    svegliaBordo();   // (il timer del bordo chiude il centro di controllo al clic fuori)
     if (registro) { char b[120]; snprintf(b, 120, "centro di controllo: chiesta vista %d (attivo %d, schermo intero %d, launcher %d, vista ora %d%s)", tipo, (int)attivo, (int)nascostoSchermoIntero, (int)lAperto, pannelloTipo, pChiusura ? ", si chiude" : ""); scrivi(b); }
     if (!attivo || nascostoSchermoIntero) return;
     if (lAperto) { if (!lChiusura) chiudiLauncher(); if (dopo != 2) apriDopo(2, tipo); return; }
