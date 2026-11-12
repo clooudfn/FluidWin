@@ -10,6 +10,6 @@ Set-Location $PSScriptRoot
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 & "$bin\g++.exe" -O2 -std=gnu++20 -Wall -municode -mwindows fluidwin.cpp icona.o -o FluidWin.exe `
     -ld3d11 -ldxgi -ldcomp -ld3dcompiler -ld2d1 -ldwrite -ldwmapi -luser32 -lgdi32 -lshell32 -lole32 -loleaut32 -lversion `
-    -lpropsys -luuid -liphlpapi -lwindowscodecs -lruntimeobject -lpowrprof -lshlwapi -lshcore -lsetupapi -lwinmm -ldxva2 -lwinhttp -static
+    -lpropsys -luuid -liphlpapi -lwindowscodecs -lruntimeobject -lpowrprof -lshlwapi -lshcore -lsetupapi -lwinmm -ldxva2 -lwinhttp -lcomdlg32 -static
 if ($LASTEXITCODE) { exit $LASTEXITCODE }
 "FluidWin.exe pronto"

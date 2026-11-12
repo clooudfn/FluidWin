@@ -214,7 +214,7 @@ public:
             typedef HRESULT (WINAPI *Fn)(HMONITOR, int, UINT*, UINT*);
             if (auto f = (Fn)GetProcAddress(sh, "GetDpiForMonitor")) if (SUCCEEDED(f(mon, 0, &dx, &dy))) dpi = dx / 96.0f;
         }
-        S = 42 * dpi; M = 66 * dpi;   // icone a riposo e ingrandite
+        S = latoIcone * dpi; M = S * INGRANDITE;   // icone a riposo e ingrandite (impostazione: impostaLatoIcone)
         PAD = 8 * dpi; GAP = 6 * dpi; MARGINE = 8 * dpi;
         RAGGIO = raggio::vetro() * dpi;   // come gli angoli DWM del vetro: fondo e vetro devono coincidere
         altezzaDock = S + 2 * PAD;
@@ -318,19 +318,7 @@ public:
         schermo = mi.rcMonitor;
         ::vetro::schermoDock() = schermo; sis.schermo(schermo);
         const int w = schermo.right - schermo.left;
-        if (w != W && w > 0 && sc && dc) {
-            dc->SetTarget(nullptr);
-            if (bersaglio) { bersaglio->Release(); bersaglio = nullptr; }
-            if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)w, (UINT)H, DXGI_FORMAT_UNKNOWN, 0))) W = w;
-            IDXGISurface* sup = nullptr;
-            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup))) {
-                D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-                                                                     D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-                dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglio); sup->Release();
-            }
-            dc->SetTarget(bersaglio);
-            if (!bersaglio) perso = true;   // superficie non ricreata: si riparte da capo (riavvio di FluidWin)
-        }
+        if (w != W && w > 0) ridimensiona(w, H);
         SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
         if (appbarOk) aggiornaAppbar();   // lo spazio riservato passa al nuovo schermo
         rettVetro = rettVetroStato = rettVetroOra = RECT{};          // i vetri si rimettono al prossimo fotogramma
@@ -341,6 +329,22 @@ public:
         notch.posto(schermo, dpi);   // il notch va in alto al centro del nuovo schermo
         ricordaSchermo(schermo);
         dirty = true;
+    }
+
+    // superficie della finestra delle icone a una misura nuova (schermo di un'altra larghezza, icone di un'altra misura)
+    void ridimensiona(int w, int h) {
+        if (!sc || !dc || w <= 0 || h <= 0) return;
+        dc->SetTarget(nullptr);
+        if (bersaglio) { bersaglio->Release(); bersaglio = nullptr; }
+        if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)w, (UINT)h, DXGI_FORMAT_UNKNOWN, 0))) { W = w; H = h; }
+        IDXGISurface* sup = nullptr;
+        if (SUCCEEDED(sc->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup))) {
+            D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                                                                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglio); sup->Release();
+        }
+        dc->SetTarget(bersaglio);
+        if (!bersaglio) perso = true;   // superficie non ricreata: si riparte da capo (riavvio di FluidWin)
     }
 
     // Come su macOS: il mouse fermo sul bordo in basso di un altro schermo porta li' il dock. Prima scende sotto il
@@ -546,6 +550,38 @@ public:
         aggiornaAppbar();
         controllaFinestre(true);
     }
+    // impostazione: lato delle icone a riposo (px a 100%). Con loro cambiano le ingrandite (stessa proporzione),
+    // l'altezza del dock, la finestra delle icone e lo spazio riservato
+    void impostaLatoIcone(int px) {
+        px = std::clamp(px, 24, 96);
+        if (px == latoIcone) return;
+        latoIcone = px;
+        if (!attivo) return;   // (all'avvio le misure le prende inizializza)
+        S = latoIcone * dpi; M = S * INGRANDITE;
+        altezzaDock = S + 2 * PAD;
+        const int h = (int)std::ceil(altezzaDock + MARGINE + (M - S) + 64 * dpi);
+        if (h != H) ridimensiona(W, h);
+        SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
+        rettVetro = rettVetroStato = rettVetroOra = RECT{};
+        regioneDock = regioneIsola = regioneEtichetta = RECT{};
+        if (appbarOk) aggiornaAppbar();
+        controllaFinestre(true);
+        dirty = true;
+    }
+    // impostazione: colore del fondo del dock. 0 = automatico (chiaro o scuro col tema), altrimenti 0x01RRGGBB.
+    // Il colore tinge il velo sopra il vetro; puntini, separatori e testi diventano chiari o scuri a seconda di quanto
+    // e' chiaro il colore (render: scuro)
+    void impostaColore(DWORD c) {
+        const bool aut = !(c & 0x01000000);
+        const D2D1_COLOR_F col = D2D1::ColorF(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, 1);
+        if (aut == coloreAuto && (aut || (col.r == coloreFondo.r && col.g == coloreFondo.g && col.b == coloreFondo.b))) return;
+        coloreAuto = aut; coloreFondo = col;
+        fondoScuro = 0.2126f * col.r + 0.7152f * col.g + 0.0722f * col.b < 0.55f;
+        // il vetro acrilico sotto: chiaro o scuro come il colore (automatico: come il tema)
+        BOOL s = coloreAuto ? temaScuro() : fondoScuro;
+        for (HWND v : {vetro, vetroStato, vetroOra}) if (v) DwmSetWindowAttribute(v, DWMWA_USE_IMMERSIVE_DARK_MODE, &s, sizeof(s));
+        dirty = true;
+    }
     void impostaOpacita(float a) {
         a = std::clamp(a, 0.2f, 1.0f);
         if (std::fabs(a - opacita) < 0.001f) return;
@@ -609,6 +645,10 @@ private:
     bool vuoleNascondersiI = false;   // l'isola sta sempre nascosta, il dock solo sotto le finestre
     bool autoNascondi = true;         // impostazione: il dock scende sotto le finestre ingrandite o che lo coprono
     float opacita = 1;                // impostazione: opacita' del fondo del dock (vetro e velo), 0.2..1
+    int latoIcone = 42;               // impostazione: lato delle icone a riposo, px a 100%
+    static constexpr float INGRANDITE = 66.0f / 42.0f;   // icone ingrandite dalla lente: proporzione fissa con quelle a riposo
+    bool coloreAuto = true, fondoScuro = false;           // impostazione: colore del fondo (vedi impostaColore)
+    D2D1_COLOR_F coloreFondo{};
     bool spazioRiservato = false;     // impostazione: spazio riservato in basso (appbar)...
     bool appbarOk = false;            // ... e registrato davvero presso Windows
 
@@ -1120,7 +1160,8 @@ private:
 
     // ---- disegno ----
     void render(double t) {
-        const bool scuro = temaScuro();
+        // chiaro o scuro: dal tema, o da quanto e' chiaro il colore scelto per il dock (puntini, separatori, testi)
+        const bool scuro = coloreAuto ? temaScuro() : fondoScuro;
         bool movimento = false;
 
         // comparsa e scomparsa delle icone
@@ -1190,7 +1231,7 @@ private:
         const float fondoL = std::round(sinistra - PAD + (float)std::min(0.0, tiroX));
         const float fondoR = std::round(sinistra + tot + PAD + (float)std::max(0.0, tiroX));
         const float fondoT = std::round(baseT - (float)tiroY);
-        disegnaFondo({fondoL, fondoT, fondoR, fondoB}, scuro, opacita);
+        disegnaFondo({fondoL, fondoT, fondoR, fondoB}, scuro, opacita, coloreAuto ? nullptr : &coloreFondo);
         aggiornaVetro(vetro, rettVetro, fondoL, fondoT, fondoR, fondoB);
         zonaDockL = fondoL; zonaDockR = fondoR;
 
@@ -1286,8 +1327,10 @@ private:
 
     // velo chiaro, bordo luminoso e sottile contorno scuro: stessa forma del vetro sotto
     // fondo di vetro (velo e bordi sopra il vetro acrilico); a: opacita' (quella del dock, impostazione; 1 i pannelli)
-    void disegnaFondo(const D2D1_RECT_F& f, bool scuro, float a = 1) {
-        pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f * a) : D2D1::ColorF(1, 1, 1, 0.38f * a));
+    // tinta: colore scelto per il dock (nullptr: chiaro o scuro col tema), piu' coprente perche' si veda
+    void disegnaFondo(const D2D1_RECT_F& f, bool scuro, float a = 1, const D2D1_COLOR_F* tinta = nullptr) {
+        pennello->SetColor(tinta ? D2D1::ColorF(tinta->r, tinta->g, tinta->b, 0.62f * a)
+                                 : scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f * a) : D2D1::ColorF(1, 1, 1, 0.38f * a));
         dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
         pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * a) : D2D1::ColorF(1, 1, 1, 0.75f * a));
         dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.0f);
