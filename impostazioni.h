@@ -22,8 +22,11 @@ struct Valori {
     bool winS = true;             // Win+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
+    bool dockAuto = true;         // dock a scomparsa sotto le finestre ingrandite o che lo coprono
+    int dockOpacita = 100;        // opacita' del fondo del dock, in percento (OPACITA_MIN..100)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
 };
+constexpr int OPACITA_MIN = 20, OPACITA_PASSO = 5;
 
 inline Valori& valori() { static Valori v; return v; }
 
@@ -45,6 +48,8 @@ inline void carica() {
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
     v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
+    v.dockAuto = leggiDword(L"DockAutoNascosto", 1);
+    v.dockOpacita = std::clamp((int)leggiDword(L"DockOpacita", 100), OPACITA_MIN, 100);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
     testi::lingua() = v.lingua;
     // la capsula dei tasti non c'e' piu' (1.1.1): via i suoi valori rimasti dalle versioni prima
@@ -58,6 +63,7 @@ inline void salva() {
     scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
     scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
+    scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
 }
 
 // ---- la finestra ----
@@ -120,13 +126,23 @@ public:
                 return true;
             case WM_PAINT: disegna(); return true;
             case WM_MOUSEMOVE: {
+                if (trascina) { opacitaDa((float)GET_X_LPARAM(l)); return true; }
                 if (!dentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, v.fin, 0}; TrackMouseEvent(&tm); dentro = true; }
                 const int s = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (s != sopra) { sopra = s; disegna(); }
                 return true;
             }
-            case WM_MOUSELEAVE: dentro = false; sopra = -1; disegna(); return true;
-            case WM_LBUTTONUP: clic(zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l))); return true;
+            case WM_MOUSELEAVE: dentro = false; if (!trascina) sopra = -1; disegna(); return true;
+            case WM_LBUTTONDOWN:   // sul cursore dell'opacita': si trascina (anche fuori dal binario, finche' non si lascia)
+                if (zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l)) == Z_OPACITA) {
+                    trascina = true; SetCapture(v.fin); opacitaDa((float)GET_X_LPARAM(l));
+                }
+                return true;
+            case WM_LBUTTONUP:
+                if (trascina) { trascina = false; ReleaseCapture(); salva(); disegna(); return true; }
+                clic(zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l)));
+                return true;
+            case WM_CAPTURECHANGED: if (trascina) { trascina = false; salva(); disegna(); } return true;
             case WM_KEYDOWN:
                 if (w == VK_ESCAPE) chiudi();
                 else if (w == VK_DOWN || w == VK_UP) vaiASezione((sezione + (w == VK_DOWN ? 1 : SEZIONI - 1)) % SEZIONI);   // frecce: sezioni
@@ -144,10 +160,12 @@ public:
 
 private:
     static constexpr float LARGO = 780, ALTO = 500, BARRA = 240;
-    enum { S_GENERALE, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, SEZIONI };
+    enum { S_GENERALE, S_DOCK, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, SEZIONI };
     // nome e spiegazione in italiano e in inglese, sezione
     struct Voce { const wchar_t *nome, *name, *spiega, *explain; bool Valori::*campo; int sezione; };
     const std::vector<Voce> voci = {
+        {L"Nascondi automaticamente", L"Auto-hide",
+         L"Spento: resta su anche sopra le finestre ingrandite", L"Off: it stays up over maximized windows too", &Valori::dockAuto, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Effetto genio", L"Genie effect",
@@ -178,9 +196,24 @@ private:
     ULONGLONG t0 = 0, tSez = 0, copiataAlle = 0;
     double k = 0, kSez = 1;
     std::vector<double> anim;
-    // zone: 0..n-1 le voci, 100+i la lingua, 200 chiudi, 300+i le sezioni
+    // zone: 0..n-1 le voci, 100+i la lingua, 200 chiudi, 300+i le sezioni, 400 diagnostica, 500 opacita' del dock
     struct Zona { D2D1_RECT_F r; int id; };
     std::vector<Zona> zone;
+    static constexpr int Z_OPACITA = 500;
+    // cursore dell'opacita' del dock: binario (dove si disegna) e trascinamento in corso. Il dock cambia mentre si
+    // trascina; si salva quando si lascia
+    D2D1_RECT_F binario{};
+    bool trascina = false;
+
+    void opacitaDa(float x) {
+        const float p = std::clamp((x - binario.left) / std::max(1.0f, binario.right - binario.left), 0.0f, 1.0f);
+        int val = (int)std::lround((OPACITA_MIN + p * (100 - OPACITA_MIN)) / OPACITA_PASSO) * OPACITA_PASSO;
+        val = std::clamp(val, OPACITA_MIN, 100);
+        if (val == valori().dockOpacita) return;
+        valori().dockOpacita = val;
+        if (cambiato) cambiato();
+        disegna();
+    }
 
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
@@ -199,6 +232,7 @@ private:
     void clic(int id) {
         if (id < 0) return;
         if (id == 200) { chiudi(); return; }
+        if (id == Z_OPACITA) return;   // (il cursore si usa trascinando: WM_LBUTTONDOWN)
         if (id == 400) {   // diagnostica negli appunti
             if (copiaDiagnostica && copiaDiagnostica()) { copiataAlle = vetro::ms(); vetro::battito(v.fin, 1); }
             disegna();
@@ -232,6 +266,7 @@ private:
     static const wchar_t* nomeSezione(int s) {
         switch (s) {
             case S_GENERALE: return testi::t(L"Generale", L"General");
+            case S_DOCK: return L"Dock";
             case S_ANIMAZIONI: return testi::t(L"Animazioni", L"Animations");
             case S_NOTCH: return testi::t(L"Notch e notifiche", L"Notch & notifications");
             case S_TASTIERA: return testi::t(L"Tastiera e mouse", L"Keyboard and mouse");
@@ -249,6 +284,10 @@ private:
                 v.rt->DrawEllipse({{cx, cy}, 4.5f * d, 4.5f * d}, v.pen, sp);
                 for (int i = 0; i < 8; i++) { const float a = i * 3.14159265f / 4; l(6 * std::cos(a), 6 * std::sin(a), 8.5f * std::cos(a), 8.5f * std::sin(a)); }
                 break;
+            case S_DOCK:       // il dock: barra arrotondata in basso con tre icone
+                v.rt->DrawRoundedRectangle({{cx - 9 * d, cy + 1 * d, cx + 9 * d, cy + 7 * d}, 2.5f * d, 2.5f * d}, v.pen, sp);
+                for (int i = 0; i < 3; i++) v.rt->FillRoundedRectangle({{cx + (-6.5f + i * 5) * d, cy + 2.5f * d, cx + (-3.5f + i * 5) * d, cy + 5.5f * d}, 0.8f * d, 0.8f * d}, v.pen);
+                l(-7, -6, 7, -6); break;
             case S_ANIMAZIONI: // scintilla e una piccola
                 l(-2, -8, -2, 4); l(-8, -2, 4, -2); l(-5.5f, -5.5f, 1.5f, 1.5f); l(1.5f, -5.5f, -5.5f, 1.5f);
                 l(5, 3, 5, 8); l(2.5f, 5.5f, 7.5f, 5.5f); break;
@@ -375,6 +414,29 @@ private:
                 v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
                 v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
             }
+        }
+        if (sezione == S_DOCK) {
+            // opacita' del fondo del dock: cursore a destra, il valore in percento accanto
+            const D2D1_RECT_F r = {L, y, R, y + 54 * d};
+            riquadro(r, sopra == Z_OPACITA || trascina);
+            const float x1 = r.right - 64 * d, x0 = x1 - 190 * d, cy = (r.top + r.bottom) / 2;
+            v.testo(testi::t(L"Opacità", L"Opacity"), fVoce, {r.left + 16 * d, r.top + 7 * d, x0 - 16 * d, r.top + 29 * d}, inkS);
+            v.testo(testi::t(L"Il vetro del dock; le icone restano piene", L"The dock's glass; icons stay solid"),
+                    fSotto, {r.left + 16 * d, r.top + 28 * d, x0 - 16 * d, r.top + 48 * d}, tenueS);
+            binario = {x0, cy - 12 * d, x1, cy + 12 * d};
+            zone.push_back({{x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, Z_OPACITA});
+            const float p = (valori().dockOpacita - OPACITA_MIN) / (float)(100 - OPACITA_MIN), xm = x0 + (x1 - x0) * p;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.18f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
+            v.rt->FillRoundedRectangle({{x0, cy - 2 * d, x1, cy + 2 * d}, 2 * d, 2 * d}, v.pen);
+            v.pen->SetColor({blu.r, blu.g, blu.b, (float)e});
+            v.rt->FillRoundedRectangle({{x0, cy - 2 * d, xm, cy + 2 * d}, 2 * d, 2 * d}, v.pen);
+            const float rk = (trascina ? 10.0f : 9.0f) * d;   // pallino (un po' piu' grande mentre si trascina)
+            v.pen->SetColor(D2D1::ColorF(0, 0, 0, (v.scuro ? 0.35f : 0.18f) * (float)e));
+            v.rt->FillEllipse({{xm, cy + 0.8f * d}, rk + 0.6f * d, rk + 0.6f * d}, v.pen);
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, (float)e));
+            v.rt->FillEllipse({{xm, cy}, rk, rk}, v.pen);
+            v.testo(std::to_wstring(valori().dockOpacita) + L"%", fCentro, {x1 + 8 * d, r.top, r.right - 8 * d, r.bottom}, inkS);
+            y += 60 * d;
         }
         if (sezione == S_NOTCH)
             riga(testi::t(L"Nel notch, sempre", L"Always in the notch"),

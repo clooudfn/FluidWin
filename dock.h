@@ -489,6 +489,9 @@ public:
                 }
             }
         }
+        // a scomparsa spento: il dock resta su sopra qualsiasi finestra (le app a schermo intero lo tolgono a parte,
+        // vedi schermoIntero)
+        if (!autoNascondi) n = false;
         // orario e centro di controllo restano sempre giu' e risalgono solo col mouse sul bordo in basso
         nI = true;
         if (!forza && n == vuoleNascondersi && nI == vuoleNascondersiI) return;
@@ -512,6 +515,22 @@ public:
     }
 
     notch::Notch& ilNotch() { return notch; }
+
+    // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
+    // quanto lo schermo; sotto le app a schermo intero e i giochi si toglie comunque) e opacita' del fondo (0.2..1:
+    // vetro e velo, le icone restano piene)
+    void impostaAutoNascondi(bool si) {
+        if (si == autoNascondi) return;
+        autoNascondi = si;
+        controllaFinestre(true);
+    }
+    void impostaOpacita(float a) {
+        a = std::clamp(a, 0.2f, 1.0f);
+        if (std::fabs(a - opacita) < 0.001f) return;
+        opacita = a;
+        for (HWND v : {vetro, vetroStato, vetroOra}) if (v) SetLayeredWindowAttributes(v, 0, (BYTE)std::lround(a * 255), LWA_ALPHA);
+        dirty = true;
+    }
     // eseguibile di un'app che il dock conosce (per AppUserModelID o per nome): l'icona vera delle sue notifiche
     std::wstring exeDiApp(const std::wstring& aumid, const std::wstring& nome) const {
         for (const auto& v : voci) {
@@ -566,6 +585,8 @@ private:
     HMONITOR spostamento = nullptr;   // schermo verso cui il dock sta andando (prima scende, poi si sposta e risale)
     HMONITOR bordoAltro = nullptr; double bordoAltroDa = -1;   // mouse sul bordo in basso di un altro schermo, da quando
     bool vuoleNascondersiI = false;   // l'isola sta sempre nascosta, il dock solo sotto le finestre
+    bool autoNascondi = true;         // impostazione: il dock scende sotto le finestre ingrandite o che lo coprono
+    float opacita = 1;                // impostazione: opacita' del fondo del dock (vetro e velo), 0.2..1
     bool vuoleNascondersi = false, rivelato = false, rivelatoI = false;   // dock e isola di stato risalgono separati
     double yNascosto = 0, velNascosto = 0;   // px sotto la posizione normale (dock)
     double yNascostoI = 0, velNascostoI = 0; // ... e isola di stato
@@ -1117,7 +1138,7 @@ private:
         const float fondoL = std::round(sinistra - PAD + (float)std::min(0.0, tiroX));
         const float fondoR = std::round(sinistra + tot + PAD + (float)std::max(0.0, tiroX));
         const float fondoT = std::round(baseT - (float)tiroY);
-        disegnaFondo({fondoL, fondoT, fondoR, fondoB}, scuro);
+        disegnaFondo({fondoL, fondoT, fondoR, fondoB}, scuro, opacita);
         aggiornaVetro(vetro, rettVetro, fondoL, fondoT, fondoR, fondoB);
         zonaDockL = fondoL; zonaDockR = fondoR;
 
@@ -1212,12 +1233,13 @@ private:
     }
 
     // velo chiaro, bordo luminoso e sottile contorno scuro: stessa forma del vetro sotto
-    void disegnaFondo(const D2D1_RECT_F& f, bool scuro) {
-        pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f) : D2D1::ColorF(1, 1, 1, 0.38f));
+    // fondo di vetro (velo e bordi sopra il vetro acrilico); a: opacita' (quella del dock, impostazione; 1 i pannelli)
+    void disegnaFondo(const D2D1_RECT_F& f, bool scuro, float a = 1) {
+        pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f * a) : D2D1::ColorF(1, 1, 1, 0.38f * a));
         dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
-        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f) : D2D1::ColorF(1, 1, 1, 0.75f));
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * a) : D2D1::ColorF(1, 1, 1, 0.75f * a));
         dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.0f);
-        pennello->SetColor(D2D1::ColorF(0, 0, 0, scuro ? 0.45f : 0.10f));
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.45f : 0.10f) * a));
         dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.0f);
     }
 
