@@ -12,6 +12,7 @@
 namespace impostazioni {
 
 struct Valori {
+    bool avvio = false;           // FluidWin si apre all'accesso a Windows (sta nel registro di Windows, vedi avvioAttivo)
     bool gelatina = true;         // finestre "di gelatina" quando si trascinano
     bool genio = true;            // riduzione e ripristino con l'effetto genio
     bool chiusura = true;         // finestre che si rimpiccioliscono e svaniscono quando si chiudono
@@ -52,8 +53,48 @@ inline void scriviDword(const wchar_t* nome, DWORD v) {
     RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, nome, REG_DWORD, &v, sizeof(v));
 }
 
+// Avvio con Windows: il valore "FluidWin" nella chiave Run dell'utente (come le altre app che si aprono all'accesso;
+// niente amministratore). Lo stato vero e' quello di Windows, non una nostra impostazione: l'avvio si puo' spegnere
+// anche da Gestione attivita' > App di avvio, che lo segna in StartupApproved (primo byte dispari = spento)
+inline const wchar_t* CHIAVE_RUN = L"Software\\Microsoft\\Windows\\CurrentVersion\\Run";
+inline const wchar_t* CHIAVE_APPROVATO = L"Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run";
+
+inline std::wstring comandoAvvio() {
+    wchar_t p[MAX_PATH]; GetModuleFileNameW(nullptr, p, MAX_PATH);
+    return L"\"" + std::wstring(p) + L"\"";
+}
+
+// comando registrato ("" se non c'e')
+inline std::wstring comandoRegistrato() {
+    wchar_t b[MAX_PATH + 16] = L""; DWORD n = sizeof(b);
+    return RegGetValueW(HKEY_CURRENT_USER, CHIAVE_RUN, L"FluidWin", RRF_RT_REG_SZ, nullptr, b, &n) == ERROR_SUCCESS ? b : L"";
+}
+
+inline bool avvioAttivo() {
+    if (comandoRegistrato().empty()) return false;
+    BYTE a[12] = {}; DWORD n = sizeof(a);
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPROVATO, L"FluidWin", RRF_RT_REG_BINARY, nullptr, a, &n) == ERROR_SUCCESS && (a[0] & 1)) return false;
+    return true;
+}
+
+inline void impostaAvvio(bool si) {
+    if (si) {
+        const std::wstring c = comandoAvvio();
+        RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_RUN, L"FluidWin", REG_SZ, c.c_str(), (DWORD)((c.size() + 1) * sizeof(wchar_t)));
+        // se era stato spento da Gestione attivita', torna acceso anche li'
+        const BYTE acceso[12] = {2};
+        RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPROVATO, L"FluidWin", REG_BINARY, acceso, sizeof(acceso));
+    } else {
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_RUN, L"FluidWin");
+        RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPROVATO, L"FluidWin");
+    }
+}
+
 inline void carica() {
     Valori& v = valori();
+    v.avvio = avvioAttivo();
+    // cartella di FluidWin spostata: l'avvio punta al FluidWin di adesso
+    if (v.avvio && comandoRegistrato() != comandoAvvio()) impostaAvvio(true);
     v.gelatina = leggiDword(L"Gelatina", 1); v.genio = leggiDword(L"Genio", 1); v.chiusura = leggiDword(L"Chiusura", 1);
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
@@ -114,6 +155,8 @@ public:
             fCentro = v.formato(12.5f * d, DWRITE_FONT_WEIGHT_MEDIUM, DWRITE_TEXT_ALIGNMENT_CENTER);
             fMarchio = v.formato(16 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
         }
+        valori().avvio = avvioAttivo();   // (puo' essere cambiato da Gestione attivita' mentre FluidWin era aperto)
+        anim.clear();
         aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
         v.alfa(0);
         vetro::battito(v.fin, 1);
@@ -191,6 +234,8 @@ private:
          L"Come la barra di Windows: si fermano sopra. Spento: fino in fondo", L"Like the Windows taskbar: they stop above. Off: full screen", &Valori::dockSpazio, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
+        {L"Avvia con Windows", L"Start with Windows",
+         L"FluidWin si apre da solo quando accedi", L"FluidWin opens by itself when you sign in", &Valori::avvio, S_GENERALE},
         {L"Effetto genio", L"Genie effect",
          L"Riduzione e ripristino che entrano ed escono dal dock", L"Minimize into the dock and come back out of it", &Valori::genio, S_ANIMAZIONI},
         {L"Animazione di apertura", L"Open animation",
@@ -304,7 +349,10 @@ private:
         }
         if (id >= 300) { vaiASezione(id - 300); return; }
         if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
-        else if (id < (int)voci.size()) { bool& b = valori().*(voci[id].campo); b = !b; }
+        else if (id < (int)voci.size()) {
+            bool& b = valori().*(voci[id].campo); b = !b;
+            if (voci[id].campo == &Valori::avvio) impostaAvvio(b);   // (sta nel registro di Windows, non in salva)
+        }
         salva();
         if (cambiato) cambiato();
         vetro::battito(v.fin, 1);
