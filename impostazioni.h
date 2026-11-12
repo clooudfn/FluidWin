@@ -169,7 +169,8 @@ private:
         {L"Panoramica dall'angolo", L"Overview from the corner",
          L"Mouse nell'angolo in alto a sinistra", L"Move the mouse to the top-left corner", &Valori::angolo, S_TASTIERA},
         {L"Menu del tasto destro", L"Right-click menu",
-         L"Su desktop ed Esplora file, nello stile di FluidWin", L"On the desktop and in File Explorer, in FluidWin style", &Valori::menuDestro, S_TASTIERA},
+         L"Su desktop ed Esplora file. Spento o con Maiusc: quello di Windows",
+         L"On the desktop and in File Explorer. Off or with Shift: the Windows one", &Valori::menuDestro, S_TASTIERA},
     };
     vetro::Finestra v;
     IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr, *fMarchio = nullptr;

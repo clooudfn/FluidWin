@@ -2600,6 +2600,9 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
         case WM_APP + 17: if (gLog) { comodita::avviaTimer(w); comodita::stato().senzaSuono = true; logf("prova: timer di %llu ms", (unsigned long long)w); } return 0;
         case WM_APP + 15: logf("gancio del mouse: %s (errore %lu)", w ? "messo" : "NON messo", (unsigned long)l); return 0;
         case WM_TASTO_DESTRO: {
+            // un menu e' gia' aperto (questo clic arriva dal suo ciclo dei messaggi): si chiude, e il clic si rimanda a
+            // dopo, quando sara' chiuso. Prima si apriva un secondo menu sopra il primo, e poi un terzo...
+            if (menu::aperti > 0) { menu::chiudi(); PostMessageW(h, WM_TASTO_DESTRO, w, l); return 0; }
             const POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
             if (!destro::mostra(pt, gMessaggi, [](const char* s) { logf("%s", s); })) destroAWindows();
             return 0;

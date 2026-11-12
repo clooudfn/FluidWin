@@ -84,7 +84,9 @@ inline IShellView* vistaDi(HWND sotto, bool desktop) {
 }
 
 // cosa c'e' sotto il punto, secondo UI Automation: 1 un elemento dell'elenco (nome), 0 lo sfondo, -1 altro (intestazioni...)
-inline int sottoIlPunto(POINT pt, std::wstring& nome) {
+// sel: per un elemento, il suo modo di selezionarlo (da liberare), se UI Automation lo da'
+inline int sottoIlPunto(POINT pt, std::wstring& nome, IUIAutomationSelectionItemPattern** sel = nullptr) {
+    if (sel) *sel = nullptr;
     static IUIAutomation* ua = nullptr;
     if (!ua) CoCreateInstance(__uuidof(CUIAutomation), nullptr, CLSCTX_INPROC_SERVER, __uuidof(IUIAutomation), (void**)&ua);
     if (!ua) return -1;
@@ -98,6 +100,7 @@ inline int sottoIlPunto(POINT pt, std::wstring& nome) {
             BSTR b = nullptr;
             if (SUCCEEDED(e->get_CurrentName(&b)) && b) { nome = b; SysFreeString(b); }
             r = nome.empty() ? -1 : 1;
+            if (sel && r == 1) e->GetCurrentPatternAs(UIA_SelectionItemPatternId, __uuidof(IUIAutomationSelectionItemPattern), (void**)sel);
             break;
         }
         // (il nome di un file e' un campo di testo dentro l'elemento: si risale fino all'elemento)
@@ -214,6 +217,10 @@ inline bool principale(const std::wstring& verbo, const std::wstring& testo, boo
 // false: non si e' potuto (FluidWin rimanda il clic a Windows)
 inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const char*)>& registro) {
     using namespace dettagli;
+    // tempi delle parti lente (nel registro): trovare la vista, l'elemento, il menu della shell (estensioni delle app)
+    LARGE_INTEGER fq, c0; QueryPerformanceFrequency(&fq); QueryPerformanceCounter(&c0);
+    auto ms = [&]() { LARGE_INTEGER c; QueryPerformanceCounter(&c); return (int)((c.QuadPart - c0.QuadPart) * 1000 / fq.QuadPart); };
+    int tVista = 0, tElemento = 0, tShell = 0;
     HWND sotto = WindowFromPoint(pt);
     if (!sotto || !vistaShell(pt)) {
         if (registro) {
@@ -228,6 +235,7 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
     const bool desktop = wcscmp(rc, L"CabinetWClass") != 0;
     IShellView* sv = vistaDi(sotto, desktop);
     if (!sv) { if (registro) registro("tasto destro: vista della shell non trovata, menu di Windows"); return false; }
+    tVista = ms();
     bool ok = false;
     IFolderView2* fv = nullptr;
     sv->QueryInterface(IID_PPV_ARGS(&fv));
@@ -247,10 +255,20 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
         }
         cosa = indiceDesktop >= 0 ? 1 : 0;
     } else {
-        cosa = sottoIlPunto(pt, nome);
-        if (cosa < 0) { if (fv) fv->Release(); sv->Release(); if (registro) registro("tasto destro: punto non riconosciuto, menu di Windows"); return false; }
+        IUIAutomationSelectionItemPattern* sel = nullptr;
+        cosa = sottoIlPunto(pt, nome, &sel);
+        if (cosa < 0) { if (sel) sel->Release(); if (fv) fv->Release(); sv->Release(); if (registro) registro("tasto destro: punto non riconosciuto, menu di Windows"); return false; }
+        // Esplora file: l'elemento lo seleziona direttamente UI Automation, come un clic (gia' selezionato: resta la
+        // selezione com'e', anche di piu' file). Prima si cercava il nome fra tutti gli elementi della cartella, uno per
+        // uno attraverso Esplora file: con migliaia di file passava piu' di un secondo
+        if (cosa == 1 && sel) {
+            BOOL gia = FALSE;
+            if (SUCCEEDED(sel->get_CurrentIsSelected(&gia)) && (gia || SUCCEEDED(sel->Select()))) cosa = 2;   // 2: selezionato
+        }
+        if (sel) sel->Release();
     }
-    if (cosa == 1 && indiceDesktop >= 0) {
+    if (cosa == 2) cosa = 1;
+    else if (cosa == 1 && indiceDesktop >= 0) {
         DWORD stato = 0; PITEMID_CHILD pid = nullptr;
         if (SUCCEEDED(fv->Item(indiceDesktop, &pid)) && pid) { fv->GetSelectionState(pid, &stato); CoTaskMemFree(pid); }
         if (!(stato & SVSI_SELECT)) fv->SelectItem(indiceDesktop, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_FOCUSED);
@@ -278,11 +296,13 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
         if (SUCCEEDED(fv->Item(indice, &pid)) && pid) { fv->GetSelectionState(pid, &stato); CoTaskMemFree(pid); }
         if (!(stato & SVSI_SELECT)) fv->SelectItem(indice, SVSI_SELECT | SVSI_DESELECTOTHERS | SVSI_FOCUSED);
     }
+    tElemento = ms();
     IContextMenu* cm = nullptr;
     sv->GetItemObject(cosa == 1 ? SVGIO_SELECTION : SVGIO_BACKGROUND, IID_PPV_ARGS(&cm));
     if (cm) {
         HMENU m = CreatePopupMenu();
         if (SUCCEEDED(cm->QueryContextMenu(m, 0, 1, 0x7EFF, CMF_NORMAL | CMF_CANRENAME))) {
+            tShell = ms();
             IContextMenu2* cm2 = nullptr; IContextMenu3* cm3 = nullptr;
             cm->QueryInterface(IID_PPV_ARGS(&cm2)); cm->QueryInterface(IID_PPV_ARGS(&cm3));
             // come il menu di Windows 11: pulsanti in cima, voci principali (Proprieta' per ultima), poi sotto la
@@ -337,7 +357,12 @@ inline bool mostra(POINT pt, HWND proprietario, const std::function<void(const c
             };
             if (!voci.empty()) {
                 ok = true;
-                if (registro) registro(cosa == 1 ? "tasto destro: menu di FluidWin (file)" : "tasto destro: menu di FluidWin (sfondo)");
+                if (registro) {
+                    char b[200];
+                    snprintf(b, 200, "tasto destro: menu di FluidWin (%s) in %d ms: vista %d, elemento %d, menu della shell %d, voci %d",
+                             cosa == 1 ? "file" : "sfondo", ms(), tVista, tElemento - tVista, tShell - tElemento, ms() - tShell);
+                    registro(b);
+                }
                 SetForegroundWindow(proprietario);
                 const UINT cmd = menu::mostra(voci, pt, proprietario, false, prepara);
                 if (cmd == ID_ADMIN) ShellExecuteW(radice, L"runas", file.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
