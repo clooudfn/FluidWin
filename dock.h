@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <iphlpapi.h>
+#include <appmodel.h>   // pacchetti delle app dello Store (aumidDalManifesto)
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>

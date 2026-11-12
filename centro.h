@@ -1317,6 +1317,47 @@ inline auto Motore::fotoIconaSfondo(const std::wstring& exe) -> ID2D1Bitmap* {
 
 // app dello Store: dal percorso ...\WindowsApps\Nome_versione_arch__editore\... all'AppUserModelID
 // (solo dal lavoro in sottofondo delle app in background: uno alla volta, quindi la cache non e' contesa)
+// AppUserModelID dell'app di una famiglia di pacchetti che compare nell'elenco delle app, letto dal manifesto del pacchetto
+// installato: la prima <Application> senza AppListEntry="none" (Teams, per esempio, ha anche tre app nascoste di
+// servizio). ~1-7 ms, contro ~0,9 s per elencare tutte le app. "" se non si trova
+static std::wstring aumidDalManifesto(const std::wstring& famiglia) {
+    UINT32 n = 0, len = 0;
+    if (GetPackagesByPackageFamily(famiglia.c_str(), &n, nullptr, &len, nullptr) != ERROR_INSUFFICIENT_BUFFER || !n) return L"";
+    std::vector<PWSTR> nomi(n); std::vector<WCHAR> buf(len);
+    if (GetPackagesByPackageFamily(famiglia.c_str(), &n, nomi.data(), &len, buf.data()) != ERROR_SUCCESS) return L"";
+    for (UINT32 i = 0; i < n; i++) {
+        UINT32 pl = 0;
+        if (GetPackagePathByFullName(nomi[i], &pl, nullptr) != ERROR_INSUFFICIENT_BUFFER || !pl) continue;
+        std::vector<WCHAR> pb(pl);
+        if (GetPackagePathByFullName(nomi[i], &pl, pb.data()) != ERROR_SUCCESS) continue;
+        HANDLE f = CreateFileW((std::wstring(pb.data()) + L"\\AppxManifest.xml").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        const DWORD dim = GetFileSize(f, nullptr);
+        std::string x(dim == INVALID_FILE_SIZE ? 0 : dim, '\0');
+        DWORD letti = 0;
+        if (!x.empty()) ReadFile(f, &x[0], (DWORD)x.size(), &letti, nullptr);
+        CloseHandle(f);
+        x.resize(letti);
+        // la famiglia con le maiuscole vere, dal nome completo (nome_versione_architettura_risorsa_editore)
+        const std::wstring pieno = nomi[i];
+        const size_t u = pieno.find(L'_'), e = pieno.rfind(L'_');
+        if (u == std::wstring::npos || e == std::wstring::npos) continue;
+        const std::wstring fam = pieno.substr(0, u) + pieno.substr(e);
+        for (size_t p = x.find("<Application "); p != std::string::npos; p = x.find("<Application ", p + 1)) {
+            const size_t fine = x.find("</Application>", p);
+            const std::string blocco = x.substr(p, fine == std::string::npos ? std::string::npos : fine - p);
+            if (blocco.find("AppListEntry=\"none\"") != std::string::npos) continue;
+            const size_t a = blocco.find("Id=\"");
+            if (a == std::string::npos) continue;
+            const size_t b = blocco.find('"', a + 4);
+            if (b == std::string::npos) continue;
+            const std::string id = blocco.substr(a + 4, b - a - 4);
+            return fam + L"!" + std::wstring(id.begin(), id.end());
+        }
+    }
+    return L"";
+}
+
 inline auto Motore::avvioPacchetto(const std::wstring& exe) -> std::wstring {
     static std::unordered_map<std::wstring, std::wstring> aumidPacchetti;   // famiglia del pacchetto -> AppUserModelID
     const size_t p = exe.find(L"\\windowsapps\\");
@@ -1326,6 +1367,8 @@ inline auto Motore::avvioPacchetto(const std::wstring& exe) -> std::wstring {
     const size_t u = pac.find(L'_'), e = pac.rfind(L"__");
     if (u == std::wstring::npos || e == std::wstring::npos) return L"";
     const std::wstring famiglia = pac.substr(0, u) + L"_" + pac.substr(e + 2);
+    // la via veloce: il manifesto del pacchetto installato. L'elenco di tutte le app (~0,9 s, sotto) resta come riserva
+    if (const std::wstring v = aumidDalManifesto(famiglia); !v.empty()) return L"shell:AppsFolder\\" + v;
     if (aumidPacchetti.empty()) {   // elenco delle app installate (una volta sola)
         IShellItem* cart = nullptr;
         if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&cart)))) {
