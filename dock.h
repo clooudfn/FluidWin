@@ -215,7 +215,7 @@ public:
             if (auto f = (Fn)GetProcAddress(sh, "GetDpiForMonitor")) if (SUCCEEDED(f(mon, 0, &dx, &dy))) dpi = dx / 96.0f;
         }
         S = latoIcone * dpi; M = S * INGRANDITE;   // icone a riposo e ingrandite (impostazione: impostaLatoIcone)
-        PAD = 8 * dpi; GAP = 6 * dpi; MARGINE = 8 * dpi;
+        PAD = 8 * dpi; GAP = distanzaIcone * dpi; MARGINE = 8 * dpi;   // (GAP: impostazione, impostaDistanzaIcone)
         RAGGIO = raggio::vetro() * dpi;   // come gli angoli DWM del vetro: fondo e vetro devono coincidere
         altezzaDock = S + 2 * PAD;
         W = schermo.right - schermo.left;
@@ -568,6 +568,15 @@ public:
         controllaFinestre(true);
         dirty = true;
     }
+    // impostazione: distanza fra le icone (px a 100%). Anche i separatori si allargano con lei; la finestra delle
+    // icone e' larga quanto lo schermo, quindi basta ridisporre
+    void impostaDistanzaIcone(int px) {
+        px = std::clamp(px, 2, 32);
+        if (px == distanzaIcone) return;
+        distanzaIcone = px;
+        GAP = distanzaIcone * dpi;
+        dirty = true;
+    }
     // impostazione: colore del fondo del dock. 0 = automatico (chiaro o scuro col tema), altrimenti 0x01RRGGBB.
     // Il colore tinge il velo sopra il vetro; puntini, separatori e testi diventano chiari o scuri a seconda di quanto
     // e' chiaro il colore (render: scuro)
@@ -646,6 +655,7 @@ private:
     bool autoNascondi = true;         // impostazione: il dock scende sotto le finestre ingrandite o che lo coprono
     float opacita = 1;                // impostazione: opacita' del fondo del dock (vetro e velo), 0.2..1
     int latoIcone = 42;               // impostazione: lato delle icone a riposo, px a 100%
+    int distanzaIcone = 6;            // impostazione: distanza fra le icone, px a 100% (GAP)
     static constexpr float INGRANDITE = 66.0f / 42.0f;   // icone ingrandite dalla lente: proporzione fissa con quelle a riposo
     bool coloreAuto = true, fondoScuro = false;           // impostazione: colore del fondo (vedi impostaColore)
     D2D1_COLOR_F coloreFondo{};

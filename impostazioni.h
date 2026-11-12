@@ -26,12 +26,14 @@ struct Valori {
     bool dockAuto = true;         // dock a scomparsa sotto le finestre ingrandite o che lo coprono
     int dockOpacita = 100;        // opacita' del fondo del dock, in percento (OPACITA_MIN..100)
     int dockIcone = 42;           // lato delle icone del dock a riposo, px a 100% (ICONE_MIN..ICONE_MAX); l'altezza segue
+    int dockDistanza = 6;         // distanza fra le icone del dock, px a 100% (DISTANZA_MIN..DISTANZA_MAX)
     DWORD dockColore = 0;         // colore del fondo del dock: 0 automatico (tema), altrimenti 0x01RRGGBB
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
 };
 constexpr int OPACITA_MIN = 20, OPACITA_PASSO = 5;
 constexpr int ICONE_MIN = 32, ICONE_MAX = 64, ICONE_PASSO = 2;
+constexpr int DISTANZA_MIN = 2, DISTANZA_MAX = 24, DISTANZA_PASSO = 2;
 constexpr DWORD COLORE_SCELTO = 0x01000000;   // segno di "colore scelto" (senza: automatico)
 
 inline Valori& valori() { static Valori v; return v; }
@@ -57,6 +59,7 @@ inline void carica() {
     v.dockAuto = leggiDword(L"DockAutoNascosto", 1);
     v.dockOpacita = std::clamp((int)leggiDword(L"DockOpacita", 100), OPACITA_MIN, 100);
     v.dockIcone = std::clamp((int)leggiDword(L"DockIcone", 42), ICONE_MIN, ICONE_MAX);
+    v.dockDistanza = std::clamp((int)leggiDword(L"DockDistanza", 6), DISTANZA_MIN, DISTANZA_MAX);
     v.dockColore = leggiDword(L"DockColore", 0) & (COLORE_SCELTO | 0xFFFFFF);
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
@@ -74,6 +77,7 @@ inline void salva() {
     scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
+    scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
     scriviDword(L"DockSpazio", v.dockSpazio);
 }
 
@@ -219,11 +223,13 @@ private:
     const std::vector<Cursore> cursori = {
         {L"Dimensione delle icone", L"Icon size", L"Anche l'altezza del dock segue", L"The dock's height follows",
          L" px", &Valori::dockIcone, ICONE_MIN, ICONE_MAX, ICONE_PASSO, S_DOCK},
+        {L"Distanza fra le icone", L"Space between icons", L"Anche i separatori seguono", L"Separators follow too",
+         L" px", &Valori::dockDistanza, DISTANZA_MIN, DISTANZA_MAX, DISTANZA_PASSO, S_DOCK},
         {L"Opacità", L"Opacity", L"Il vetro del dock; le icone restano piene", L"The dock's glass; icons stay solid",
          L"%", &Valori::dockOpacita, OPACITA_MIN, 100, OPACITA_PASSO, S_DOCK},
     };
     static constexpr int Z_CURSORE = 500;
-    std::vector<D2D1_RECT_F> binari = std::vector<D2D1_RECT_F>(2);   // dove si e' disegnato ogni cursore
+    std::vector<D2D1_RECT_F> binari = std::vector<D2D1_RECT_F>(cursori.size());   // dove si e' disegnato ogni cursore
     int trascina = -1;                                               // cursore che si sta trascinando
 
     void valoreDa(int i, float x) {
