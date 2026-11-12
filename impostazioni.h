@@ -22,6 +22,8 @@ struct Valori {
     bool winS = true;             // Win+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
+    bool notch = true;            // il notch in alto al centro (spento: volume e notifiche col vetro, niente musica e timer)
+    bool oraDock = false;         // ora e data in fondo al dock, dopo il centro di controllo
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
 };
 
@@ -45,6 +47,7 @@ inline void carica() {
     v.apertura = leggiDword(L"Apertura", 1); v.onda = leggiDword(L"OndaRicerca", 1);
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
     v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
+    v.notch = leggiDword(L"Notch", 1); v.oraDock = leggiDword(L"OraDock", 0);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
     testi::lingua() = v.lingua;
     // la capsula dei tasti non c'e' piu' (1.1.1): via i suoi valori rimasti dalle versioni prima
@@ -58,6 +61,7 @@ inline void salva() {
     scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
     scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
+    scriviDword(L"Notch", v.notch); scriviDword(L"OraDock", v.oraDock);
 }
 
 // ---- la finestra ----
@@ -158,6 +162,10 @@ private:
          L"La finestra si rimpicciolisce e svanisce sul posto", L"The window shrinks and fades away in place", &Valori::chiusura, S_ANIMAZIONI},
         {L"Onda di luce della ricerca", L"Search light wave",
          L"I bordi dello schermo si accendono di colori", L"The edges of the screen light up with color", &Valori::onda, S_ANIMAZIONI},
+        {L"Notch", L"Notch",
+         L"In alto al centro: ora, volume, notifiche, musica e timer", L"At the top center: time, volume, notifications, music, timer", &Valori::notch, S_NOTCH},
+        {L"Ora e data nel dock", L"Time and date in the dock",
+         L"In fondo al dock, dopo il centro di controllo", L"At the end of the dock, after the control center", &Valori::oraDock, S_NOTCH},
         {L"Notifiche di FluidWin", L"FluidWin notifications",
          L"Escono dal notch, con il numero sulle icone del dock", L"They come out of the notch, with badges on the dock", &Valori::banner, S_NOTCH},
         {L"Volume nel notch", L"Volume in the notch",

@@ -571,6 +571,15 @@ public:
     }
 
     notch::Notch& ilNotch() { return notch; }
+
+    // impostazioni: notch acceso o spento, e ora e data in fondo al dock, dopo il centro di controllo
+    void impostaNotch(bool si) { notch.abilita(si); }
+    void impostaOraNelDock(bool si) {
+        if (si == oraNelDock) return;
+        oraNelDock = si;
+        if (!si) { isola = {}; for (auto& r : rettStato) r = {}; statoSopra = statoPremuto = -1; }
+        dirty = true;
+    }
     // eseguibile di un'app che il dock conosce (per AppUserModelID o per nome): l'icona vera delle sue notifiche
     std::wstring exeDiApp(const std::wstring& aumid, const std::wstring& nome) const {
         for (const auto& v : voci) {
@@ -625,6 +634,9 @@ private:
     HMONITOR spostamento = nullptr;   // schermo verso cui il dock sta andando (prima scende, poi si sposta e risale)
     HMONITOR bordoAltro = nullptr; double bordoAltroDa = -1;   // mouse sul bordo in basso di un altro schermo, da quando
     bool vuoleNascondersiI = false;   // l'isola sta sempre nascosta, il dock solo sotto le finestre
+    // impostazione: ora e data in fondo al dock, dopo il centro di controllo (larghezzaCoda). Per il mouse fa da
+    // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
+    bool oraNelDock = false;
     bool vuoleNascondersi = false, rivelato = false, rivelatoI = false;   // dock e isola di stato risalgono separati
     double yNascosto = 0, velNascosto = 0;   // px sotto la posizione normale (dock)
     double yNascostoI = 0, velNascostoI = 0; // ... e isola di stato
@@ -1040,7 +1052,8 @@ private:
         const float x = (float)(pt.x - schermo.left);
         // sul bordo in basso le zone sono solo due: sotto il dock (risale il dock) e da sotto l'isola di stato fino
         // all'angolo destro (risale l'isola). Lo spazio vuoto fra i due e i lati non fanno nulla
-        const bool zonaIsola = isola.right > isola.left && x >= isola.left - 10 * dpi;   // (isola tolta: mai)
+        // (isola tolta: mai. L'ora nel dock fa da isola per il mouse ma sta nel dock: la fa risalire la zona del dock)
+        const bool zonaIsola = !oraNelDock && isola.right > isola.left && x >= isola.left - 10 * dpi;
         const bool zonaDock = x >= zonaDockL - 10 * dpi && x <= zonaDockR + 10 * dpi;
         if (pt.y >= schermo.bottom - 2 && pt.x >= schermo.left && pt.x < schermo.right && (zonaIsola || zonaDock)) {
             bool &r = zonaIsola ? rivelatoI : rivelato;
@@ -1079,6 +1092,9 @@ private:
         return 0;
     }
 
+    // ora e data in fondo al dock: separatore e testo (larghezzaOra la misura render quando il testo cambia)
+    float larghezzaCoda() const { return oraNelDock && larghezzaOra > 0 ? GAP * 2 + 1 + larghezzaOra + 16 * dpi : 0; }
+
     // x di ogni icona a riposo; lo spazio prima di un'icona cresce e cala con lei
     std::vector<float> posizioniRiposo() const { return disponi(std::vector<float>(voci.size(), S)); }
 
@@ -1091,6 +1107,7 @@ private:
             tot += sepPrima(i);
             tot += lato[i] * (float)voci[i].scala;
         }
+        tot += larghezzaCoda();   // ora e data in fondo (impostazione): il dock resta centrato con loro
         float cur = W / 2.0f - tot / 2.0f;
         for (size_t i = 0; i < voci.size(); i++) {
             if (i > 0) cur += GAP * (float)voci[i].scala;
@@ -1166,6 +1183,12 @@ private:
         if (giuI) movimento |= molla(yNascostoI, velNascostoI, fuori, 260, 0.9);
         else movimento |= molla(yNascostoI, velNascostoI, 0, 340, 0.42);
         if (vuoleNascondersi && t <= rivelaFino) movimento = true;   // allo scadere della comparsa temporanea deve riscendere
+
+        // ora e data in fondo al dock: si rimisurano solo quando cambia il testo (la larghezza entra nella disposizione)
+        if (oraNelDock && (testoOra != misuratoOra || testoData != misuratoData)) {
+            misuratoOra = testoOra; misuratoData = testoData;
+            larghezzaOra = std::max(larghezzaTesto(testoOra, fmtOra), larghezzaTesto(testoData, fmtData));
+        }
 
         // il dock resta centrato e si allarga attorno alle icone ingrandite
         const auto riposo = posizioniRiposo();
@@ -1246,6 +1269,37 @@ private:
                     dc->FillEllipse({{x + d / 2 + dx, yb + PAD * 0.55f}, 2.0f * dpi, 2.0f * dpi}, pennello);
                 }
             }
+        }
+
+        // ora e data in fondo al dock (impostazione): un separatore, poi l'ora e sotto la data, dopo il centro di controllo
+        if (const float coda = larghezzaCoda(); coda > 0) {
+            const float x0 = sinistra + tot - coda;
+            pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.22f));
+            dc->DrawLine({x0 + GAP + 0.5f, yb - S * 0.85f}, {x0 + GAP + 0.5f, yb - S * 0.15f}, pennello, 1.0f);
+            const D2D1_RECT_F r = {x0 + GAP * 2 + 1, yb - S, x0 + coda, yb};
+            isola = {r.left, fondoT, r.right + PAD, fondoB};   // il suo posto per il mouse (vedi oraNelDock)
+            rettStato[ORA] = r; rettStato[CONTROLLO] = {};
+            // fondo dell'ora: un velo suo, sempre pieno, cosi' si legge anche col vetro del dock quasi trasparente
+            pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.55f) : D2D1::ColorF(1, 1, 1, 0.62f));
+            dc->FillRoundedRectangle({{r.left - 2 * dpi, r.top + 2 * dpi, r.right + 2 * dpi, r.bottom - 2 * dpi}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
+            const double e = verso(evidenza[ORA], (statoSopra == ORA && mouseDentro) ? 1.0 : 0.0, 0.05);
+            if (e != evidenza[ORA]) movimento = true;
+            evidenza[ORA] = e;
+            const float s = statoPremuto == ORA ? 0.92f : 1.0f;   // si "schiaccia" un poco alla pressione
+            const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+            if (e > 0.01) {
+                const float hw = (r.right - r.left) / 2 * s, hh = (r.bottom - r.top) / 2 * s;
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * (float)e) : D2D1::ColorF(1, 1, 1, 0.55f * (float)e));
+                dc->FillRoundedRectangle({{cx - hw, cy - hh, cx + hw, cy + hh}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
+            }
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(s, s, {cx, cy}));
+            const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.86f);
+            const float h2 = 17 * dpi;
+            pennello->SetColor(ink);
+            dc->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fmtOra, {r.left, cy - h2 - 1 * dpi, r.right, cy + 1 * dpi}, pennello);
+            pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.72f});
+            dc->DrawText(testoData.c_str(), (UINT32)testoData.size(), fmtData, {r.left, cy + 1 * dpi, r.right, cy + h2 - 1 * dpi}, pennello);
+            dc->SetTransform(D2D1::Matrix3x2F::Identity());
         }
 
         // icona sotto il mouse ricalcolata sulle posizioni appena disegnate (il dock si muove anche col mouse fermo)
@@ -1568,7 +1622,7 @@ private:
     void azioneStato(int i) {
         switch (i) {
             case CONTROLLO: apriPannello(P_CONTROLLO); break;   // pannelli nostri: quelli di Windows fanno risalire la barra
-            case ORA:      apriPannello(P_NOTIFICHE); break;   // notifiche e calendario, nostri (non piu' quello di Windows)
+            case ORA:      apriCentro(P_NOTIFICHE); break;     // notifiche e calendario, come un clic sul notch
         }
     }
 
@@ -2302,7 +2356,9 @@ private:
                 d->mouseDentro = true;
                 d->mouseX = (float)GET_X_LPARAM(l); d->mouseY = (float)GET_Y_LPARAM(l);
                 const bool isola = d->sullIsola(d->mouseX, d->mouseY);
-                d->mouseSulDock = !isola;
+                // (l'ora in fondo al dock e' parte del dock: l'ingrandimento resta, altrimenti il dock si stringerebbe
+                // e l'ora scapperebbe da sotto il mouse, per poi tornare)
+                d->mouseSulDock = !isola || d->oraNelDock;
                 d->statoSopra = isola ? d->statoInPunto(d->mouseX, d->mouseY) : -1;
                 d->dirty = true;
                 return 0;

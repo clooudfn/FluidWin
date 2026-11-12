@@ -110,6 +110,14 @@ public:
         bersagli(); ridisegna();
     }
 
+    // notch acceso o spento dalle impostazioni. Spento non si vede mai: volume, notifiche e avvisi rispondono false
+    // (volume e notifiche li mostrano allora l'indicatore e il banner di vetro)
+    void abilita(bool si) {
+        if (si == abilitato) return;
+        abilitato = si;
+        visibilita();
+    }
+
     // volume 0..1 dai tasti; false se il notch non si vede (allora lo mostra l'indicatore di vetro)
     bool volume(float liv, bool muto) {
         if (!visibile) return false;
@@ -148,7 +156,7 @@ private:
     enum Scena { ORA, MUSICA, APERTO, VOLUME, NOTIFICA, AVVISO, TIMER, SUONA, SCAFFALE, TIMER_APERTO };
 
     HWND fin = nullptr;
-    bool acceso = false, visibile = false;
+    bool acceso = false, visibile = false, abilitato = true;
     int modoAtt = NORMALE;
     RECT schermo{};
     float dpi = 1, fDpi = 0;
@@ -204,7 +212,7 @@ private:
     static double adesso() { return vetro::ms() / 1000.0; }
 
     void visibilita() {
-        const bool si = acceso && modoAtt != NASCOSTO && fin;
+        const bool si = acceso && abilitato && modoAtt != NASCOSTO && fin;
         if (si == visibile) return;
         visibile = si;
         if (si) {
