@@ -68,6 +68,18 @@
 namespace dock {
 
 static const UINT WM_APPBAR = WM_APP + 20;
+
+// Spazio riservato al dock (impostazione): il dock si registra come "appbar", come la barra di Windows, e le finestre
+// ingrandite si fermano sopra. Il suo HWND sta nel registro finche' la prenotazione c'e': se FluidWin termina in modo
+// anomalo, il guardiano (o il prossimo avvio, con ripristinaTutte) la toglie, altrimenti resterebbe un vuoto in basso
+static const wchar_t* const CHIAVE_APPBAR = L"Software\\FluidWin";
+static void togliAppbarRimasta() {
+    DWORD h = 0, n = sizeof(h);
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar", RRF_RT_REG_DWORD, nullptr, &h, &n) != ERROR_SUCCESS) return;
+    APPBARDATA ab{}; ab.cbSize = sizeof(ab); ab.hWnd = (HWND)(ULONG_PTR)h;
+    SHAppBarMessage(ABM_REMOVE, &ab);
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar");
+}
 static const UINT_PTR TIMER_INVIO = 7;   // "icone nascoste": Invio poco dopo Win+B
 static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse arriva sul bordo in basso
 static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
@@ -261,8 +273,8 @@ public:
             typedef HRESULT (WINAPI *Fn)(HMONITOR, int, UINT*, UINT*);
             if (auto f = (Fn)GetProcAddress(sh, "GetDpiForMonitor")) if (SUCCEEDED(f(mon, 0, &dx, &dy))) dpi = dx / 96.0f;
         }
-        S = 42 * dpi; M = 66 * dpi;   // icone a riposo e ingrandite
-        PAD = 8 * dpi; GAP = 6 * dpi; MARGINE = 8 * dpi;
+        S = latoIcone * dpi; M = S * INGRANDITE;   // icone a riposo e ingrandite (impostazione: impostaLatoIcone)
+        PAD = 8 * dpi; GAP = distanzaIcone * dpi; MARGINE = 8 * dpi;   // (GAP: impostazione, impostaDistanzaIcone)
         RAGGIO = raggio::vetro() * dpi;   // come gli angoli DWM del vetro: fondo e vetro devono coincidere
         altezzaDock = S + 2 * PAD;
         W = schermo.right - schermo.left;
@@ -322,6 +334,7 @@ public:
         fermaNotifiche();
         if (!attivo) return;
         attivo = false;
+        aggiornaAppbar();   // lo spazio riservato si libera (le finestre ingrandite tornano fino in fondo)
         APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima;
         SHAppBarMessage(ABM_SETSTATE, &tb);
         ShowWindow(icone, SW_HIDE); ShowWindow(vetro, SW_HIDE); ShowWindow(vetroStato, SW_HIDE); ShowWindow(vetroOra, SW_HIDE); notch.mostra(false);
@@ -365,20 +378,9 @@ public:
         schermo = mi.rcMonitor;
         ::vetro::schermoDock() = schermo; sis.schermo(schermo);
         const int w = schermo.right - schermo.left;
-        if (w != W && w > 0 && sc && dc) {
-            dc->SetTarget(nullptr);
-            if (bersaglio) { bersaglio->Release(); bersaglio = nullptr; }
-            if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)w, (UINT)H, DXGI_FORMAT_UNKNOWN, 0))) W = w;
-            IDXGISurface* sup = nullptr;
-            if (SUCCEEDED(sc->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup))) {
-                D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
-                                                                     D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-                dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglio); sup->Release();
-            }
-            dc->SetTarget(bersaglio);
-            if (!bersaglio) perso = true;   // superficie non ricreata: si riparte da capo (riavvio di FluidWin)
-        }
+        if (w != W && w > 0) ridimensiona(w, H);
         SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
+        if (appbarOk) aggiornaAppbar();   // lo spazio riservato passa al nuovo schermo
         rettVetro = rettVetroStato = rettVetroOra = RECT{};          // i vetri si rimettono al prossimo fotogramma
         regioneDock = regioneIsola = regioneEtichetta = RECT{};
         if (registro) { char b[96]; snprintf(b, 96, "ora su %ld,%ld-%ld,%ld", schermo.left, schermo.top, schermo.right, schermo.bottom); scrivi(b); }
@@ -387,6 +389,22 @@ public:
         notch.posto(schermo, dpi);   // il notch va in alto al centro del nuovo schermo
         ricordaSchermo(schermo);
         dirty = true;
+    }
+
+    // superficie della finestra delle icone a una misura nuova (schermo di un'altra larghezza, icone di un'altra misura)
+    void ridimensiona(int w, int h) {
+        if (!sc || !dc || w <= 0 || h <= 0) return;
+        dc->SetTarget(nullptr);
+        if (bersaglio) { bersaglio->Release(); bersaglio = nullptr; }
+        if (SUCCEEDED(sc->ResizeBuffers(0, (UINT)w, (UINT)h, DXGI_FORMAT_UNKNOWN, 0))) { W = w; H = h; }
+        IDXGISurface* sup = nullptr;
+        if (SUCCEEDED(sc->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup))) {
+            D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
+                                                                 D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
+            dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglio); sup->Release();
+        }
+        dc->SetTarget(bersaglio);
+        if (!bersaglio) perso = true;   // superficie non ricreata: si riparte da capo (riavvio di FluidWin)
     }
 
     // Come su macOS: il mouse fermo sul bordo in basso di un altro schermo porta li' il dock. Prima scende sotto il
@@ -537,7 +555,8 @@ public:
                 snprintf(perche, sizeof(perche), "%p fg %p zoom %d rett %ld,%ld-%ld,%ld schermo %ld,%ld-%ld,%ld", (void*)r, (void*)fg,
                          (int)IsZoomed(r), w.left, w.top, w.right, w.bottom, schermo.left, schermo.top, schermo.right, schermo.bottom);
                 // alcune app ingrandite lasciano 1-2 px liberi sul bordo della barra di Windows a scomparsa
-                n = IsZoomed(r) || (w.left <= schermo.left + 2 && w.top <= schermo.top + 2 && w.right >= schermo.right - 2 && w.bottom >= schermo.bottom - 2);
+                // (con lo spazio riservato le finestre ingrandite si fermano sopra il dock: non lo coprono)
+                n = (IsZoomed(r) && !spazioRiservato) || (w.left <= schermo.left + 2 && w.top <= schermo.top + 2 && w.right >= schermo.right - 2 && w.bottom >= schermo.bottom - 2);
                 // come i dock "intelligenti": si nasconde anche quando la finestra in primo piano gli finisce sopra
                 if (!n) {
                     RECT vis{}; if (FAILED(DwmGetWindowAttribute(r, DWMWA_EXTENDED_FRAME_BOUNDS, &vis, sizeof(vis)))) vis = w;
@@ -549,6 +568,9 @@ public:
                 }
             }
         }
+        // a scomparsa spento: il dock resta su sopra qualsiasi finestra (le app a schermo intero lo tolgono a parte,
+        // vedi schermoIntero)
+        if (!autoNascondi) n = false;
         // orario e centro di controllo restano sempre giu' e risalgono solo col mouse sul bordo in basso
         nI = true;
         if (!forza && n == vuoleNascondersi && nI == vuoleNascondersiI) return;
@@ -579,6 +601,69 @@ public:
         if (si == oraNelDock) return;
         oraNelDock = si;
         if (!si) { isola = {}; for (auto& r : rettStato) r = {}; statoSopra = statoPremuto = -1; }
+        dirty = true;
+    }
+    // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
+    // quanto lo schermo; sotto le app a schermo intero e i giochi si toglie comunque) e opacita' del fondo (0.2..1:
+    // vetro e velo, le icone restano piene)
+    void impostaAutoNascondi(bool si) {
+        if (si == autoNascondi) return;
+        autoNascondi = si;
+        controllaFinestre(true);
+    }
+    // impostazione: le finestre ingrandite si fermano sopra il dock (spazio riservato, appbar) o vanno fino in fondo
+    void impostaSpazio(bool si) {
+        if (si == spazioRiservato) return;
+        spazioRiservato = si;
+        aggiornaAppbar();
+        controllaFinestre(true);
+    }
+    // impostazione: lato delle icone a riposo (px a 100%). Con loro cambiano le ingrandite (stessa proporzione),
+    // l'altezza del dock, la finestra delle icone e lo spazio riservato
+    void impostaLatoIcone(int px) {
+        px = std::clamp(px, 24, 96);
+        if (px == latoIcone) return;
+        latoIcone = px;
+        if (!attivo) return;   // (all'avvio le misure le prende inizializza)
+        S = latoIcone * dpi; M = S * INGRANDITE;
+        altezzaDock = S + 2 * PAD;
+        const int h = (int)std::ceil(altezzaDock + MARGINE + (M - S) + 64 * dpi);
+        if (h != H) ridimensiona(W, h);
+        SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
+        rettVetro = rettVetroStato = rettVetroOra = RECT{};
+        regioneDock = regioneIsola = regioneEtichetta = RECT{};
+        if (appbarOk) aggiornaAppbar();
+        controllaFinestre(true);
+        dirty = true;
+    }
+    // impostazione: distanza fra le icone (px a 100%). Anche i separatori si allargano con lei; la finestra delle
+    // icone e' larga quanto lo schermo, quindi basta ridisporre
+    void impostaDistanzaIcone(int px) {
+        px = std::clamp(px, 2, 32);
+        if (px == distanzaIcone) return;
+        distanzaIcone = px;
+        GAP = distanzaIcone * dpi;
+        dirty = true;
+    }
+    // impostazione: colore del fondo del dock. 0 = automatico (chiaro o scuro col tema), altrimenti 0x01RRGGBB.
+    // Il colore tinge il velo sopra il vetro; puntini, separatori e testi diventano chiari o scuri a seconda di quanto
+    // e' chiaro il colore (render: scuro)
+    void impostaColore(DWORD c) {
+        const bool aut = !(c & 0x01000000);
+        const D2D1_COLOR_F col = D2D1::ColorF(((c >> 16) & 255) / 255.0f, ((c >> 8) & 255) / 255.0f, (c & 255) / 255.0f, 1);
+        if (aut == coloreAuto && (aut || (col.r == coloreFondo.r && col.g == coloreFondo.g && col.b == coloreFondo.b))) return;
+        coloreAuto = aut; coloreFondo = col;
+        fondoScuro = 0.2126f * col.r + 0.7152f * col.g + 0.0722f * col.b < 0.55f;
+        // il vetro acrilico sotto: chiaro o scuro come il colore (automatico: come il tema)
+        BOOL s = coloreAuto ? temaScuro() : fondoScuro;
+        for (HWND v : {vetro, vetroStato, vetroOra}) if (v) DwmSetWindowAttribute(v, DWMWA_USE_IMMERSIVE_DARK_MODE, &s, sizeof(s));
+        dirty = true;
+    }
+    void impostaOpacita(float a) {
+        a = std::clamp(a, 0.2f, 1.0f);
+        if (std::fabs(a - opacita) < 0.001f) return;
+        opacita = a;
+        for (HWND v : {vetro, vetroStato, vetroOra}) if (v) SetLayeredWindowAttributes(v, 0, (BYTE)std::lround(a * 255), LWA_ALPHA);
         dirty = true;
     }
     // eseguibile di un'app che il dock conosce (per AppUserModelID o per nome): l'icona vera delle sue notifiche
@@ -638,6 +723,43 @@ private:
     // impostazione: ora e data in fondo al dock, dopo il centro di controllo (larghezzaCoda). Per il mouse fa da
     // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
     bool oraNelDock = false;
+    bool autoNascondi = true;         // impostazione: il dock scende sotto le finestre ingrandite o che lo coprono
+    float opacita = 1;                // impostazione: opacita' del fondo del dock (vetro e velo), 0.2..1
+    int latoIcone = 42;               // impostazione: lato delle icone a riposo, px a 100%
+    int distanzaIcone = 6;            // impostazione: distanza fra le icone, px a 100% (GAP)
+    static constexpr float INGRANDITE = 66.0f / 42.0f;   // icone ingrandite dalla lente: proporzione fissa con quelle a riposo
+    bool coloreAuto = true, fondoScuro = false;           // impostazione: colore del fondo (vedi impostaColore)
+    D2D1_COLOR_F coloreFondo{};
+    bool spazioRiservato = false;     // impostazione: spazio riservato in basso (appbar)...
+    bool appbarOk = false;            // ... e registrato davvero presso Windows
+
+    // registra (o toglie) il dock come appbar sul bordo in basso del suo schermo: altezza del dock con un margine sopra
+    // uguale a quello sotto. Si richiama quando cambia lo schermo e quando Windows sposta le appbar (ABN_POSCHANGED)
+    void aggiornaAppbar() {
+        APPBARDATA ab{}; ab.cbSize = sizeof(ab); ab.hWnd = icone;
+        if (!spazioRiservato || !attivo || !icone) {
+            if (appbarOk) {
+                SHAppBarMessage(ABM_REMOVE, &ab); appbarOk = false;
+                RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar");
+                scrivi("spazio del dock tolto: le finestre ingrandite arrivano in fondo");
+            }
+            return;
+        }
+        if (!appbarOk) {
+            ab.uCallbackMessage = WM_APPBAR;
+            if (!SHAppBarMessage(ABM_NEW, &ab)) { scrivi("spazio del dock: registrazione non riuscita"); return; }
+            appbarOk = true;
+            const DWORD v = (DWORD)(ULONG_PTR)icone;
+            RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar", REG_DWORD, &v, sizeof(v));
+        }
+        const int alto = (int)std::ceil(S + 2 * PAD + 2 * MARGINE);
+        ab.uEdge = ABE_BOTTOM;
+        ab.rc = {schermo.left, schermo.bottom - alto, schermo.right, schermo.bottom};
+        SHAppBarMessage(ABM_QUERYPOS, &ab);   // (Windows puo' spostarla sopra altre appbar in basso)
+        ab.rc.top = ab.rc.bottom - alto;
+        SHAppBarMessage(ABM_SETPOS, &ab);
+        if (registro) { char b[120]; snprintf(b, 120, "spazio del dock: %ld px in basso (%ld,%ld-%ld,%ld)", (long)alto, ab.rc.left, ab.rc.top, ab.rc.right, ab.rc.bottom); scrivi(b); }
+    }
     bool vuoleNascondersi = false, rivelato = false, rivelatoI = false;   // dock e isola di stato risalgono separati
     double yNascosto = 0, velNascosto = 0;   // px sotto la posizione normale (dock)
     double yNascostoI = 0, velNascostoI = 0; // ... e isola di stato
@@ -1141,7 +1263,8 @@ private:
 
     // ---- disegno ----
     void render(double t) {
-        const bool scuro = temaScuro();
+        // chiaro o scuro: dal tema, o da quanto e' chiaro il colore scelto per il dock (puntini, separatori, testi)
+        const bool scuro = coloreAuto ? temaScuro() : fondoScuro;
         bool movimento = false;
 
         // comparsa e scomparsa delle icone
@@ -1217,7 +1340,7 @@ private:
         const float fondoL = std::round(sinistra - PAD + (float)std::min(0.0, tiroX));
         const float fondoR = std::round(sinistra + tot + PAD + (float)std::max(0.0, tiroX));
         const float fondoT = std::round(baseT - (float)tiroY);
-        disegnaFondo({fondoL, fondoT, fondoR, fondoB}, scuro);
+        disegnaFondo({fondoL, fondoT, fondoR, fondoB}, scuro, opacita, coloreAuto ? nullptr : &coloreFondo);
         aggiornaVetro(vetro, rettVetro, fondoL, fondoT, fondoR, fondoB);
         zonaDockL = fondoL; zonaDockR = fondoR;
 
@@ -1347,12 +1470,15 @@ private:
     }
 
     // velo chiaro, bordo luminoso e sottile contorno scuro: stessa forma del vetro sotto
-    void disegnaFondo(const D2D1_RECT_F& f, bool scuro) {
-        pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f) : D2D1::ColorF(1, 1, 1, 0.38f));
+    // fondo di vetro (velo e bordi sopra il vetro acrilico); a: opacita' (quella del dock, impostazione; 1 i pannelli)
+    // tinta: colore scelto per il dock (nullptr: chiaro o scuro col tema), piu' coprente perche' si veda
+    void disegnaFondo(const D2D1_RECT_F& f, bool scuro, float a = 1, const D2D1_COLOR_F* tinta = nullptr) {
+        pennello->SetColor(tinta ? D2D1::ColorF(tinta->r, tinta->g, tinta->b, 0.62f * a)
+                                 : scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.35f * a) : D2D1::ColorF(1, 1, 1, 0.38f * a));
         dc->FillRoundedRectangle({f, RAGGIO, RAGGIO}, pennello);
-        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f) : D2D1::ColorF(1, 1, 1, 0.75f));
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f * a) : D2D1::ColorF(1, 1, 1, 0.75f * a));
         dc->DrawRoundedRectangle({{f.left + 0.5f, f.top + 0.5f, f.right - 0.5f, f.bottom - 0.5f}, RAGGIO - 0.5f, RAGGIO - 0.5f}, pennello, 1.0f);
-        pennello->SetColor(D2D1::ColorF(0, 0, 0, scuro ? 0.45f : 0.10f));
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.45f : 0.10f) * a));
         dc->DrawRoundedRectangle({{f.left - 0.5f, f.top - 0.5f, f.right + 0.5f, f.bottom + 0.5f}, RAGGIO + 0.5f, RAGGIO + 0.5f}, pennello, 1.0f);
     }
 
@@ -2435,6 +2561,7 @@ private:
             case WM_CLOSE: return 0;   // (le finestre del dock restano)
             case WM_ICONA_PRONTA: d->raccogliIcone(); return 0;
             case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
+            case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
             case WM_LAVORO_FATTO: { Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;
         }

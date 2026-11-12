@@ -4,6 +4,7 @@
 #include "vetro.h"
 #include "testi.h"
 #include <windowsx.h>
+#include <commdlg.h>   // ChooseColorW: il colore del dock scelto a piacere
 #include <vector>
 #include <functional>
 #include <string>
@@ -24,8 +25,18 @@ struct Valori {
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
     bool notch = true;            // il notch in alto al centro (spento: volume e notifiche col vetro, niente musica e timer)
     bool oraDock = false;         // ora e data in fondo al dock, dopo il centro di controllo
+    bool dockAuto = true;         // dock a scomparsa sotto le finestre ingrandite o che lo coprono
+    int dockOpacita = 100;        // opacita' del fondo del dock, in percento (OPACITA_MIN..100)
+    int dockIcone = 42;           // lato delle icone del dock a riposo, px a 100% (ICONE_MIN..ICONE_MAX); l'altezza segue
+    int dockDistanza = 6;         // distanza fra le icone del dock, px a 100% (DISTANZA_MIN..DISTANZA_MAX)
+    DWORD dockColore = 0;         // colore del fondo del dock: 0 automatico (tema), altrimenti 0x01RRGGBB
+    bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
 };
+constexpr int OPACITA_MIN = 20, OPACITA_PASSO = 5;
+constexpr int ICONE_MIN = 32, ICONE_MAX = 64, ICONE_PASSO = 2;
+constexpr int DISTANZA_MIN = 2, DISTANZA_MAX = 24, DISTANZA_PASSO = 2;
+constexpr DWORD COLORE_SCELTO = 0x01000000;   // segno di "colore scelto" (senza: automatico)
 
 inline Valori& valori() { static Valori v; return v; }
 
@@ -48,6 +59,12 @@ inline void carica() {
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
     v.winS = leggiDword(L"WinS", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
     v.notch = leggiDword(L"Notch", 1); v.oraDock = leggiDword(L"OraDock", 0);
+    v.dockAuto = leggiDword(L"DockAutoNascosto", 1);
+    v.dockOpacita = std::clamp((int)leggiDword(L"DockOpacita", 100), OPACITA_MIN, 100);
+    v.dockIcone = std::clamp((int)leggiDword(L"DockIcone", 42), ICONE_MIN, ICONE_MAX);
+    v.dockDistanza = std::clamp((int)leggiDword(L"DockDistanza", 6), DISTANZA_MIN, DISTANZA_MAX);
+    v.dockColore = leggiDword(L"DockColore", 0) & (COLORE_SCELTO | 0xFFFFFF);
+    v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
     testi::lingua() = v.lingua;
     // la capsula dei tasti non c'e' piu' (1.1.1): via i suoi valori rimasti dalle versioni prima
@@ -62,6 +79,10 @@ inline void salva() {
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
     scriviDword(L"WinS", v.winS); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
     scriviDword(L"Notch", v.notch); scriviDword(L"OraDock", v.oraDock);
+    scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
+    scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
+    scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
+    scriviDword(L"DockSpazio", v.dockSpazio);
 }
 
 // ---- la finestra ----
@@ -124,13 +145,25 @@ public:
                 return true;
             case WM_PAINT: disegna(); return true;
             case WM_MOUSEMOVE: {
+                if (trascina >= 0) { valoreDa(trascina, (float)GET_X_LPARAM(l)); return true; }
                 if (!dentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, v.fin, 0}; TrackMouseEvent(&tm); dentro = true; }
                 const int s = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (s != sopra) { sopra = s; disegna(); }
                 return true;
             }
-            case WM_MOUSELEAVE: dentro = false; sopra = -1; disegna(); return true;
-            case WM_LBUTTONUP: clic(zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l))); return true;
+            case WM_MOUSELEAVE: dentro = false; if (trascina < 0) sopra = -1; disegna(); return true;
+            case WM_LBUTTONDOWN: {   // su un cursore: si trascina (anche fuori dal binario, finche' non si lascia)
+                const int z = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
+                if (z >= Z_CURSORE && z < Z_CURSORE + (int)cursori.size()) {
+                    trascina = z - Z_CURSORE; SetCapture(v.fin); valoreDa(trascina, (float)GET_X_LPARAM(l));
+                }
+                return true;
+            }
+            case WM_LBUTTONUP:
+                if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); disegna(); return true; }
+                clic(zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l)));
+                return true;
+            case WM_CAPTURECHANGED: if (trascina >= 0) { trascina = -1; salva(); disegna(); } return true;
             case WM_KEYDOWN:
                 if (w == VK_ESCAPE) chiudi();
                 else if (w == VK_DOWN || w == VK_UP) vaiASezione((sezione + (w == VK_DOWN ? 1 : SEZIONI - 1)) % SEZIONI);   // frecce: sezioni
@@ -148,10 +181,14 @@ public:
 
 private:
     static constexpr float LARGO = 780, ALTO = 500, BARRA = 240;
-    enum { S_GENERALE, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, SEZIONI };
+    enum { S_GENERALE, S_DOCK, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, SEZIONI };
     // nome e spiegazione in italiano e in inglese, sezione
     struct Voce { const wchar_t *nome, *name, *spiega, *explain; bool Valori::*campo; int sezione; };
     const std::vector<Voce> voci = {
+        {L"Nascondi automaticamente", L"Auto-hide",
+         L"Spento: resta su anche sopra le finestre ingrandite", L"Off: it stays up over maximized windows too", &Valori::dockAuto, S_DOCK},
+        {L"Finestre ingrandite sopra il dock", L"Maximized windows above the dock",
+         L"Come la barra di Windows: si fermano sopra. Spento: fino in fondo", L"Like the Windows taskbar: they stop above. Off: full screen", &Valori::dockSpazio, S_DOCK},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Effetto genio", L"Genie effect",
@@ -187,9 +224,53 @@ private:
     ULONGLONG t0 = 0, tSez = 0, copiataAlle = 0;
     double k = 0, kSez = 1;
     std::vector<double> anim;
-    // zone: 0..n-1 le voci, 100+i la lingua, 200 chiudi, 300+i le sezioni
+    // zone: 0..n-1 le voci, 100+i la lingua, 200 chiudi, 300+i le sezioni, 400 diagnostica, 500 opacita' del dock
     struct Zona { D2D1_RECT_F r; int id; };
     std::vector<Zona> zone;
+    // cursori (valori con un minimo e un massimo): 500+i. Il dock cambia mentre si trascina; si salva quando si lascia
+    struct Cursore { const wchar_t *nome, *name, *spiega, *explain, *unita; int Valori::*campo; int min, max, passo; int sezione; };
+    const std::vector<Cursore> cursori = {
+        {L"Dimensione delle icone", L"Icon size", L"Anche l'altezza del dock segue", L"The dock's height follows",
+         L" px", &Valori::dockIcone, ICONE_MIN, ICONE_MAX, ICONE_PASSO, S_DOCK},
+        {L"Distanza fra le icone", L"Space between icons", L"Anche i separatori seguono", L"Separators follow too",
+         L" px", &Valori::dockDistanza, DISTANZA_MIN, DISTANZA_MAX, DISTANZA_PASSO, S_DOCK},
+        {L"Opacità", L"Opacity", L"Il vetro del dock; le icone restano piene", L"The dock's glass; icons stay solid",
+         L"%", &Valori::dockOpacita, OPACITA_MIN, 100, OPACITA_PASSO, S_DOCK},
+    };
+    static constexpr int Z_CURSORE = 500;
+    std::vector<D2D1_RECT_F> binari = std::vector<D2D1_RECT_F>(cursori.size());   // dove si e' disegnato ogni cursore
+    int trascina = -1;                                               // cursore che si sta trascinando
+
+    void valoreDa(int i, float x) {
+        const Cursore& c = cursori[i]; const D2D1_RECT_F& b = binari[i];
+        const float p = std::clamp((x - b.left) / std::max(1.0f, b.right - b.left), 0.0f, 1.0f);
+        const int val = std::clamp((int)std::lround((c.min + p * (c.max - c.min)) / c.passo) * c.passo, c.min, c.max);
+        if (val == valori().*(c.campo)) return;
+        valori().*(c.campo) = val;
+        if (cambiato) cambiato();
+        disegna();
+    }
+
+    // colore del dock: 600 automatico, 600+k i colori pronti, Z_COLORE_MIO quello scelto con la finestra dei colori
+    static constexpr int Z_COLORE = 600;
+    static constexpr DWORD COLORI[] = {0x2C2C2E, 0xF2F2F7, 0x0A84FF, 0x5E5CE6, 0xBF5AF2, 0xFF375F, 0xFF9F0A, 0x30D158};
+    static constexpr int N_COLORI = sizeof(COLORI) / sizeof(COLORI[0]);
+    static constexpr int Z_COLORE_MIO = Z_COLORE + 1 + N_COLORI;
+    void scegliColore(int id) {
+        DWORD& c = valori().dockColore;
+        if (id == Z_COLORE) c = 0;
+        else if (id < Z_COLORE_MIO) c = COLORE_SCELTO | COLORI[id - Z_COLORE - 1];
+        else {   // la finestra dei colori di Windows
+            static COLORREF propri[16] = {};
+            const DWORD prima = c & 0xFFFFFF;
+            CHOOSECOLORW cc{}; cc.lStructSize = sizeof(cc); cc.hwndOwner = v.fin; cc.lpCustColors = propri;
+            cc.rgbResult = RGB((prima >> 16) & 255, (prima >> 8) & 255, prima & 255);
+            cc.Flags = CC_FULLOPEN | CC_RGBINIT;
+            if (!ChooseColorW(&cc)) return;
+            c = COLORE_SCELTO | ((DWORD)GetRValue(cc.rgbResult) << 16) | ((DWORD)GetGValue(cc.rgbResult) << 8) | GetBValue(cc.rgbResult);
+        }
+    }
+    static D2D1_COLOR_F colore(DWORD rgb, float a = 1) { return D2D1::ColorF(((rgb >> 16) & 255) / 255.0f, ((rgb >> 8) & 255) / 255.0f, (rgb & 255) / 255.0f, a); }
 
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
@@ -208,6 +289,14 @@ private:
     void clic(int id) {
         if (id < 0) return;
         if (id == 200) { chiudi(); return; }
+        if (id >= Z_CURSORE && id < Z_COLORE) return;   // (i cursori si usano trascinando: WM_LBUTTONDOWN)
+        if (id >= Z_COLORE && id <= Z_COLORE_MIO) {
+            scegliColore(id);
+            salva();
+            if (cambiato) cambiato();
+            disegna();
+            return;
+        }
         if (id == 400) {   // diagnostica negli appunti
             if (copiaDiagnostica && copiaDiagnostica()) { copiataAlle = vetro::ms(); vetro::battito(v.fin, 1); }
             disegna();
@@ -241,6 +330,7 @@ private:
     static const wchar_t* nomeSezione(int s) {
         switch (s) {
             case S_GENERALE: return testi::t(L"Generale", L"General");
+            case S_DOCK: return L"Dock";
             case S_ANIMAZIONI: return testi::t(L"Animazioni", L"Animations");
             case S_NOTCH: return testi::t(L"Notch e notifiche", L"Notch & notifications");
             case S_TASTIERA: return testi::t(L"Tastiera e mouse", L"Keyboard and mouse");
@@ -258,6 +348,10 @@ private:
                 v.rt->DrawEllipse({{cx, cy}, 4.5f * d, 4.5f * d}, v.pen, sp);
                 for (int i = 0; i < 8; i++) { const float a = i * 3.14159265f / 4; l(6 * std::cos(a), 6 * std::sin(a), 8.5f * std::cos(a), 8.5f * std::sin(a)); }
                 break;
+            case S_DOCK:       // il dock: barra arrotondata in basso con tre icone
+                v.rt->DrawRoundedRectangle({{cx - 9 * d, cy + 1 * d, cx + 9 * d, cy + 7 * d}, 2.5f * d, 2.5f * d}, v.pen, sp);
+                for (int i = 0; i < 3; i++) v.rt->FillRoundedRectangle({{cx + (-6.5f + i * 5) * d, cy + 2.5f * d, cx + (-3.5f + i * 5) * d, cy + 5.5f * d}, 0.8f * d, 0.8f * d}, v.pen);
+                l(-7, -6, 7, -6); break;
             case S_ANIMAZIONI: // scintilla e una piccola
                 l(-2, -8, -2, 4); l(-8, -2, 4, -2); l(-5.5f, -5.5f, 1.5f, 1.5f); l(1.5f, -5.5f, -5.5f, 1.5f);
                 l(5, 3, 5, 8); l(2.5f, 5.5f, 7.5f, 5.5f); break;
@@ -384,6 +478,75 @@ private:
                 v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
                 v.testo(tb, fCentro, rb, D2D1::ColorF(1, 1, 1, (float)e));
             }
+        }
+        // cursori della sezione: nome e spiegazione a sinistra, binario a destra, il valore accanto
+        for (size_t i = 0; i < cursori.size(); i++) {
+            const Cursore& c = cursori[i];
+            if (c.sezione != sezione) continue;
+            const int id = Z_CURSORE + (int)i;
+            const D2D1_RECT_F r = {L, y, R, y + 54 * d};
+            riquadro(r, sopra == id || trascina == (int)i);
+            const float x1 = r.right - 64 * d, x0 = x1 - 190 * d, cy = (r.top + r.bottom) / 2;
+            v.testo(testi::t(c.nome, c.name), fVoce, {r.left + 16 * d, r.top + 7 * d, x0 - 16 * d, r.top + 29 * d}, inkS);
+            v.testo(testi::t(c.spiega, c.explain), fSotto, {r.left + 16 * d, r.top + 28 * d, x0 - 16 * d, r.top + 48 * d}, tenueS);
+            binari[i] = {x0, cy - 12 * d, x1, cy + 12 * d};
+            zone.push_back({{x0 - 10 * d, r.top, x1 + 10 * d, r.bottom}, id});
+            const int val = valori().*(c.campo);
+            const float p = (val - c.min) / (float)(c.max - c.min), xm = x0 + (x1 - x0) * p;
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.18f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
+            v.rt->FillRoundedRectangle({{x0, cy - 2 * d, x1, cy + 2 * d}, 2 * d, 2 * d}, v.pen);
+            v.pen->SetColor({blu.r, blu.g, blu.b, (float)e});
+            v.rt->FillRoundedRectangle({{x0, cy - 2 * d, xm, cy + 2 * d}, 2 * d, 2 * d}, v.pen);
+            const float rk = (trascina == (int)i ? 10.0f : 9.0f) * d;   // pallino (un po' piu' grande mentre si trascina)
+            v.pen->SetColor(D2D1::ColorF(0, 0, 0, (v.scuro ? 0.35f : 0.18f) * (float)e));
+            v.rt->FillEllipse({{xm, cy + 0.8f * d}, rk + 0.6f * d, rk + 0.6f * d}, v.pen);
+            v.pen->SetColor(D2D1::ColorF(1, 1, 1, (float)e));
+            v.rt->FillEllipse({{xm, cy}, rk, rk}, v.pen);
+            v.testo(std::to_wstring(val) + c.unita, fCentro, {x1 + 8 * d, r.top, r.right - 8 * d, r.bottom}, inkS);
+            y += 60 * d;
+        }
+        if (sezione == S_DOCK) {
+            // colore del dock: automatico (meta' chiaro e meta' scuro), i colori pronti, e "+" per sceglierne uno
+            const D2D1_RECT_F r = {L, y, R, y + 54 * d};
+            riquadro(r, false);
+            const float rc = 10 * d, passo = 28 * d, cy = (r.top + r.bottom) / 2;
+            const float xFine = r.right - 16 * d - rc, xInizio = xFine - passo * (N_COLORI + 1);
+            v.testo(testi::t(L"Colore", L"Color"), fVoce, {r.left + 16 * d, r.top + 7 * d, xInizio - 16 * d, r.top + 29 * d}, inkS);
+            v.testo(testi::t(L"Del vetro del dock", L"Of the dock's glass"), fSotto, {r.left + 16 * d, r.top + 28 * d, xInizio - 16 * d, r.top + 48 * d}, tenueS);
+            const DWORD scelto = valori().dockColore;
+            bool pronto = false;
+            for (int k = 0; k < N_COLORI; k++) if (scelto == (COLORE_SCELTO | COLORI[k])) pronto = true;
+            for (int k = 0; k <= N_COLORI + 1; k++) {
+                const int id = Z_COLORE + k;
+                const float cx = xInizio + passo * k;
+                const D2D1_ELLIPSE el = {{cx, cy}, rc, rc};
+                zone.push_back({{cx - passo / 2, r.top, cx + passo / 2, r.bottom}, id});
+                const bool attivo = k == 0 ? !(scelto & COLORE_SCELTO)
+                                  : k <= N_COLORI ? scelto == (COLORE_SCELTO | COLORI[k - 1])
+                                                  : ((scelto & COLORE_SCELTO) && !pronto);
+                if (k == 0) {   // automatico: meta' chiaro e meta' scuro
+                    v.pen->SetColor(D2D1::ColorF(0.96f, 0.96f, 0.97f, (float)e)); v.rt->FillEllipse(el, v.pen);
+                    v.pen->SetColor(D2D1::ColorF(0.17f, 0.17f, 0.18f, (float)e));
+                    v.rt->PushAxisAlignedClip({cx, cy - rc, cx + rc, cy + rc}, D2D1_ANTIALIAS_MODE_ALIASED);
+                    v.rt->FillEllipse(el, v.pen); v.rt->PopAxisAlignedClip();
+                } else if (k <= N_COLORI) {
+                    v.pen->SetColor(colore(COLORI[k - 1], (float)e)); v.rt->FillEllipse(el, v.pen);
+                } else {        // il proprio: il colore scelto, oppure un "+"
+                    if (attivo) { v.pen->SetColor(colore(scelto, (float)e)); v.rt->FillEllipse(el, v.pen); }
+                    else {
+                        v.pen->SetColor(tenueS); v.rt->DrawEllipse(el, v.pen, 1.4f * d);
+                        v.rt->DrawLine({cx - 4.5f * d, cy}, {cx + 4.5f * d, cy}, v.pen, 1.6f * d);
+                        v.rt->DrawLine({cx, cy - 4.5f * d}, {cx, cy + 4.5f * d}, v.pen, 1.6f * d);
+                    }
+                }
+                // bordo sottile (i colori chiari si vedono anche sul riquadro chiaro), anello blu su quello scelto
+                v.pen->SetColor(D2D1::ColorF(0, 0, 0, 0.15f * (float)e)); v.rt->DrawEllipse(el, v.pen, 1.0f);
+                if (attivo || sopra == id) {
+                    v.pen->SetColor(attivo ? D2D1::ColorF(blu.r, blu.g, blu.b, (float)e) : tenueS);
+                    v.rt->DrawEllipse({{cx, cy}, rc + 3.5f * d, rc + 3.5f * d}, v.pen, 2.0f * d);
+                }
+            }
+            y += 60 * d;
         }
         if (sezione == S_NOTCH)
             riga(testi::t(L"Nel notch, sempre", L"Always in the notch"),
