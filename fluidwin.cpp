@@ -421,6 +421,7 @@ static bool risponde(HWND h, UINT ms) {
 // Usata dal guardiano e all'avvio: rimette a posto qualsiasi finestra lasciata nascosta o senza animazioni
 static void ripristinaTutte() {
     ripristinaBarra();
+    dock::togliAppbarRimasta();   // spazio riservato al dock rimasto da un FluidWin terminato male
     mostraBarreWindows(true);
     EnumWindows([](HWND h, LPARAM) -> BOOL {
         if (GetPropW(h, PROP_NASCOSTA)) {
@@ -2467,7 +2468,7 @@ static std::wstring diagnostica() {
     const impostazioni::Valori& v = impostazioni::valori();
     riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d",
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.winTab, v.winS, v.angolo, v.menuDestro);
-    riga(L"Dock: a scomparsa %d, opacità %d%%", v.dockAuto, v.dockOpacita);
+    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d", v.dockAuto, v.dockOpacita, v.dockSpazio);
     riga(L"Registro: %ls", gLog ? L"acceso (%TEMP%\\fluidwin.log)" : L"spento (avvio con --log per averlo)");
     return t;
 }
@@ -2504,7 +2505,7 @@ static void applicaImpostazioni() {
     gTastoRicerca = v.winS;
     gBanner.accendi(v.banner);
     gMenuDestro = v.menuDestro;
-    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); }
+    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); }
     aggiornaTransizioni();
     // lingua cambiata: i testi si leggono al momento di disegnare, basta ridisegnare (date e nomi del dock si rifanno)
     static int linguaPrima = -1;

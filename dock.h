@@ -68,6 +68,18 @@
 namespace dock {
 
 static const UINT WM_APPBAR = WM_APP + 20;
+
+// Spazio riservato al dock (impostazione): il dock si registra come "appbar", come la barra di Windows, e le finestre
+// ingrandite si fermano sopra. Il suo HWND sta nel registro finche' la prenotazione c'e': se FluidWin termina in modo
+// anomalo, il guardiano (o il prossimo avvio, con ripristinaTutte) la toglie, altrimenti resterebbe un vuoto in basso
+static const wchar_t* const CHIAVE_APPBAR = L"Software\\FluidWin";
+static void togliAppbarRimasta() {
+    DWORD h = 0, n = sizeof(h);
+    if (RegGetValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar", RRF_RT_REG_DWORD, nullptr, &h, &n) != ERROR_SUCCESS) return;
+    APPBARDATA ab{}; ab.cbSize = sizeof(ab); ab.hWnd = (HWND)(ULONG_PTR)h;
+    SHAppBarMessage(ABM_REMOVE, &ab);
+    RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar");
+}
 static const UINT_PTR TIMER_INVIO = 7;   // "icone nascoste": Invio poco dopo Win+B
 static const UINT_PTR TIMER_BORDO = 8;   // dock nascosto: controlla se il mouse arriva sul bordo in basso
 static const UINT_PTR TIMER_DOPO = 9;    // launcher o centro di controllo da aprire quando l'altro ha finito di chiudersi
@@ -262,6 +274,7 @@ public:
         fermaIcone();
         if (!attivo) return;
         attivo = false;
+        aggiornaAppbar();   // lo spazio riservato si libera (le finestre ingrandite tornano fino in fondo)
         APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima;
         SHAppBarMessage(ABM_SETSTATE, &tb);
         ShowWindow(icone, SW_HIDE); ShowWindow(vetro, SW_HIDE); ShowWindow(vetroStato, SW_HIDE); ShowWindow(vetroOra, SW_HIDE); notch.mostra(false);
@@ -319,6 +332,7 @@ public:
             if (!bersaglio) perso = true;   // superficie non ricreata: si riparte da capo (riavvio di FluidWin)
         }
         SetWindowPos(icone, HWND_TOPMOST, schermo.left, schermo.bottom - H, W, H, SWP_NOACTIVATE);
+        if (appbarOk) aggiornaAppbar();   // lo spazio riservato passa al nuovo schermo
         rettVetro = rettVetroStato = rettVetroOra = RECT{};          // i vetri si rimettono al prossimo fotogramma
         regioneDock = regioneIsola = regioneEtichetta = RECT{};
         if (registro) { char b[96]; snprintf(b, 96, "ora su %ld,%ld-%ld,%ld", schermo.left, schermo.top, schermo.right, schermo.bottom); scrivi(b); }
@@ -477,7 +491,8 @@ public:
                 snprintf(perche, sizeof(perche), "%p fg %p zoom %d rett %ld,%ld-%ld,%ld schermo %ld,%ld-%ld,%ld", (void*)r, (void*)fg,
                          (int)IsZoomed(r), w.left, w.top, w.right, w.bottom, schermo.left, schermo.top, schermo.right, schermo.bottom);
                 // alcune app ingrandite lasciano 1-2 px liberi sul bordo della barra di Windows a scomparsa
-                n = IsZoomed(r) || (w.left <= schermo.left + 2 && w.top <= schermo.top + 2 && w.right >= schermo.right - 2 && w.bottom >= schermo.bottom - 2);
+                // (con lo spazio riservato le finestre ingrandite si fermano sopra il dock: non lo coprono)
+                n = (IsZoomed(r) && !spazioRiservato) || (w.left <= schermo.left + 2 && w.top <= schermo.top + 2 && w.right >= schermo.right - 2 && w.bottom >= schermo.bottom - 2);
                 // come i dock "intelligenti": si nasconde anche quando la finestra in primo piano gli finisce sopra
                 if (!n) {
                     RECT vis{}; if (FAILED(DwmGetWindowAttribute(r, DWMWA_EXTENDED_FRAME_BOUNDS, &vis, sizeof(vis)))) vis = w;
@@ -522,6 +537,13 @@ public:
     void impostaAutoNascondi(bool si) {
         if (si == autoNascondi) return;
         autoNascondi = si;
+        controllaFinestre(true);
+    }
+    // impostazione: le finestre ingrandite si fermano sopra il dock (spazio riservato, appbar) o vanno fino in fondo
+    void impostaSpazio(bool si) {
+        if (si == spazioRiservato) return;
+        spazioRiservato = si;
+        aggiornaAppbar();
         controllaFinestre(true);
     }
     void impostaOpacita(float a) {
@@ -587,6 +609,36 @@ private:
     bool vuoleNascondersiI = false;   // l'isola sta sempre nascosta, il dock solo sotto le finestre
     bool autoNascondi = true;         // impostazione: il dock scende sotto le finestre ingrandite o che lo coprono
     float opacita = 1;                // impostazione: opacita' del fondo del dock (vetro e velo), 0.2..1
+    bool spazioRiservato = false;     // impostazione: spazio riservato in basso (appbar)...
+    bool appbarOk = false;            // ... e registrato davvero presso Windows
+
+    // registra (o toglie) il dock come appbar sul bordo in basso del suo schermo: altezza del dock con un margine sopra
+    // uguale a quello sotto. Si richiama quando cambia lo schermo e quando Windows sposta le appbar (ABN_POSCHANGED)
+    void aggiornaAppbar() {
+        APPBARDATA ab{}; ab.cbSize = sizeof(ab); ab.hWnd = icone;
+        if (!spazioRiservato || !attivo || !icone) {
+            if (appbarOk) {
+                SHAppBarMessage(ABM_REMOVE, &ab); appbarOk = false;
+                RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar");
+                scrivi("spazio del dock tolto: le finestre ingrandite arrivano in fondo");
+            }
+            return;
+        }
+        if (!appbarOk) {
+            ab.uCallbackMessage = WM_APPBAR;
+            if (!SHAppBarMessage(ABM_NEW, &ab)) { scrivi("spazio del dock: registrazione non riuscita"); return; }
+            appbarOk = true;
+            const DWORD v = (DWORD)(ULONG_PTR)icone;
+            RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE_APPBAR, L"Appbar", REG_DWORD, &v, sizeof(v));
+        }
+        const int alto = (int)std::ceil(S + 2 * PAD + 2 * MARGINE);
+        ab.uEdge = ABE_BOTTOM;
+        ab.rc = {schermo.left, schermo.bottom - alto, schermo.right, schermo.bottom};
+        SHAppBarMessage(ABM_QUERYPOS, &ab);   // (Windows puo' spostarla sopra altre appbar in basso)
+        ab.rc.top = ab.rc.bottom - alto;
+        SHAppBarMessage(ABM_SETPOS, &ab);
+        if (registro) { char b[120]; snprintf(b, 120, "spazio del dock: %ld px in basso (%ld,%ld-%ld,%ld)", (long)alto, ab.rc.left, ab.rc.top, ab.rc.right, ab.rc.bottom); scrivi(b); }
+    }
     bool vuoleNascondersi = false, rivelato = false, rivelatoI = false;   // dock e isola di stato risalgono separati
     double yNascosto = 0, velNascosto = 0;   // px sotto la posizione normale (dock)
     double yNascostoI = 0, velNascostoI = 0; // ... e isola di stato
@@ -2278,6 +2330,7 @@ private:
             case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
             case WM_CLOSE: return 0;   // (le finestre del dock restano)
             case WM_ICONA_PRONTA: d->raccogliIcone(); return 0;
+            case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
             case WM_LAVORO_FATTO: { Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;
         }
