@@ -1199,6 +1199,9 @@ private:
             const D2D1_RECT_F r = {x0 + GAP * 2 + 1, yb - S, x0 + coda, yb};
             isola = {r.left, fondoT, r.right + PAD, fondoB};   // il suo posto per il mouse (vedi oraNelDock)
             rettStato[ORA] = r; rettStato[CONTROLLO] = {};
+            // fondo dell'ora: un velo suo, sempre pieno, cosi' si legge anche col vetro del dock quasi trasparente
+            pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.55f) : D2D1::ColorF(1, 1, 1, 0.62f));
+            dc->FillRoundedRectangle({{r.left - 2 * dpi, r.top + 2 * dpi, r.right + 2 * dpi, r.bottom - 2 * dpi}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
             const double e = verso(evidenza[ORA], (statoSopra == ORA && mouseDentro) ? 1.0 : 0.0, 0.05);
             if (e != evidenza[ORA]) movimento = true;
             evidenza[ORA] = e;
