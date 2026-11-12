@@ -124,7 +124,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
 inline auto Motore::preparaVista(int tipo) -> void {
     if (tipo == P_SFONDO) leggiAppSfondo();   // l'elenco nuovo arriva dal thread e l'altezza si adatta
     else if (tipo == P_WIDGET) { widD.aggiorna(); wid = widD.copia(); }
-    else if (tipo == P_NOTIFICHE) { Cronometro cr(this, "notifiche"); permessoN = lettoreN.leggi(listaN); }
+    else if (tipo == P_NOTIFICHE) chiediNotifiche();   // si apre subito con l'ultimo elenco, il nuovo arriva dal thread
     else if (tipo == P_CONTROLLO) { leggiUscita(); sis.avvia(); sis.rileggi(); }
     else if (tipo == P_MIXER) mix.leggi();
     else if (tipo == P_APPUNTI) versioneAppunti = appunti::Cronologia::io().versione;
@@ -752,12 +752,73 @@ inline auto Motore::altezzaNotifiche() const -> float {
     return std::min(altezzaMassimaP() - std::round(TESTA * dpi), std::round((N_TESTA + N_CAL + N_TITOLO + schede + N_PIEDE) * dpi));
 }
 
-// dopo aver tolto notifiche: elenco nuovo e pannello della nuova altezza (il bordo in basso resta fermo)
+// dopo aver tolto notifiche (gia' tolte anche da listaN): pannello della nuova altezza (il bordo in basso resta fermo),
+// poi l'elenco vero dal thread. Le letture partite prima non valgono piu': avrebbero ancora quelle tolte
 inline auto Motore::ricaricaNotifiche() -> void {
-    permessoN = lettoreN.leggi(listaN);
     const float nuova = altezzaVista(P_NOTIFICHE);
     if (nuova != PH) { PH = nuova; pAnimazione = true; }   // l'altezza ci arriva con la molla (il bordo in basso resta fermo)
     pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
+    chiediNotifiche();
+    genValida = genN;
+}
+
+// ---- lettura delle notifiche in un thread a parte (vedi WM_NOTIFICHE_LETTE) ----
+inline DWORD WINAPI Motore::threadNotifiche(LPVOID p) {
+    Motore* m = (Motore*)p;
+    RoInitialize(RO_INIT_MULTITHREADED);
+    {
+        notifiche::Lettore l;   // suo: gli oggetti di Windows restano su questo thread
+        while (!m->fineN) {
+            WaitForSingleObject(m->eventoN, INFINITE);
+            if (m->fineN) break;
+            const LONG g = m->genN;   // richieste arrivate durante la lettura: ne rifara' un'altra (l'evento resta acceso)
+            std::vector<notifiche::Notifica> lista;
+            const bool ok = l.leggi(lista);
+            EnterCriticalSection(&m->csN); m->lettaN = std::move(lista); m->permessoLetto = ok; m->genLetta = g; LeaveCriticalSection(&m->csN);
+            PostMessageW(m->icone, WM_NOTIFICHE_LETTE, 0, 0);
+        }
+    }
+    RoUninitialize();
+    return 0;
+}
+
+inline auto Motore::chiediNotifiche() -> void {
+    if (!csNOk) {
+        InitializeCriticalSection(&csN); csNOk = true;
+        eventoN = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+        threadNH = CreateThread(nullptr, 0, threadNotifiche, this, 0, nullptr);
+        if (threadNH) SetThreadPriority(threadNH, THREAD_PRIORITY_BELOW_NORMAL);
+    }
+    if (!threadNH) {   // (senza thread: come prima, sul thread principale)
+        Cronometro cr(this, "notifiche"); permessoN = lettoreN.leggi(listaN); letteN = true; return;
+    }
+    chiestaN = GetTickCount64();
+    InterlockedIncrement(&genN);
+    SetEvent(eventoN);
+}
+
+// elenco nuovo dal thread: se il pannello delle notifiche e' aperto cambia altezza con la molla e si ridisegna
+inline auto Motore::notificheLette() -> void {
+    EnterCriticalSection(&csN);
+    const bool vecchia = genLetta < genValida;
+    if (!vecchia) { listaN = lettaN; permessoN = permessoLetto; }
+    LeaveCriticalSection(&csN);
+    if (vecchia) return;
+    letteN = true;
+    if (registro) { char b[80]; snprintf(b, 80, "notifiche lette: %zu (in %llu ms)", listaN.size(), GetTickCount64() - chiestaN); scrivi(b); }
+    usa(0);
+    if (pannelloTipo != P_NOTIFICHE || pChiusura) return;
+    const float nuova = altezzaVista(P_NOTIFICHE);
+    if (nuova != PH) { PH = nuova; pAnimazione = true; }
+    pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
+}
+
+// all'uscita: si aspetta la lettura in corso (al massimo 2 s), poi il thread finisce
+inline auto Motore::fermaNotifiche() -> void {
+    if (!threadNH) return;
+    fineN = 1; SetEvent(eventoN);
+    WaitForSingleObject(threadNH, 2000);
+    CloseHandle(threadNH); threadNH = nullptr;
 }
 
 inline auto Motore::quandoN(INT64 t) -> std::wstring {
@@ -835,7 +896,8 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
         pennello->SetColor(scheda);
         dc->FillRoundedRectangle({{m, y, PW - m, y + 46 * dpi}, 12 * dpi, 12 * dpi}, pennello);
         pennello->SetColor(tenue);
-        scrivi(permessoN ? testi::t(L"Nessuna notifica", L"No notifications")
+        // (prima lettura ancora in corso: "…", non "consenti l'accesso", che sarebbe falso)
+        scrivi(!letteN ? L"…" : permessoN ? testi::t(L"Nessuna notifica", L"No notifications")
                          : testi::t(L"Consenti l'accesso alle notifiche nelle impostazioni", L"Allow access to notifications in Settings"),
                fmtSotto, {m + 14 * dpi, y, PW - m - 10 * dpi, y + 46 * dpi});
     } else {
@@ -1615,9 +1677,11 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             }
             break;
         case A_RIMUOVI:
-            if (e.indice < (int)listaN.size()) { lettoreN.rimuovi(listaN[e.indice].id); ricaricaNotifiche(); }
+            if (e.indice < (int)listaN.size()) { lettoreN.rimuovi(listaN[e.indice].id); listaN.erase(listaN.begin() + e.indice); ricaricaNotifiche(); }
             break;
-        case A_CANCELLA: lettoreN.cancellaTutte(); ricaricaNotifiche(); break;
+        case A_CANCELLA:   // quelle dell'elenco (le prime 50): se ce n'erano di piu', la lettura nuova mostra le altre
+            for (const auto& n : listaN) lettoreN.rimuovi(n.id);
+            listaN.clear(); ricaricaNotifiche(); break;
         case A_IMPOST_NOTIFICHE: chiudiPannello(); apriPagina(permessoN ? L"ms-settings:notifications" : L"ms-settings:privacy-notifications"); break;
         case A_MUTO: {
             IAudioEndpointVolume* v = volumeDispositivo();

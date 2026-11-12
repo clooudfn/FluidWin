@@ -319,6 +319,7 @@ public:
 
     void chiudi() {
         fermaIcone();
+        fermaNotifiche();
         if (!attivo) return;
         attivo = false;
         APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima;
@@ -1640,9 +1641,24 @@ private:
     double temaK = -1;                   // simbolo del tema: 0 sole (chiaro) .. 1 luna (scuro), animato
     bool trascinaLum = false;
     // notifiche (pannello dell'ora)
-    notifiche::Lettore lettoreN;
+    notifiche::Lettore lettoreN;           // (sul thread principale: solo per togliere notifiche, che e' veloce)
     std::vector<notifiche::Notifica> listaN;
     bool permessoN = false;
+    // Leggere le notifiche aspetta Windows ~1 s (GetNotificationsAsync, anche con poche notifiche): lo fa un thread a
+    // parte. Il pannello si apre subito con l'ultimo elenco letto e si aggiorna quando arriva quello nuovo
+    // (WM_NOTIFICHE_LETTE). Prima si leggeva al clic e tutto FluidWin restava fermo un secondo
+    static const UINT WM_NOTIFICHE_LETTE = WM_APP + 32;
+    CRITICAL_SECTION csN{}; bool csNOk = false;
+    HANDLE eventoN = nullptr, threadNH = nullptr;
+    volatile LONG fineN = 0, genN = 0;      // genN: numero dell'ultima richiesta
+    std::vector<notifiche::Notifica> lettaN; bool permessoLetto = false; LONG genLetta = 0;   // dal thread (sotto csN)
+    LONG genValida = 0;                     // letture partite prima di questa richiesta: vecchie (notifiche tolte nel frattempo)
+    bool letteN = false;                    // arrivata almeno una lettura (prima il pannello mostra "…")
+    ULONGLONG chiestaN = 0;                 // ultima richiesta (il mouse sull'ora la anticipa, non a raffica)
+    static DWORD WINAPI threadNotifiche(LPVOID p);
+    void chiediNotifiche();
+    void notificheLette();
+    void fermaNotifiche();
     std::unordered_map<std::wstring, ID2D1Bitmap1*> iconeN;   // per AppUserModelID (nullptr = provata, nessuna icona)
     std::unordered_map<std::wstring, std::wstring> iconeNDaExe;   // eseguibile chiesto al posto dell'AppUserModelID -> AppUserModelID
     IDWriteTextFormat* fmtGrande = nullptr;
@@ -2359,7 +2375,10 @@ private:
                 // (l'ora in fondo al dock e' parte del dock: l'ingrandimento resta, altrimenti il dock si stringerebbe
                 // e l'ora scapperebbe da sotto il mouse, per poi tornare)
                 d->mouseSulDock = !isola || d->oraNelDock;
+                const int statoPrima = d->statoSopra;
                 d->statoSopra = isola ? d->statoInPunto(d->mouseX, d->mouseY) : -1;
+                // mouse arrivato sull'ora: le notifiche si cominciano a leggere, cosi' al clic sono quasi pronte
+                if (d->statoSopra == ORA && statoPrima != ORA && GetTickCount64() - d->chiestaN > 3000) d->chiediNotifiche();
                 d->dirty = true;
                 return 0;
             }
@@ -2415,6 +2434,7 @@ private:
             case WM_MOUSEACTIVATE: return MA_NOACTIVATE;
             case WM_CLOSE: return 0;   // (le finestre del dock restano)
             case WM_ICONA_PRONTA: d->raccogliIcone(); return 0;
+            case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
             case WM_LAVORO_FATTO: { Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;
         }
