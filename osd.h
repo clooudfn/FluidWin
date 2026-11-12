@@ -9,13 +9,13 @@ namespace osd {
 
 class Indicatore {
 public:
-    bool inizializza() {
-        return v.crea(L"FluidWin.Volume", vetro::procedura<Indicatore>, this, false);
-    }
+    // La finestra (vetro e disegno Direct2D, ~5-9 MB) si crea al primo uso: con il notch acceso il volume lo mostra lui,
+    // e questo indicatore serve solo senza notch o sopra un gioco a schermo intero
+    bool inizializza() { return true; }
 
     // livello 0..1; muto. Ricomincia il conto alla rovescia se e' gia' a schermo
     void mostra(float livello, bool muto) {
-        if (!v.fin) return;
+        if (!v.fin && !v.crea(L"FluidWin.Volume", vetro::procedura<Indicatore>, this, false)) return;
         livelloObj = livello; this->muto = muto;
         const ULONGLONG ora = vetro::ms();
         if (stato == 0) {   // da nascosto: entra

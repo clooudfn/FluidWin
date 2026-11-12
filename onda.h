@@ -19,10 +19,15 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+// bytecode degli shader compilato insieme a FluidWin (compila.ps1, genera_shader.cpp); se manca si compila qui
+#if !defined(FLUIDWIN_GENERA_SHADER) && __has_include("shader_compilati.h")
+#include "shader_compilati.h"
+#endif
 
 namespace onda {
 
-static const char* SHADER = R"(
+// (con shader_compilati.h questo testo lo usa solo genera_shader.cpp)
+[[maybe_unused]] static const char* SHADER = R"(
 cbuffer C : register(b0) { float2 dim; float t; float apri; float2 centro; float spegni; float dpi; float foto; float3 pad; };
 Texture2D schermo : register(t0);
 SamplerState camp : register(s0);
@@ -267,12 +272,18 @@ private:
                 dd->Release();
                 if (FAILED(dc->CreateTargetForHwnd(fin, TRUE, &tg)) || FAILED(dc->CreateVisual(&vis))) return false;
                 vis->SetContent(sc); tg->SetRoot(vis); dc->Commit();
+                // shader: gia' compilati con FluidWin (shader_compilati.h), altrimenti qui (~60 ms)
+#ifdef FLUIDWIN_SHADER_COMPILATI
+                dev->CreateVertexShader(shader_compilati::ONDA_VS, sizeof(shader_compilati::ONDA_VS), nullptr, &vs);
+                dev->CreatePixelShader(shader_compilati::ONDA_PS, sizeof(shader_compilati::ONDA_PS), nullptr, &ps);
+#else
                 ID3DBlob *bv = nullptr, *bp = nullptr, *err = nullptr;
                 if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "vs", "vs_4_0", 0, 0, &bv, &err))) { if (err) err->Release(); return false; }
                 if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "ps", "ps_4_0", 0, 0, &bp, &err))) { if (err) err->Release(); bv->Release(); return false; }
                 dev->CreateVertexShader(bv->GetBufferPointer(), bv->GetBufferSize(), nullptr, &vs);
                 dev->CreatePixelShader(bp->GetBufferPointer(), bp->GetBufferSize(), nullptr, &ps);
                 bv->Release(); bp->Release();
+#endif
                 D3D11_BUFFER_DESC bd{}; bd.ByteWidth = sizeof(Costanti); bd.Usage = D3D11_USAGE_DYNAMIC;
                 bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER; bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
                 dev->CreateBuffer(&bd, nullptr, &cb);

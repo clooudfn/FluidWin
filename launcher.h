@@ -163,8 +163,16 @@ inline auto Motore::applicaTutteApp(std::vector<AppL> nuove) -> void {
     const int sel = lSel; const double scr = lScrollObj;
     filtra();
     if (lAperto) { lSel = std::clamp(sel, 0, std::max(0, (int)filtrate.size() - 1)); lScrollObj = std::clamp(scr, 0.0, lScrollMax()); }
-    for (auto& a : tutteApp) if (!a.icona && !a.provata) { a.provata = true; chiediIcona(a.avvio, 96); }
+    if (iconeLauncher) chiediIconeLauncher();
     if (registro) { char b[64]; snprintf(b, 64, "launcher: %d app", (int)tutteApp.size()); scrivi(b); }
+}
+
+// Icone di tutte le app, solo dalla prima apertura del launcher. Prenderle dalla shell carica in FluidWin parecchie
+// sue parti (gestori delle icone, .NET, XAML...), che poi restano: farlo all'avvio "per essere pronti" costava ~50 MB
+// anche a chi il launcher non lo apre mai. La prima apertura le mostra comparire man mano (dal thread delle icone)
+inline auto Motore::chiediIconeLauncher() -> void {
+    iconeLauncher = true;
+    for (auto& a : tutteApp) if (!a.icona && !a.provata) { a.provata = true; chiediIcona(a.avvio, 96); }
 }
 
 inline auto Motore::elencaTutteApp() -> std::vector<AppL> {
@@ -293,10 +301,12 @@ inline auto Motore::apriLauncher() -> void {
     }
     if (tutteApp.empty()) leggiTutteApp(true);
     else if (adesso() - lLetto > 600) leggiTutteApp();
+    chiediIconeLauncher();   // (la prima volta: le icone arrivano man mano)
     // centro di controllo aperto: prima si chiude lui, poi (TIMER_DOPO) si apre il launcher; mai uno sopra l'altro
     if (!nessunaScheda()) { if (dopo != 1) { chiudiTutte(); apriDopo(1, 0); } return; }
     primaDelLauncher = GetForegroundWindow();
     query.clear(); filtra(); lSopra = -1; lScroll = 0;
+    svegliaBordo();   // (il timer del bordo chiude il launcher al clic fuori)
     lAperto = true; lChiusura = false; lScala = 0.12; lVel = 0; lAlfa = 0; lT0 = adesso(); lRegione = false; lRipreso = false;
     // sopra il dock, al centro; la finestra scende fino all'icona "App"
     const int x0 = schermo.left + (int)std::round((W - LW) / 2);

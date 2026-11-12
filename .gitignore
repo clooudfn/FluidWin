@@ -13,3 +13,6 @@
 !LICENSE
 !docs/
 !docs/**
+!genera_shader.cpp
+# generato da compila.ps1 (bytecode degli shader): si ricrea a ogni compilazione
+shader_compilati.h

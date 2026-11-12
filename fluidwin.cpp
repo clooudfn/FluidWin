@@ -165,6 +165,7 @@ struct InfoFinestra {
 };
 
 static HWND gOverlay, gMessaggi;
+static void sveglia7();   // timer 7 acceso finche' serve (vedi controllaAngolo)
 static POINT gOrigine;                      // angolo in alto a sinistra dello schermo virtuale
 static bool gOverlayVisibile = false;
 static bool gPausa = false;
@@ -870,7 +871,7 @@ static std::unordered_map<HWND, RECT> gUltimoPosto;
 static HWND gTrascinoApp = nullptr;
 
 static void suInizioSpostamento(HWND h) {
-    gInSpostamento = h;
+    gInSpostamento = h; sveglia7();   // (il timer 7 vede la fine del trascinamento se l'evento non arriva)
     POINT pt; GetCursorPos(&pt);
     if ((!impostazioni::valori().gelatina || !gMovimento) && !gelatinaDi(h)) return;   // gelatina spenta nelle impostazioni
     if (IsZoomed(h) && !gelatinaDi(h)) { gDaIngrandita = h; gSganciata = 0; return; }
@@ -1364,7 +1365,7 @@ static bool preparaChiusura(HWND h) {
     gGenio.fotoDaSchermo = false;
     if (!gGenio.cattura(h, c.da, c.foto, true)) { logf("chiusura: foto non riuscita %p", h); return false; }
     spegniTransizioniNative(h);   // la dissolvenza di Windows non si somma alla nostra
-    gChiusure.push_back(c);
+    gChiusure.push_back(c); sveglia7();   // (il timer 7 la libera se la finestra poi non si chiude)
     logf("chiusura preparata %p schermo=%d", h, (int)gGenio.fotoDaSchermo);
     return true;
 }
@@ -1768,7 +1769,7 @@ static void fotoDelClic(HWND h, const InfoFinestra& i, POINT pt) {
     liberaFotoClic();
     const double t0 = ora();
     if (!gGenio.cattura(h, i.visibile, gFotoClic.foto, true)) { gFotoClic.foto.libera(); return; }
-    gFotoClic.h = h; gFotoClic.vis = i.visibile; gFotoClic.t = ora();
+    gFotoClic.h = h; gFotoClic.vis = i.visibile; gFotoClic.t = ora(); sveglia7();   // (il timer 7 la scarta dopo 2,5 s)
     logf("foto del clic %p (tasti disegnati dall'app) in %.1f ms", h, (ora() - t0) * 1000);
 }
 
@@ -2240,7 +2241,54 @@ static bool gDestroPreso = false;
 static HHOOK gHookMouse = nullptr;
 static DWORD gThreadMouse = 0;
 
+// ---------------------------------------------------------------------------------------------
+// Zone del mouse: bordo in basso di uno schermo (il dock risale, o passa a quello schermo), fascia in alto (il notch),
+// angolo in alto a sinistra dello schermo principale (panoramica). Prima le controllavano timer sempre accesi
+// (40, 50 e 60 ms: ~60 risvegli al secondo anche col PC fermo). Ora le vede il gancio del mouse a ogni movimento e
+// avvisa il thread principale solo quando il mouse ci entra; i timer veloci girano solo finche' servono.
+// Nel gancio niente chiamate a Windows per schermo: i rettangoli degli schermi si tengono da parte (rinnovati ogni
+// 2 s o quando il punto non sta in nessuno)
+static const UINT WM_ZONA = WM_APP + 21;   // wParam: zone in cui il mouse e' appena entrato
+enum { Z_BASSO = 1, Z_ALTO = 2, Z_ANGOLO = 4 };
+static const LONG ALTEZZA_ZONA_ALTA = 260;   // px: fascia in alto dove il notch vuole sapere dov'e' il mouse
+
+struct Schermi { std::vector<MONITORINFO> m; ULONGLONG letti = 0; };
+static int zoneDi(POINT p, Schermi& s) {
+    auto dentro = [&](const RECT& r) { return p.x >= r.left && p.x < r.right && p.y >= r.top && p.y < r.bottom; };
+    const MONITORINFO* mi = nullptr;
+    for (const auto& x : s.m) if (dentro(x.rcMonitor)) { mi = &x; break; }
+    const ULONGLONG t = GetTickCount64();
+    if (!mi || t - s.letti > 2000) {
+        s.m.clear(); s.letti = t;
+        EnumDisplayMonitors(nullptr, nullptr, [](HMONITOR h, HDC, LPRECT, LPARAM l) -> BOOL {
+            MONITORINFO x{}; x.cbSize = sizeof(x);
+            if (GetMonitorInfoW(h, &x)) ((std::vector<MONITORINFO>*)l)->push_back(x);
+            return TRUE;
+        }, (LPARAM)&s.m);
+        mi = nullptr;
+        for (const auto& x : s.m) if (dentro(x.rcMonitor)) { mi = &x; break; }
+        if (!mi) return 0;
+    }
+    const RECT& r = mi->rcMonitor;
+    int z = 0;
+    if (p.y >= r.bottom - 3) z |= Z_BASSO;
+    if (p.y < r.top + ALTEZZA_ZONA_ALTA) z |= Z_ALTO;
+    if ((mi->dwFlags & MONITORINFOF_PRIMARY) && p.x <= r.left + 2 && p.y <= r.top + 2) z |= Z_ANGOLO;
+    return z;
+}
+
+// (thread del gancio) avvisa solo quando il mouse entra in una zona
+static void zoneDalGancio(POINT p) {
+    static Schermi s; static int prima = 0;
+    const int z = zoneDi(p, s);
+    if (z == prima) return;
+    const int nuove = z & ~prima;
+    prima = z;
+    if (nuove && gMessaggi) PostMessageW(gMessaggi, WM_ZONA, nuove, 0);
+}
+
 static LRESULT CALLBACK suMouse(int code, WPARAM w, LPARAM l) {
+    if (code == HC_ACTION && w == WM_MOUSEMOVE) zoneDalGancio(((const MSLLHOOKSTRUCT*)l)->pt);
     if (code == HC_ACTION && (w == WM_RBUTTONDOWN || w == WM_RBUTTONUP)) {
         const MSLLHOOKSTRUCT* m = (const MSLLHOOKSTRUCT*)l;
         if (m->dwExtraInfo != FIRMA_DESTRO) {
@@ -2518,15 +2566,29 @@ static void applicaImpostazioni() {
 
 // Angolo in alto a sinistra dello schermo principale: col mouse fermo li' (e nessun tasto premuto) si apre la
 // panoramica. Si riarma quando il mouse se ne va.
-static void controllaAngolo() {
+// true finche' il mouse e' nell'angolo (il timer 7 resta acceso)
+static bool controllaAngolo() {
     static int fermo = 0; static bool armato = true;
-    if (!impostazioni::valori().angolo || !gLauncherTasto || gPanoramica.aperta()) { fermo = 0; return; }
+    if (!impostazioni::valori().angolo || !gLauncherTasto || gPanoramica.aperta()) { fermo = 0; return false; }
     POINT pt; GetCursorPos(&pt);
     const RECT s = vetro::areaPrimaria();
     const bool dentro = pt.x <= s.left + 1 && pt.y <= s.top + 1 && pt.x >= s.left - 1 && pt.y >= s.top - 1;
-    if (!dentro) { fermo = 0; armato = true; return; }
-    if (!armato || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) return;
+    if (!dentro) { fermo = 0; armato = true; return false; }
+    if (!armato || (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000)) return true;
     if (++fermo >= 2) { fermo = 0; armato = false; PostMessageW(gMessaggi, WM_PANORAMICA, 0, 0); }
+    return true;
+}
+
+// Timer 7 (60 ms): angolo della panoramica, foto del clic, chiusure animate, fine dei trascinamenti. Prima sempre
+// acceso; ora parte quando una di queste cose comincia (o il mouse entra nell'angolo) e si ferma quando sono finite
+static bool gTimer7 = false;
+static void sveglia7() { if (!gTimer7 && gMessaggi) { gTimer7 = true; SetTimer(gMessaggi, 7, 60, nullptr); } }
+
+// il mouse e' entrato in queste zone (dal gancio, o dal controllo di riserva ogni 500 ms)
+static void suZone(int z) {
+    if (z & Z_ANGOLO) sveglia7();
+    if (gDockOk && (z & Z_BASSO)) gDock.mouseAlBordo();
+    if (gDockOk && (z & Z_ALTO)) gDock.ilNotch().sveglia();
 }
 
 static int gTickBarra = 0;   // controlli consecutivi (500 ms) con il fuoco sulla barra di Windows
@@ -2599,6 +2661,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
         // (prove, solo col registro acceso: timer di w ms che finisce senza suono)
         case WM_APP + 17: if (gLog) { comodita::avviaTimer(w); comodita::stato().senzaSuono = true; logf("prova: timer di %llu ms", (unsigned long long)w); } return 0;
         case WM_APP + 15: logf("gancio del mouse: %s (errore %lu)", w ? "messo" : "NON messo", (unsigned long)l); return 0;
+        case WM_ZONA: suZone((int)w); return 0;   // il mouse e' entrato in una zona (gancio del mouse)
         case WM_TASTO_DESTRO: {
             const POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
             if (!destro::mostra(pt, gMessaggi, [](const char* s) { logf("%s", s); })) destroAWindows();
@@ -2674,7 +2737,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             }
             if (w == 7) {
                 if (gFotoClic.foto.srv && ora() - gFotoClic.t > 2.5) liberaFotoClic();   // nessuna riduzione dopo il clic
-                controllaAngolo();
+                const bool angolo = controllaAngolo();
                 if (!gChiusure.empty()) pulisciChiusure();
                 // fine di un trascinamento fatto dall'app: tasto sinistro rilasciato
                 if (gTrascinoApp && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000)) { HWND f = gTrascinoApp; gTrascinoApp = nullptr; suFineSpostamento(f); }
@@ -2682,6 +2745,8 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                 static int suSenzaFine = 0;
                 suSenzaFine = gInSpostamento && !(GetAsyncKeyState(VK_LBUTTON) & 0x8000) ? suSenzaFine + 1 : 0;
                 if (suSenzaFine > 33) { gInSpostamento = nullptr; suSenzaFine = 0; }
+                // niente piu' da controllare: il timer si ferma (lo riaccende sveglia7)
+                if (!angolo && !gFotoClic.foto.srv && gChiusure.empty() && !gTrascinoApp && !gInSpostamento) { KillTimer(h, 7); gTimer7 = false; }
                 return 0;
             }
             if (w == 2) {
@@ -2725,6 +2790,8 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                     logf("microfono in uso: [%ls] webcam: [%ls]", m.c_str(), c.c_str());
                 }
             }
+            // riserva del gancio del mouse (se Windows lo togliesse): le zone si guardano anche qui, ogni 500 ms
+            { static Schermi s; POINT pz; GetCursorPos(&pz); if (const int z = zoneDi(pz, s)) suZone(z); }
             controlloSicurezza(); if (gDockOk) {
                 rinascondiBarreWindows();
                 const bool si = schermoInteroAttivo(); gLauncherTasto = !si;
@@ -2918,7 +2985,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     // banner di FluidWin spenti: quelli di Windows tornano com'erano anche se l'ultima chiusura e' stata brusca
     // (FluidWin e guardiano chiusi insieme, per esempio togliendo la corrente)
     if (!impostazioni::valori().banner) banner::ripristinaBannerWindows();
-    SetTimer(gMessaggi, 7, 60, nullptr);   // angolo della panoramica
+    // (il timer 7 dell'angolo della panoramica non parte piu' qui: lo accende sveglia7 quando serve)
 
     if (gDockOk) {
         gLauncherTasto = !schermoInteroAttivo();

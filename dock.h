@@ -246,6 +246,7 @@ public:
         SHAppBarMessage(ABM_SETSTATE, &tb);
 
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
+        ascoltaRete(true);   // la rete si rilegge quando Windows avvisa che e' cambiata
         aggiornaStato(true);
         aggiornaApp();
         attivo = true;
@@ -260,6 +261,7 @@ public:
 
     void chiudi() {
         fermaIcone();
+        ascoltaRete(false);
         if (!attivo) return;
         attivo = false;
         APPBARDATA tb{}; tb.cbSize = sizeof(tb); tb.lParam = statoBarraPrima;
@@ -378,8 +380,9 @@ public:
         if (appDaAggiornare) { aggiornaApp(); dirty = true; }
         if (vetroDaRiposizionare) posizionaVetri();
         aggiornaStato(false);
-        // cestino pieno o vuoto (ogni 2 s)
-        if (giroCestino++ % 4 == 0) {
+        // cestino pieno o vuoto (ogni 10 s: la domanda alla shell costa ~3 ms; quello che passa dal dock, file trascinati
+        // sul cestino o cestino svuotato, si vede subito)
+        if (giroCestino++ % 20 == 0) {
             SHQUERYRBINFO q{}; q.cbSize = sizeof(q);
             const bool p = SUCCEEDED(SHQueryRecycleBinW(nullptr, &q)) && q.i64NumItems > 0;
             if (p != cestinoPieno) { cestinoPieno = p; dirty = true; }
@@ -397,9 +400,9 @@ public:
         if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro)) {
             versioneSensoriCentro = sensori::Sensori::io().versione; pDirty = true;
         }
-        // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
-        if (conteggioTimer == 6) leggiAppSfondo();
-        if (conteggioTimer == 12 && tutteApp.empty()) leggiTutteApp();
+        // (prima qui, poco dopo l'avvio, si leggevano gia' le app in background e tutte le app con le loro icone, "per
+        // essere pronti": ~50 MB anche a chi non apre mai launcher e pannelli. Ora si leggono quando servono: le app in
+        // background aprendo la loro vista, l'elenco di tutte le app con il launcher o la ricerca, le icone col launcher)
         raccogliIcone();
         // rete di sicurezza: il pannello si chiude quando perde il fuoco anche se WM_ACTIVATE non arriva
         if (!nessunaScheda() && !schedaFinestra(GetForegroundWindow())) {
@@ -494,8 +497,7 @@ public:
         if (!forza && n == vuoleNascondersi && nI == vuoleNascondersiI) return;
         vuoleNascondersi = n; vuoleNascondersiI = nI; dirty = true;
         if (registro) { char b[360]; snprintf(b, 360, "a scomparsa: %s (primo piano %ls) %s", n ? "finestra a schermo intero" : "solo isola", c, perche); scrivi(b); }
-        if (nI) SetTimer(icone, TIMER_BORDO, 40, nullptr);
-        else KillTimer(icone, TIMER_BORDO);
+        svegliaBordo();   // (si ferma da solo se non serve: vedi controllaBordo)
         if (!n) { rivelato = false; fuoriDal = -1; }
         if (!nI) { rivelatoI = false; fuoriDalI = -1; }
     }
@@ -512,6 +514,8 @@ public:
     }
 
     notch::Notch& ilNotch() { return notch; }
+    // il mouse e' arrivato sul bordo in basso di uno schermo (gancio del mouse in fluidwin.cpp)
+    void mouseAlBordo() { svegliaBordo(); }
     // eseguibile di un'app che il dock conosce (per AppUserModelID o per nome): l'icona vera delle sue notifiche
     std::wstring exeDiApp(const std::wstring& aumid, const std::wstring& nome) const {
         for (const auto& v : voci) {
@@ -884,9 +888,10 @@ private:
                 }
             }
             if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO) {
-                // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
-                if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
-                else chiediIcona(sorgenteIcona(v), 256);
+                // sempre dal thread delle icone, anche all'avvio: prima la prima volta si caricavano qui una per una
+                // (~25 ms ciascuna dalla shell) e FluidWin restava fermo ~0,7-1,6 s prima di mostrare il dock; ora il
+                // dock compare subito e le icone arrivano man mano
+                chiediIcona(sorgenteIcona(v), 256);
                 if (!vecchiaTrovata && !primaVolta) v.scala = 0;   // voce nuova: cresce da zero
             }
         }
@@ -946,9 +951,24 @@ private:
         chiudiTutte();
     }
 
+    // Timer del bordo (40 ms): clic fuori dai pannelli, dock da far risalire o riscendere, dock da portare su un altro
+    // schermo. Prima sempre acceso (25 risvegli al secondo anche col PC fermo); ora lo accendono il mouse sul bordo in
+    // basso (gancio del mouse in fluidwin.cpp), i pannelli e il launcher che si aprono, e si spegne da solo quando non
+    // c'e' piu' niente da controllare
+    bool timerBordo = false;
+    void svegliaBordo() { if (!timerBordo && icone) { timerBordo = true; SetTimer(icone, TIMER_BORDO, 40, nullptr); } }
+
     void controllaBordo() {
         controllaClicFuori();
         POINT pt; GetCursorPos(&pt);
+        {   // serve ancora? (pannelli o launcher aperti, dock rivelato, mouse sul bordo in basso di uno schermo)
+            MONITORINFO mb{}; mb.cbSize = sizeof(mb);
+            const bool alBordo = GetMonitorInfoW(MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST), &mb) && pt.y >= mb.rcMonitor.bottom - 3;
+            if (!alBordo && !lAperto && nessunaScheda() && !rivelato && !rivelatoI && !bordoAltro && !spostamento) {
+                KillTimer(icone, TIMER_BORDO); timerBordo = false;
+                return;
+            }
+        }
         // un altro schermo: col mouse fermo sul suo bordo in basso (e nessun tasto premuto, per non spostarlo
         // trascinando una finestra) il dock va li'
         if (!(pt.x >= schermo.left && pt.x < schermo.right && pt.y >= schermo.top && pt.y < schermo.bottom)) {
@@ -1080,6 +1100,7 @@ private:
             cambiaSchermo(m);
             yNascosto = yNascostoI = fuori; velNascosto = velNascostoI = 0;
             rivelato = true; fuoriDal = -1;   // risale anche se sul nuovo schermo dovrebbe stare nascosto (il mouse e' li')
+            svegliaBordo();                   // (poi, col mouse lontano, il timer del bordo lo fa riscendere)
             movimento = true;
         }
         // con un pannello del centro di controllo aperto (anche dal notch) il dock resta su; scende quando si chiude
@@ -1416,13 +1437,20 @@ private:
             if (GetDateFormatEx(loc, 0, &st, testi::t(L"dddd d MMMM", L"dddd, MMMM d"), b, 96, nullptr)) { testoNotch = b; if (!testoNotch.empty()) testoNotch[0] = (wchar_t)towupper(testoNotch[0]); }
             notch.testi(testoOra, testoNotch);   // il notch mostra ora e data
         }
-        const float v0 = volume; const bool m0 = muto, ok0 = audioOk;
-        leggiVolume();
-        cambiato |= (std::abs(v0 - volume) > 0.004f || m0 != muto || ok0 != audioOk);
-        if (tutto || ++conteggioTimer % 4 == 0) {
+        usa(0);   // controllo, widget: la scheda 0
+        // volume: lo mostra solo il centro di controllo (i tasti e la rotella lo leggono da se'). Prima si leggeva ogni
+        // 500 ms, chiedendo ogni volta a Windows il dispositivo audio
+        if (tutto || (pannelloTipo == P_CONTROLLO && !pChiusura)) {
+            const float v0 = volume; const bool m0 = muto, ok0 = audioOk;
+            leggiVolume();
+            cambiato |= (std::abs(v0 - volume) > 0.004f || m0 != muto || ok0 != audioOk);
+        }
+        // rete: quando Windows avvisa che un'interfaccia o un percorso e' cambiato (vedi suRete), con una rilettura di
+        // riserva ogni 30 s. Prima ogni 2 s, ~7 ms ciascuna (GetAdaptersAddresses)
+        ++conteggioTimer;
+        if (tutto || reteCambiata.exchange(false) || conteggioTimer % 60 == 0) {
             const int r0 = rete; leggiRete(); cambiato |= r0 != rete;
         }
-        usa(0);   // controllo, widget: la scheda 0
         if (cambiato) { dirty = true; if (pannelloTipo == P_CONTROLLO) pDirty = true; }
         if (pannelloTipo == P_CONTROLLO && !pChiusura) {   // l'uscita audio puo' cambiare (cuffie collegate)
             const std::wstring u0 = nomeUscita; leggiUscita(); if (u0 != nomeUscita) pDirty = true;
@@ -1468,6 +1496,22 @@ private:
     }
 
     // connessione attiva: una scheda accesa con un gateway (Wi-Fi o cavo)
+    // avvisi di Windows sulla rete (interfacce accese o spente, gateway che compaiono o spariscono): arrivano da un
+    // thread del sistema, qui si segna soltanto; la rilettura la fa aggiornaStato
+    std::atomic<bool> reteCambiata{false};
+    HANDLE avvisoInterfacce = nullptr, avvisoPercorsi = nullptr;
+    static void WINAPI suInterfaccia(PVOID c, PMIB_IPINTERFACE_ROW, MIB_NOTIFICATION_TYPE) { ((Motore*)c)->reteCambiata = true; }
+    static void WINAPI suPercorso(PVOID c, PMIB_IPFORWARD_ROW2, MIB_NOTIFICATION_TYPE) { ((Motore*)c)->reteCambiata = true; }
+    void ascoltaRete(bool si) {
+        if (si) {
+            if (!avvisoInterfacce) NotifyIpInterfaceChange(AF_UNSPEC, suInterfaccia, this, FALSE, &avvisoInterfacce);
+            if (!avvisoPercorsi) NotifyRouteChange2(AF_UNSPEC, suPercorso, this, FALSE, &avvisoPercorsi);
+        } else {
+            if (avvisoInterfacce) { CancelMibChangeNotify2(avvisoInterfacce); avvisoInterfacce = nullptr; }
+            if (avvisoPercorsi) { CancelMibChangeNotify2(avvisoPercorsi); avvisoPercorsi = nullptr; }
+        }
+    }
+
     void leggiRete() {
         Cronometro cr(this, "leggiRete");
         ULONG n = 16 * 1024;
@@ -1921,6 +1965,8 @@ private:
     // L'elenco di tutte le app (cartella App della shell) costa centinaia di millisecondi: lo legge un thread a parte.
     // subito = adesso, nel thread principale (solo la prima volta che serve e non c'e' ancora niente da mostrare)
     bool lavoroTutte = false;
+    bool iconeLauncher = false;   // icone di tutte le app chieste (dalla prima apertura del launcher, vedi chiediIconeLauncher)
+    void chiediIconeLauncher();
     void leggiTutteApp(bool subito = false);
 
     void applicaTutteApp(std::vector<AppL> nuove);
