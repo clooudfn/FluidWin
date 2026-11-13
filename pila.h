@@ -151,6 +151,10 @@ private:
         std::vector<std::wstring> percorsi; for (auto& f : file) percorsi.push_back(f.percorso);
         const unsigned g = ++giro;
         std::shared_ptr<Lavoro> l = lavoro;
+        // il giro corrente lo decide il thread principale, qui: un thread di un'apertura precedente vede che non e'
+        // piu' il suo e smette. Prima ogni thread rimetteva il proprio giro e svuotava la coda, anche quello vecchio
+        // dopo il nuovo: le anteprime nuove sparivano (audit FW-AUDIT-021)
+        { std::lock_guard<std::mutex> k(l->mx); l->giro = g; l->pronte.clear(); }
         HWND h = v.fin;
         std::thread([l, percorsi, lato, g, h] {
             CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
@@ -175,7 +179,11 @@ private:
                     }
                     fab->Release();
                 }
-                { std::lock_guard<std::mutex> k(l->mx); if (l->giro != g) l->pronte.clear(); l->giro = g; l->pronte.push_back(std::move(im)); }
+                {
+                    std::lock_guard<std::mutex> k(l->mx);
+                    if (l->giro != g) break;   // c'e' un'apertura piu' nuova: questo lavoro non serve piu'
+                    l->pronte.push_back(std::move(im));
+                }
                 PostMessageW(h, WM_APP + 1, 0, 0);
             }
             CoUninitialize();
@@ -237,8 +245,18 @@ private:
         v.alfa(std::min(1.0, k * 1.5));
     }
 
+    // render target ricreato (vetro::Finestra::giroRt): le anteprime del vecchio non valgono, si rifanno (FW-AUDIT-012)
+    unsigned giroAnteprime = 0;
+
     void disegna() {
-        if (stato == 0 || !v.inizia()) return;
+        if (stato == 0) return;
+        if (giroAnteprime != v.giroRt) {
+            giroAnteprime = v.giroRt;
+            bool c = false;
+            for (auto& f : file) if (f.anteprima) { f.anteprima->Release(); f.anteprima = nullptr; c = true; }
+            if (c) caricaAnteprime();
+        }
+        if (!v.inizia()) return;
         const float d = v.dpi;
         const D2D1_COLOR_F ink = v.inchiostro();
         v.testo(titolo, fTitolo, {16 * d, 8 * d, v.W - 16 * d, 40 * d}, ink);

@@ -114,20 +114,28 @@ inline auto Motore::creaLauncher(HINSTANCE inst) -> bool {
                                WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, inst, nullptr);
     vetroLauncher = creaVetro(inst);
     BOOL niente = TRUE; DwmSetWindowAttribute(launcher, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
+    // ogni passo puo' fallire: false (niente launcher), mai un puntatore nullo usato dopo (audit FW-AUDIT-004)
     IDXGIDevice* dd = nullptr; IDXGIAdapter* ad = nullptr; IDXGIFactory2* fab = nullptr;
-    dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd); dd->GetAdapter(&ad); ad->GetParent(__uuidof(IDXGIFactory2), (void**)&fab);
-    DXGI_SWAP_CHAIN_DESC1 sd{};
-    sd.Width = (UINT)LW; sd.Height = (UINT)(LH + LEXTRA); sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-    const HRESULT hr = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &scL);
-    fab->Release(); ad->Release(); dd->Release();
+    HRESULT hr = dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd);
+    if (SUCCEEDED(hr)) hr = dd->GetAdapter(&ad);
+    if (SUCCEEDED(hr)) hr = ad->GetParent(__uuidof(IDXGIFactory2), (void**)&fab);
+    if (SUCCEEDED(hr)) {
+        DXGI_SWAP_CHAIN_DESC1 sd{};
+        sd.Width = (UINT)LW; sd.Height = (UINT)(LH + LEXTRA); sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        hr = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &scL);
+    }
+    if (fab) fab->Release();
+    if (ad) ad->Release();
+    if (dd) dd->Release();
     if (FAILED(hr)) return false;
-    dcomp->CreateTargetForHwnd(launcher, TRUE, &targetL);
-    dcomp->CreateVisual(&visualL); visualL->SetContent(scL);
-    dcomp->CreateEffectGroup(&effettoL); visualL->SetEffect(effettoL);
+    if (FAILED(dcomp->CreateTargetForHwnd(launcher, TRUE, &targetL)) || FAILED(dcomp->CreateVisual(&visualL)) ||
+        FAILED(dcomp->CreateEffectGroup(&effettoL))) return false;
+    visualL->SetContent(scL); visualL->SetEffect(effettoL);
     targetL->SetRoot(visualL); dcomp->Commit();
-    IDXGISurface* sup = nullptr; scL->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup);
+    IDXGISurface* sup = nullptr;
+    if (FAILED(scL->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup)) || !sup) return false;
     D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
                                                          D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
     dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglioL); sup->Release();

@@ -179,9 +179,13 @@ public:
     }
 
     void finisci() {
-        if (rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) { pen->Release(); pen = nullptr; rt->Release(); rt = nullptr; creaRt(); }
+        if (rt->EndDraw() == (HRESULT)D2DERR_RECREATE_TARGET) { pen->Release(); pen = nullptr; rt->Release(); rt = nullptr; creaRt(); giroRt++; }
         ValidateRect(fin, nullptr);
     }
+
+    // Cambia ogni volta che il render target viene ricreato: le bitmap create col vecchio (icone, anteprime) non valgono
+    // sul nuovo. Chi ne tiene lo confronta prima di disegnare e le rifa' (audit FW-AUDIT-012)
+    unsigned giroRt = 0;
 
     // raggio degli angoli del vetro in px (quello di DWM, che la mod di Windhawk puo' cambiare)
     float raggio() const { return raggio::vetro() * dpi; }

@@ -27,7 +27,13 @@ struct Risultato {
 // ---- calcolatrice: + - * / ^ % e parentesi, virgola o punto per i decimali ----
 class Calcolo {
 public:
+    // Limiti (audit FW-AUDIT-027): il parser e' ricorsivo e il testo puo' arrivare incollato; qualche migliaio di
+    // parentesi esauriva lo stack del thread principale (provato: 100.000 parentesi, uscita C00000FD). Un calcolo vero
+    // sta comodo in 200 caratteri; ogni parentesi costa tre livelli (somma, potenza, segno): 150 = circa 50 parentesi
+    static constexpr size_t LUNGO_MAX = 200;
+    static constexpr int PROFONDO_MAX = 150;
     static bool valuta(const std::wstring& s, double& out) {
+        if (s.size() > LUNGO_MAX) return false;
         bool cifra = false, operatore = false;
         for (wchar_t c : s) {
             if (iswdigit(c)) cifra = true;
@@ -41,10 +47,18 @@ public:
         return c.ok && c.p == c.s.size() && std::isfinite(out);
     }
 private:
-    std::wstring s; size_t p = 0; bool ok = true;
+    std::wstring s; size_t p = 0; bool ok = true; int prof = 0;
     explicit Calcolo(const std::wstring& t) : s(t) {}
     void spazi() { while (p < s.size() && s[p] == L' ') p++; }
+    // un livello di ricorsione in piu' (parentesi, segno, potenza): oltre il limite il calcolo non vale
+    struct Livello {
+        Calcolo& c; bool troppo;
+        explicit Livello(Calcolo& k) : c(k), troppo(++k.prof > PROFONDO_MAX) { if (troppo) c.ok = false; }
+        ~Livello() { c.prof--; }
+        Livello(const Livello&) = delete; Livello& operator=(const Livello&) = delete;
+    };
     double somma() {
+        const Livello l(*this); if (l.troppo) return 0;
         double v = prodotto();
         for (;;) { spazi(); if (p < s.size() && (s[p] == L'+' || s[p] == L'-')) { const wchar_t o = s[p++]; const double b = prodotto(); v = o == L'+' ? v + b : v - b; } else return v; }
     }
@@ -57,15 +71,25 @@ private:
             else return v;
         }
     }
-    double potenza() { const double b = unario(); spazi(); if (p < s.size() && s[p] == L'^') { p++; return std::pow(b, potenza()); } return b; }
-    double unario() { spazi(); if (p < s.size() && s[p] == L'-') { p++; return -unario(); } if (p < s.size() && s[p] == L'+') { p++; return unario(); } return atomo(); }
+    double potenza() {
+        const Livello l(*this); if (l.troppo) return 0;
+        const double b = unario(); spazi(); if (p < s.size() && s[p] == L'^') { p++; return std::pow(b, potenza()); } return b;
+    }
+    double unario() {
+        const Livello l(*this); if (l.troppo) return 0;
+        spazi(); if (p < s.size() && s[p] == L'-') { p++; return -unario(); } if (p < s.size() && s[p] == L'+') { p++; return unario(); } return atomo();
+    }
     double atomo() {
         spazi();
         if (p < s.size() && s[p] == L'(') { p++; const double v = somma(); spazi(); if (p < s.size() && s[p] == L')') p++; else ok = false; return v; }
         std::wstring n;
         while (p < s.size() && (iswdigit(s[p]) || s[p] == L'.' || s[p] == L',')) n += s[p] == L',' ? L'.' : s[p], p++;
         if (n.empty()) { ok = false; return 0; }
-        return wcstod(n.c_str(), nullptr);
+        // il numero va letto tutto: "1.2.3" non e' un numero (wcstod leggeva "1.2" e il resto spariva, FW-AUDIT-028)
+        wchar_t* fine = nullptr;
+        const double v = wcstod(n.c_str(), &fine);
+        if (!fine || *fine) ok = false;
+        return v;
     }
 };
 
@@ -247,6 +271,7 @@ private:
     HANDLE evento = nullptr;
     std::wstring richiesta; LONG genRichiesta = -1;
     std::deque<std::wstring> iconeDaFare;
+    int iconeInCorso = 0;   // icone gia' prese dal thread e non ancora consegnate (sotto cs, FW-AUDIT-018)
     struct Pixel { std::wstring chiave; int w = 0, h = 0; std::vector<UINT> px; };
     std::vector<Pixel> iconePronte;
     std::unordered_map<std::wstring, ID2D1Bitmap*> icone;   // nullptr = in arrivo o non disponibile
@@ -347,14 +372,28 @@ private:
         sel = std::clamp(sel, 0, std::max(0, (int)risultati.size() - 1));
         if (risultati.empty()) sel = 0;
         sopra = -1;
-        // icone che mancano: al thread
+        chiediIcone();
+        ridimensiona();
+        disegna();
+    }
+
+    // icone che mancano: al thread
+    void chiediIcone() {
         bool nuove = false;
         EnterCriticalSection(&cs);
         for (const auto& r : risultati) if (!r.icona.empty() && !icone.count(r.icona)) { icone[r.icona] = nullptr; iconeDaFare.push_back(r.icona); nuove = true; }
         LeaveCriticalSection(&cs);
         if (nuove) { SetEvent(evento); SetTimer(v.fin, 4, 50, nullptr); }
-        ridimensiona();
-        disegna();
+    }
+
+    // render target ricreato (vetro::Finestra::giroRt): le icone del vecchio non valgono, si rifanno (FW-AUDIT-012)
+    unsigned giroIcone = 0;
+    void controllaTarget() {
+        if (giroIcone == v.giroRt) return;
+        giroIcone = v.giroRt;
+        for (auto& [k, b] : icone) if (b) b->Release();
+        icone.clear();
+        chiediIcone();
     }
 
     void chiediFile() {
@@ -365,13 +404,17 @@ private:
 
     void raccogliIcone() {
         std::vector<Pixel> arrivate;
-        EnterCriticalSection(&cs); arrivate.swap(iconePronte); const bool finite = iconeDaFare.empty(); LeaveCriticalSection(&cs);
+        EnterCriticalSection(&cs); arrivate.swap(iconePronte); const bool finite = iconeDaFare.empty() && !iconeInCorso; LeaveCriticalSection(&cs);
         for (auto& p : arrivate) {
             if (p.px.empty() || !v.rt) continue;
             ID2D1Bitmap* b = nullptr;
             v.rt->CreateBitmap(D2D1::SizeU(p.w, p.h), p.px.data(), p.w * 4,
                                D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &b);
-            icone[p.chiave] = b;
+            // la stessa icona puo' arrivare due volte (chiesta di nuovo dopo la ricreazione del target mentre la prima
+            // era in lavorazione): quella vecchia si rilascia, prima si perdeva (R20261113-010114-S4)
+            ID2D1Bitmap*& posto = icone[p.chiave];
+            if (posto) posto->Release();
+            posto = b;
         }
         if (finite && arrivate.empty()) KillTimer(v.fin, 4);
     }
@@ -417,7 +460,9 @@ private:
     }
 
     void disegna() {
-        if ((!apertaOra && !chiudendo) || !v.inizia()) return;
+        if (!apertaOra && !chiudendo) return;
+        controllaTarget();
+        if (!v.inizia()) return;
         const float d = v.dpi, W = (float)v.W;
         const D2D1_COLOR_F ink = v.inchiostro(), tenue = v.inchiostro(0.55f);
         // lente
@@ -535,7 +580,7 @@ private:
                 std::wstring q, ic; LONG g = -1;
                 EnterCriticalSection(&r->cs);
                 if (r->genRichiesta >= 0) { q = r->richiesta; g = r->genRichiesta; r->genRichiesta = -1; }
-                else if (!r->iconeDaFare.empty()) { ic = r->iconeDaFare.front(); r->iconeDaFare.pop_front(); }
+                else if (!r->iconeDaFare.empty()) { ic = r->iconeDaFare.front(); r->iconeDaFare.pop_front(); r->iconeInCorso++; }
                 LeaveCriticalSection(&r->cs);
                 if (g >= 0) {
                     auto* lista = new std::vector<Risultato>(cercaFile(q, 5));   // al massimo 5, dopo aver saltato quelli di sistema
@@ -543,7 +588,7 @@ private:
                 } else if (!ic.empty()) {
                     Pixel px; px.chiave = ic;
                     pixelIcona(ic, 64, px.w, px.h, px.px);
-                    EnterCriticalSection(&r->cs); r->iconePronte.push_back(std::move(px)); LeaveCriticalSection(&r->cs);
+                    EnterCriticalSection(&r->cs); r->iconePronte.push_back(std::move(px)); r->iconeInCorso--; LeaveCriticalSection(&r->cs);
                 } else break;
             }
         }

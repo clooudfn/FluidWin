@@ -135,18 +135,40 @@ public:
     int raggioWindhawk = 0;           // raggio della mod di Windhawk (0 = nessuna): riga informativa sugli angoli
     void (*registro)(const char*) = nullptr;
     std::function<bool()> copiaDiagnostica;   // mette negli appunti la diagnostica (fluidwin.cpp); true se riuscito
+    std::function<void()> tornaAlCentro;      // aperte dal centro di controllo e richiuse nel suo rettangolo: lo riapre
+    std::function<void(bool)> dockSu;         // aperte dal centro di controllo: il dock resta su finche' ci sono
+    std::function<RECT()> iconaCentro;        // icona del centro di controllo nel dock, sullo schermo (clic altrove)
 
-    void apri() {
+    // da: rettangolo sullo schermo del vetro del centro di controllo. Le impostazioni non compaiono a parte: il vetro
+    // del centro sale e si allarga fino a diventare la loro finestra, al centro dello schermo (dove sono sempre state),
+    // e alla chiusura ci rientra, e il centro ricompare. Un clic fuori (un'altra app prende il primo piano) le chiude
+    // del tutto: il vetro torna nell'icona del centro, come il pannello. Senza (scorciatoia, menu): compaiono al centro
+    void apri(const RECT* da = nullptr) {
         if (!v.fin && !v.crea(L"FluidWin.Impostazioni", vetro::procedura<Finestra>, this, true, 2, true, false)) return;
-        if (aperta) { SetForegroundWindow(v.fin); return; }   // gia' aperta: viene davanti
+        if (aperta) {   // gia' aperta: viene davanti (se stava rientrando nel centro, torna a crescere)
+            if (morph < 0) { giraMorph(1); vetro::battito(v.fin, 1); }
+            SetForegroundWindow(v.fin); return;
+        }
         v.aggiornaTema();
-        const RECT a = vetro::areaPrincipale(true);
+        RECT a = vetro::areaPrincipale(true);
+        if (da) {
+            MONITORINFO mi{}; mi.cbSize = sizeof(mi);
+            if (GetMonitorInfoW(MonitorFromRect(da, MONITOR_DEFAULTTONEAREST), &mi)) a = mi.rcWork;
+        }
         v.dpi = vetro::dpiMonitor(MonitorFromPoint({a.left, a.top}, MONITOR_DEFAULTTOPRIMARY));
         const float d = v.dpi;
         // misura fissa; su schermi piccoli quanto ci sta (le sezioni sono corte, entrano comunque)
         const int w = (int)std::lround(std::min(LARGO * d, (float)(a.right - a.left) - 40 * d));
         const int h = (int)std::lround(std::min(ALTO * d, (float)(a.bottom - a.top) - 40 * d));
-        v.posiziona((a.left + a.right - w) / 2, (a.top + a.bottom - h) / 2, w, h, HWND_TOP, SWP_SHOWWINDOW);
+        daCentro = da != nullptr; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
+        const int x = (a.left + a.right - w) / 2, y = (a.top + a.bottom - h) / 2;   // al centro, come sempre
+        if (daCentro) {
+            rDa = *da; rA = {x, y, x + w, y + h};
+            morph = 1; mx = 0; tM = vetro::ms();
+            v.posiziona(rDa.left, rDa.top, rDa.right - rDa.left, rDa.bottom - rDa.top, HWND_TOP, SWP_SHOWWINDOW);
+            if (dockSu) dockSu(true);
+            if (registro) { char b[120]; snprintf(b, 120, "impostazioni: crescono dal centro di controllo (%ld,%ld-%ld,%ld -> %d,%d %dx%d)", rDa.left, rDa.top, rDa.right, rDa.bottom, x, y, w, h); registro(b); }
+        } else v.posiziona(x, y, w, h, HWND_TOP, SWP_SHOWWINDOW);
         if (!fTitolo) {
             fTitolo = v.formato(22 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
             fVoce = v.formato(13.5f * d, DWRITE_FONT_WEIGHT_MEDIUM);
@@ -158,22 +180,66 @@ public:
         valori().avvio = avvioAttivo();   // (puo' essere cambiato da Gestione attivita' mentre FluidWin era aperto)
         anim.clear();
         aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
-        v.alfa(0);
+        if (daCentro) { t0 -= 1000; k = 1; }   // il vetro c'e' gia' (prende il posto di quello del centro): niente dissolvenza
+        v.alfa(daCentro ? 1 : 0);
         vetro::battito(v.fin, 1);
         SetForegroundWindow(v.fin);
         disegna();
     }
 
-    void chiudi() { if (v.fin) { vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); } aperta = false; }
+    // aperte dal centro di controllo: rientrano nel suo rettangolo (poi lo riaprono); altrimenti si nascondono
+    void chiudi() {
+        if (aperta && daCentro && tornaAlCentro && v.fin && IsWindowVisible(v.fin)) {
+            if (morph == 0) { GetWindowRect(v.fin, &rA); giraMorph(-1); }   // (spostata trascinandola: rientra da li')
+            else if (morph > 0) giraMorph(-1);
+            if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); }
+            vetro::battito(v.fin, 1);
+            return;
+        }
+        nascondi();
+    }
+
+    // clic altrove (un'altra app ha preso il primo piano): si chiudono del tutto. Il vetro rientra rimpicciolendosi
+    // nell'icona del centro di controllo e svanisce (come il pannello quando si chiude), senza riaprire il centro:
+    // riaprendolo gli si ridarebbe il primo piano, togliendolo all'app appena cliccata
+    void chiudiFuori() {
+        if (!aperta || !daCentro || fuori || morph < 0) return;
+        if (morph > 0) { fuoriDopo = true; return; }   // sta ancora crescendo: si chiude appena arrivata (niente salti)
+        fuori = true;
+        const RECT ic = iconaCentro ? iconaCentro() : RECT{};
+        const LONG pw = (rDa.right - rDa.left) / 10, ph = (rDa.bottom - rDa.top) / 10;
+        const LONG cx = IsRectEmpty(&ic) ? (rDa.left + rDa.right) / 2 : std::clamp((ic.left + ic.right) / 2, rDa.left + pw / 2, rDa.right - pw / 2);
+        rDa = {cx - pw / 2, rDa.bottom - ph, cx + pw / 2, rDa.bottom};   // piccolo sopra l'icona, come il pannello che si chiude
+        if (registro) registro("impostazioni: clic fuori, si chiudono");
+        // l'app cliccata passa davanti e copriva tutta la chiusura (ripresa a 60 fps): sopra a tutto finche' svanisce
+        // (finestra nostra; torna normale in nascondi)
+        SetWindowPos(v.fin, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        chiudi();
+    }
 
     bool messaggio(HWND, UINT m, WPARAM w, LPARAM l, LRESULT& r) {
         r = 0;
         switch (m) {
             case WM_TIMER:
+                if (w == 1 && morph) {   // crescita dal centro di controllo o rientro (vedi apri)
+                    const ULONGLONG ora = vetro::ms();
+                    const double dt = (double)std::min<ULONGLONG>(ora - tM, 50); tM = ora;
+                    mx = std::clamp(mx + morph * dt / (morph > 0 ? DURATA_CRESCE : DURATA_RIENTRA), 0.0, 1.0);
+                    applicaForma();
+                    // rientrata: ricompare il centro di controllo (sopra) e questa sparisce. Si finisce a forma < 1%
+                    // (pochi px dal rettangolo del centro): la coda di x^3 lasciava il vetro vuoto quasi fermo per ~100 ms
+                    if (morph < 0 && (mx <= 0 || forma() < 0.01)) {
+                        if (registro) registro(fuori ? "impostazioni: chiuse nell'icona" : "impostazioni: rientrate nel centro di controllo");
+                        if (tornaAlCentro && !fuori) tornaAlCentro();
+                        nascondi();
+                        return true;
+                    }
+                    if (morph > 0 && mx >= 1) { morph = 0; if (fuoriDopo) { fuoriDopo = false; chiudiFuori(); } }
+                }
                 if (w == 1) {
                     k = std::min(1.0, (vetro::ms() - t0) / 180.0);
-                    v.alfa(vetro::uscita(k));
-                    bool ancora = k < 1;
+                    v.alfa(fuori && morph < 0 ? std::min(1.0, forma() * 2.2) : vetro::uscita(k));   // (verso l'icona: svanisce)
+                    bool ancora = k < 1 || morph != 0;
                     if (kSez < 1) { kSez = std::min(1.0, (vetro::ms() - tSez) / 180.0); ancora = true; }
                     if (copiataAlle && vetro::ms() - copiataAlle > 2500) copiataAlle = 0;   // "Copiata" torna "Copia"
                     else if (copiataAlle) ancora = true;
@@ -187,7 +253,19 @@ public:
                 }
                 return true;
             case WM_PAINT: disegna(); return true;
+            // un'altra app prende il primo piano (clic altrove): aperte dal centro di controllo, si chiudono da sole.
+            // (le finestre di FluidWin, come quella dei colori, non contano: l'app resta FluidWin)
+            case WM_ACTIVATEAPP: if (!w) chiudiFuori(); return false;
+            case WM_ACTIVATE: {   // il centro di controllo riaperto dalla sua icona mentre queste erano aperte: lascia a lui
+                wchar_t c[32] = L"";
+                if (LOWORD(w) == WA_INACTIVE && l && daCentro && morph == 0 && GetClassNameW((HWND)l, c, 32) && !wcscmp(c, L"FluidWin.Pannello")) {
+                    if (registro) registro("impostazioni: riaperto il centro di controllo, si nascondono");
+                    nascondi();
+                }
+                return false;
+            }
             case WM_MOUSEMOVE: {
+                if (morph) return true;   // mentre cresce o rientra non si tocca niente
                 if (trascina >= 0) { valoreDa(trascina, (float)GET_X_LPARAM(l)); return true; }
                 if (!dentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, v.fin, 0}; TrackMouseEvent(&tm); dentro = true; }
                 const int s = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
@@ -196,6 +274,7 @@ public:
             }
             case WM_MOUSELEAVE: dentro = false; if (trascina < 0) sopra = -1; disegna(); return true;
             case WM_LBUTTONDOWN: {   // su un cursore: si trascina (anche fuori dal binario, finche' non si lascia)
+                if (morph) return true;
                 const int z = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (z >= Z_CURSORE && z < Z_CURSORE + (int)cursori.size()) {
                     trascina = z - Z_CURSORE; SetCapture(v.fin); valoreDa(trascina, (float)GET_X_LPARAM(l));
@@ -204,6 +283,7 @@ public:
             }
             case WM_LBUTTONUP:
                 if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); disegna(); return true; }
+                if (morph) return true;
                 clic(zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l)));
                 return true;
             case WM_CAPTURECHANGED: if (trascina >= 0) { trascina = -1; salva(); disegna(); } return true;
@@ -213,6 +293,7 @@ public:
                 return true;
             case WM_CLOSE: chiudi(); return true;
             case WM_NCHITTEST: {   // si trascina dalla fascia in alto (non dalla x) e dalla testata della barra laterale
+                if (morph) return false;
                 POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)}; ScreenToClient(v.fin, &p);
                 const float d = v.dpi;
                 if ((p.y < 60 * d && p.x < v.W - 56 * d && zonaIn((float)p.x, (float)p.y) < 0)) { r = HTCAPTION; return true; }
@@ -265,6 +346,14 @@ private:
     vetro::Finestra v;
     IDWriteTextFormat *fTitolo = nullptr, *fVoce = nullptr, *fSotto = nullptr, *fSezione = nullptr, *fCentro = nullptr, *fMarchio = nullptr;
     bool aperta = false, dentro = false;
+    // crescita dal centro di controllo e rientro (vedi apri): morph 1 cresce, -1 rientra, 0 fermo; mx 0..1 avanzamento
+    // (0 = rettangolo del centro rDa, 1 = impostazioni rA); rientra: curva del rientro (vedi forma)
+    bool daCentro = false, rientra = false, fuori = false, fuoriDopo = false;   // fuori: si chiudono nell'icona (vedi chiudiFuori)
+    int morph = 0;
+    double mx = 1;
+    ULONGLONG tM = 0;
+    RECT rDa{}, rA{};
+    static constexpr double DURATA_CRESCE = 340, DURATA_RIENTRA = 260;   // ms
     int sopra = -1, sezione = S_GENERALE;
     ULONGLONG t0 = 0, tSez = 0, copiataAlle = 0;
     double k = 0, kSez = 1;
@@ -414,9 +503,48 @@ private:
         }
     }
 
+    void nascondi() {
+        if (v.fin) { vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
+        if (v.fin && fuori) SetWindowPos(v.fin, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        if (daCentro && dockSu) dockSu(false);   // (dopo tornaAlCentro: col pannello gia' aperto il dock non scende)
+        aperta = false; daCentro = false; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
+    }
+
+    // forma del vetro 0..1 (0 = rettangolo del centro di controllo, 1 = impostazioni). Tutte e due le direzioni
+    // rallentano all'arrivo: crescendo 1-(1-x)^3, rientrando x^3 (con x che scende)
+    double forma() const { return rientra ? mx * mx * mx : 1 - std::pow(1 - mx, 3); }
+    // cambio di direzione a meta': stessa forma di adesso, curva dell'altra direzione (niente salti)
+    void giraMorph(int dir) {
+        const double e = forma();
+        morph = dir; rientra = dir < 0; tM = vetro::ms();
+        mx = rientra ? std::cbrt(e) : 1 - std::cbrt(1 - e);
+    }
+    void applicaForma() {
+        const double e = forma();
+        auto mix = [e](LONG a, LONG b) { return (int)std::lround(a + (b - a) * e); };
+        const int x = mix(rDa.left, rA.left), y = mix(rDa.top, rA.top);
+        v.posiziona(x, y, std::max(1, mix(rDa.right, rA.right) - x), std::max(1, mix(rDa.bottom, rA.bottom) - y), nullptr, SWP_NOZORDER);
+    }
+
     void disegna() {
         if (!aperta || !v.inizia()) return;
-        const float d = v.dpi, W = (float)v.W, H = (float)v.H, B = BARRA * d;
+        float W = (float)v.W, H = (float)v.H;
+        // mentre cresce o rientra: il contenuto con le misure finali, rimpicciolito per stare nel vetro, e compare
+        // solo nell'ultima parte della crescita (prima il vetro e' troppo stretto per leggerlo)
+        const bool strato = morph != 0 && rA.right > rA.left && rA.bottom > rA.top;
+        if (strato) {
+            const float fw = (float)(rA.right - rA.left), fh = (float)(rA.bottom - rA.top);
+            const float s = std::min({1.0f, W / fw, H / fh});
+            // rientrando la forma cambia quasi tutta subito (curva x^3): legato a lei il contenuto spariva nei primi
+            // 30 ms e restava il vetro vuoto (ripresa a 60 fps); qui svanisce col tempo, fino a ~1/3 del rientro
+            const float x = (float)(rientra ? std::clamp((mx - 0.35) / 0.5, 0.0, 1.0) : std::clamp((forma() - 0.55) / 0.4, 0.0, 1.0));
+            const float op = x * x * (3 - 2 * x);
+            v.rt->SetTransform(D2D1::Matrix3x2F::Scale(s, s) * D2D1::Matrix3x2F::Translation((W - fw * s) / 2, (H - fh * s) / 2));
+            v.rt->PushLayer(D2D1::LayerParameters(D2D1::InfiniteRect(), nullptr, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE,
+                                                  D2D1::IdentityMatrix(), op), nullptr);
+            W = fw; H = fh;
+        }
+        const float d = v.dpi, B = BARRA * d;
         const D2D1_COLOR_F ink = v.inchiostro(), tenue = v.inchiostro(0.6f);
         const D2D1_COLOR_F blu = v.scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
         zone.clear();
@@ -603,6 +731,7 @@ private:
             riga(testi::t(L"Ctrl+Win+T", L"Ctrl+Win+T"), testi::t(L"Tiene la finestra attiva sempre in primo piano (di nuovo per toglierlo)", L"Keeps the active window always on top (again to undo)"));
             riga(testi::t(L"Maiusc+clic destro", L"Shift+right-click"), testi::t(L"Il menu di Windows, anche con il menu di FluidWin acceso", L"The Windows menu, even with the FluidWin menu on"));
         }
+        if (strato) { v.rt->PopLayer(); v.rt->SetTransform(D2D1::Matrix3x2F::Identity()); }
         v.finisci();
     }
 

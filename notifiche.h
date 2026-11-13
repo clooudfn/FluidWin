@@ -37,8 +37,17 @@ typedef HRESULT (STDMETHODCALLTYPE *FnStr)(void*, HSTRING*);
 
 class Lettore {
 public:
+    Lettore() = default;
+    Lettore(const Lettore&) = delete;              // possiede un riferimento COM: niente copie
+    Lettore& operator=(const Lettore&) = delete;
+
     // false se l'accesso alle notifiche non e' consentito (o l'API non c'e')
     bool permesso() { return prepara(); }
+
+    // Rilascia l'oggetto di Windows. Va chiamata dal thread che l'ha usato, prima di RoUninitialize (audit
+    // FW-AUDIT-011: prima non si rilasciava mai, un riferimento perso a ogni lettura avviata). Volutamente non nel
+    // distruttore: due Lettore sono globali e si distruggerebbero all'uscita, forse dopo la chiusura di COM
+    void chiudi() { if (ascolta) { rilascia(ascolta); ascolta = nullptr; } provato = false; }
 
     bool leggi(std::vector<Notifica>& out) {
         out.clear();

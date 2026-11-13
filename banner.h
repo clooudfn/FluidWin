@@ -6,6 +6,11 @@
 // ("Mostra banner di notifica", valore ShowBanner in HKCU\...\Notifications\Settings\<app>). Il valore di prima si
 // salva in HKCU\Software\FluidWin\Banner e si rimette com'era quando l'opzione si spegne. Le notifiche restano
 // nel centro notifiche e nel pannello dell'isola: cambia solo chi le mostra a comparsa.
+// Windows legge ShowBanner solo all'accesso (provato il 12/11/2026 su 10.0.26300: valore a 0 scritto con Windows
+// acceso, il banner di Windows esce lo stesso). Per questo i valori restano spenti finche' l'opzione e' accesa, anche
+// a FluidWin chiuso, allo spegnimento del PC e dopo un crash: rimettendoli a ogni uscita (correzione 84) all'accesso
+// Windows li trovava accesi e le notifiche uscivano doppie. Si rimettono solo spegnendo l'opzione (accendi(false), e
+// all'avvio se e' spenta); vale dal prossimo accesso.
 #pragma once
 #include "vetro.h"
 #include "notifiche.h"
@@ -28,15 +33,23 @@ namespace banner {
 inline const wchar_t* IMPOST = L"Software\\Microsoft\\Windows\\CurrentVersion\\Notifications\\Settings\\";
 inline const wchar_t* COPIA = L"Software\\FluidWin\\Banner";
 
-// spegne il banner di Windows per questa app, ricordando com'era (una volta sola per app)
+// spegne il banner di Windows per questa app, ricordando com'era (una volta sola per app). ShowBanner si cambia solo
+// se la copia del valore di prima e' stata scritta: senza copia non si saprebbe piu' come rimetterlo (audit FW-AUDIT-009)
+// Si va avanti solo su esiti certi: copia assente (ERROR_FILE_NOT_FOUND) e ShowBanner DWORD o assente. Una copia
+// illeggibile o di un altro tipo, o un ShowBanner illeggibile o non DWORD, lasciano tutto com'e': prima ogni errore di
+// lettura valeva "assente" e poteva sovrascrivere la copia buona o cancellare un valore originale (revisione di Codex
+// R20261112-190918-S1)
 inline void spegniBannerWindows(const std::wstring& aumid) {
     if (aumid.empty()) return;
     DWORD x = 0, n = sizeof(x);
-    if (RegGetValueW(HKEY_CURRENT_USER, COPIA, aumid.c_str(), RRF_RT_REG_DWORD, nullptr, &x, &n) == ERROR_SUCCESS) return;   // gia' fatto
+    const LSTATUS ec = RegGetValueW(HKEY_CURRENT_USER, COPIA, aumid.c_str(), RRF_RT_REG_DWORD, nullptr, &x, &n);
+    if (ec != ERROR_FILE_NOT_FOUND) return;   // gia' fatto (ERROR_SUCCESS), o copia che non si sa leggere: non si tocca
     const std::wstring k = IMPOST + aumid;
     DWORD prima = 0xFFFFFFFF; n = sizeof(prima);   // 0xFFFFFFFF = il valore non c'era
-    if (RegGetValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", RRF_RT_REG_DWORD, nullptr, &prima, &n) != ERROR_SUCCESS) prima = 0xFFFFFFFF;
-    RegSetKeyValueW(HKEY_CURRENT_USER, COPIA, aumid.c_str(), REG_DWORD, &prima, sizeof(prima));
+    const LSTATUS es = RegGetValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", RRF_RT_REG_DWORD, nullptr, &prima, &n);
+    if (es == ERROR_FILE_NOT_FOUND) prima = 0xFFFFFFFF;
+    else if (es != ERROR_SUCCESS) return;   // ShowBanner illeggibile o non DWORD: non e' nostro da cambiare
+    if (RegSetKeyValueW(HKEY_CURRENT_USER, COPIA, aumid.c_str(), REG_DWORD, &prima, sizeof(prima)) != ERROR_SUCCESS) return;
     DWORD zero = 0; RegSetKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", REG_DWORD, &zero, sizeof(zero));
 }
 
@@ -50,37 +63,75 @@ inline bool diSistema(const std::wstring& aumid) {
 
 // spegne in anticipo i banner di Windows per tutte le app che hanno gia' mandato notifiche (le sottochiavi di
 // Notifications\Settings): senza, la prima notifica di ogni app compariva due volte, una di Windows e una di FluidWin
-inline void spegniBannerTutte() {
+// Gli AUMID con un percorso (PowerShell: "{GUID}\WindowsPowerShell\v1.0\powershell.exe") nel registro sono chiavi
+// annidate: si scende finche' si trova la chiave dell'app (con dei valori, o senza sottochiavi). Prima si leggeva solo
+// il primo livello e ShowBanner finiva su "{GUID}", che non e' un'app: il banner restava acceso fino alla sua prima
+// notifica letta da FluidWin
+inline void appSotto(const std::wstring& rel, std::vector<std::wstring>& app, int livello) {
     HKEY c = nullptr;
     std::wstring radice = IMPOST; radice.pop_back();
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, radice.c_str(), 0, KEY_READ, &c) != ERROR_SUCCESS) return;
-    std::vector<std::wstring> app;
-    for (DWORD i = 0;; i++) {
+    std::wstring percorso = radice;
+    if (!rel.empty()) { percorso += L'\\'; percorso += rel; }
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, percorso.c_str(), 0, KEY_READ, &c) != ERROR_SUCCESS) return;
+    DWORD sotto = 0, valori = 0;
+    RegQueryInfoKeyW(c, nullptr, nullptr, nullptr, &sotto, nullptr, nullptr, &valori, nullptr, nullptr, nullptr, nullptr);
+    std::vector<std::wstring> figli;
+    for (DWORD i = 0; i < sotto; i++) {
         wchar_t nome[512]; DWORD ln = 512;
         if (RegEnumKeyExW(c, i, nome, &ln, nullptr, nullptr, nullptr, nullptr) != ERROR_SUCCESS) break;
-        app.push_back(nome);
+        figli.push_back(nome);
     }
     RegCloseKey(c);
+    if (!rel.empty() && (valori > 0 || figli.empty())) app.push_back(rel);
+    if (livello >= 6) return;   // (i percorsi veri sono corti)
+    for (const auto& f : figli) {
+        std::wstring p = rel;
+        if (!p.empty()) p += L'\\';
+        p += f;
+        appSotto(p, app, livello + 1);
+    }
+}
+
+inline void spegniBannerTutte() {
+    std::vector<std::wstring> app;
+    appSotto(L"", app, 0);
     for (const auto& a : app) if (!diSistema(a)) spegniBannerWindows(a);
 }
 
-// rimette i banner di Windows come erano, per tutte le app toccate
-inline void ripristinaBannerWindows() {
+// rimette i banner di Windows come erano, per tutte le app toccate. Torna quante copie restano (0 = tutto rimesso).
+// Ogni copia si cancella solo dopo che il suo ripristino e' riuscito, e la chiave delle copie solo quando e' vuota:
+// prima un errore a meta' (un nome lungo che non entrava nel buffer da 512, un valore non riscritto) fermava l'elenco e
+// poi si cancellavano comunque tutte le copie, perdendo per sempre lo stato di partenza (audit FW-AUDIT-009)
+// -1: la chiave delle copie c'e' ma non si apre (niente ripristinato: prima tornava 0, cioe' "tutto rimesso", R20261112-190918-S2)
+inline int ripristinaBannerWindows() {
     HKEY c = nullptr;
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, COPIA, 0, KEY_READ, &c) != ERROR_SUCCESS) return;
+    const LSTATUS eo = RegOpenKeyExW(HKEY_CURRENT_USER, COPIA, 0, KEY_READ | KEY_SET_VALUE, &c);
+    if (eo == ERROR_FILE_NOT_FOUND) return 0;   // nessuna copia: niente da rimettere
+    if (eo != ERROR_SUCCESS) return -1;
     std::vector<std::pair<std::wstring, DWORD>> lista;
+    int altre = 0;   // valori che non sono copie leggibili: restano dove sono
+    std::vector<wchar_t> nome(16384);   // (la misura massima di un nome di valore nel registro)
     for (DWORD i = 0;; i++) {
-        wchar_t nome[512]; DWORD ln = 512, tipo = 0, val = 0, lv = sizeof(val);
-        if (RegEnumValueW(c, i, nome, &ln, nullptr, &tipo, (BYTE*)&val, &lv) != ERROR_SUCCESS) break;
-        if (tipo == REG_DWORD) lista.push_back({nome, val});
+        DWORD ln = (DWORD)nome.size(), tipo = 0, val = 0, lv = sizeof(val);
+        const LSTATUS e = RegEnumValueW(c, i, nome.data(), &ln, nullptr, &tipo, (BYTE*)&val, &lv);
+        if (e == ERROR_NO_MORE_ITEMS) break;
+        if (e != ERROR_SUCCESS || tipo != REG_DWORD || lv != sizeof(val)) { altre++; if (e != ERROR_SUCCESS && e != ERROR_MORE_DATA) break; continue; }
+        lista.push_back({std::wstring(nome.data(), ln), val});
     }
-    RegCloseKey(c);
+    int restano = altre;
     for (const auto& [aumid, prima] : lista) {
         const std::wstring k = IMPOST + aumid;
-        if (prima == 0xFFFFFFFF) RegDeleteKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner");
-        else RegSetKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", REG_DWORD, &prima, sizeof(prima));
+        LSTATUS e;
+        if (prima == 0xFFFFFFFF) { e = RegDeleteKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner"); if (e == ERROR_FILE_NOT_FOUND) e = ERROR_SUCCESS; }
+        else e = RegSetKeyValueW(HKEY_CURRENT_USER, k.c_str(), L"ShowBanner", REG_DWORD, &prima, sizeof(prima));
+        if (e == ERROR_SUCCESS && RegDeleteValueW(c, aumid.c_str()) == ERROR_SUCCESS) continue;
+        restano++;   // la copia resta: ci si riprova la prossima volta
     }
-    RegDeleteTreeW(HKEY_CURRENT_USER, COPIA);
+    DWORD valori = 1, sotto = 1;
+    const bool vuota = RegQueryInfoKeyW(c, nullptr, nullptr, nullptr, &sotto, nullptr, nullptr, &valori, nullptr, nullptr, nullptr, nullptr) == ERROR_SUCCESS && !valori && !sotto;
+    RegCloseKey(c);
+    if (vuota) RegDeleteKeyW(HKEY_CURRENT_USER, COPIA);
+    return restano;
 }
 
 // icona (64 px) in pixel BGRA premoltiplicati di un elemento della shell (un .exe, shell:AppsFolder\...); false se non c'e'
@@ -144,6 +195,8 @@ public:
         lettore.rimuovi(attuale.id);
     }
     void togliAttuale() { lettore.rimuovi(attuale.id); }
+    // all'uscita, dal thread principale (quello che usa 'lettore') e prima della fine di COM (R20261113-010114-S5)
+    void chiudiLettore() { lettore.chiudi(); }
 
     ~Banner() { fermaLettura(); }
 
@@ -160,7 +213,13 @@ public:
             if (v.fin) { KillTimer(v.fin, 2); nascondi(); }
             fermaLettura();
             coda.clear();
-            ripristinaBannerWindows();
+            const int restano = ripristinaBannerWindows();
+            if (restano && registro) {
+                char t[120];
+                if (restano < 0) snprintf(t, sizeof t, "banner di Windows: chiave delle copie non apribile, niente ripristinato");
+                else snprintf(t, sizeof t, "banner di Windows: %d copie non ripristinate, restano per il prossimo giro", restano);
+                registro(t);
+            }
         }
     }
 
@@ -230,6 +289,7 @@ private:
                     if (l.leggi(lista)) { std::lock_guard<std::mutex> g(mx); letta = std::move(lista); nuova = true; tLettura = GetTickCount64(); }
                     for (int i = 0; i < 15 && !basta; i++) Sleep(100);
                 }
+                l.chiudi();   // prima di RoUninitialize (FW-AUDIT-011)
             }
             RoUninitialize();
         });
@@ -344,10 +404,14 @@ private:
         if (!iconaPer(attuale, px, w, h)) return;
         v.rt->CreateBitmap(D2D1::SizeU(w, h), px.data(), w * 4,
                            D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &icona);
+        giroIcona = v.giroRt;
     }
+    unsigned giroIcona = 0;   // giro del render target con cui e' stata fatta l'icona (FW-AUDIT-012)
 
     void disegna() {
-        if (stato == 0 || !v.inizia()) return;
+        if (stato == 0) return;
+        if (icona && giroIcona != v.giroRt) { icona->Release(); icona = nullptr; caricaIcona(); }   // target ricreato: icona rifatta
+        if (!v.inizia()) return;
         const float d = v.dpi, W = (float)v.W, H = (float)v.H;
         const D2D1_COLOR_F ink = v.inchiostro(), tenue = v.inchiostro(0.6f);
         const float il = 38 * d, ix = 16 * d, iy = (H - il) / 2;

@@ -27,6 +27,7 @@
 #include "vetro.h"
 #include "gpu.h"
 #include "pool.h"
+#include "altrui.h"
 #include "widget.h"
 #include <mmdeviceapi.h>
 #include <endpointvolume.h>
@@ -42,6 +43,7 @@
 #include <cwctype>
 #include <initializer_list>
 #include <unordered_map>
+#include <mutex>
 #include <unordered_set>
 #include <deque>
 #include <functional>
@@ -587,7 +589,7 @@ public:
 
     // tipo: 0 niente, 1 app a schermo intero (video, presentazione), 2 gioco
     void schermoIntero(int tipo) {
-        notch.modo(tipo == 0 ? notch::NORMALE : tipo == 2 ? notch::NASCOSTO : notch::SFUMATO);   // app: sfuma col mouse; gioco: via
+        notch.modo(tipo == 0 ? notch::NORMALE : notch::NASCOSTO);   // video, presentazioni e giochi: via
         const bool si = tipo != 0;
         if (si == nascostoSchermoIntero) return;
         nascostoSchermoIntero = si;
@@ -830,37 +832,47 @@ private:
         dev = gpu::condivisa().dev; ctx = gpu::condivisa().ctx;
         if (!dev) return false;
         dev->AddRef(); ctx->AddRef();
-        IDXGIDevice1* dd = nullptr; dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&dd);
+        // Ogni passo puo' fallire: un errore da' false (FluidWin va avanti senza dock), mai un puntatore nullo usato
+        // alla riga dopo (audit FW-AUDIT-004). Gli oggetti locali si rilasciano qui; quelli nei membri restano fino
+        // all'uscita (succede una volta, all'avvio)
+        IDXGIDevice1* dd = nullptr;
+        if (FAILED(dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&dd)) || !dd) return false;
         dd->SetMaximumFrameLatency(1);
         IDXGIFactory2* fab = nullptr;
-        if (FAILED(CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), (void**)&fab))) return false;
+        if (FAILED(CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), (void**)&fab))) { dd->Release(); return false; }
         DXGI_SWAP_CHAIN_DESC1 sd{};
         sd.Width = W; sd.Height = H; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
         sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
         sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-        if (FAILED(fab->CreateSwapChainForComposition(dev, &sd, nullptr, &sc))) return false;
+        const HRESULT hsc = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &sc);
         fab->Release();
-        if (FAILED(DCompositionCreateDevice(dd, __uuidof(IDCompositionDevice), (void**)&dcomp))) return false;
-        dcomp->CreateTargetForHwnd(icone, TRUE, &target);
-        dcomp->CreateVisual(&visual); visual->SetContent(sc); target->SetRoot(visual); dcomp->Commit();
+        if (FAILED(hsc) || FAILED(DCompositionCreateDevice(dd, __uuidof(IDCompositionDevice), (void**)&dcomp))) { dd->Release(); return false; }
+        if (FAILED(dcomp->CreateTargetForHwnd(icone, TRUE, &target)) || FAILED(dcomp->CreateVisual(&visual))) { dd->Release(); return false; }
+        visual->SetContent(sc); target->SetRoot(visual); dcomp->Commit();
 
         D2D1_FACTORY_OPTIONS fo{};
-        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), &fo, (void**)&f2d))) return false;
-        if (FAILED(f2d->CreateDevice(dd, &d2dev))) return false;
+        if (FAILED(D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, __uuidof(ID2D1Factory1), &fo, (void**)&f2d))) { dd->Release(); return false; }
+        const HRESULT hd2 = f2d->CreateDevice(dd, &d2dev);
         dd->Release();
-        d2dev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc);
-        IDXGISurface* sup = nullptr; sc->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup);
+        if (FAILED(hd2) || FAILED(d2dev->CreateDeviceContext(D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &dc))) return false;
+        IDXGISurface* sup = nullptr;
+        if (FAILED(sc->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup)) || !sup) return false;
         D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
                                                              D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
-        dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglio); sup->Release();
+        const HRESULT hbm = dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglio); sup->Release();
+        if (FAILED(hbm)) return false;
         dc->SetTarget(bersaglio);
-        dc->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &pennello);
-        f2d->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
-                                                           D2D1_LINE_JOIN_ROUND), nullptr, 0, &tratto);
+        if (FAILED(dc->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &pennello))) return false;
+        if (FAILED(f2d->CreateStrokeStyle(D2D1::StrokeStyleProperties(D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND, D2D1_CAP_STYLE_ROUND,
+                                                                      D2D1_LINE_JOIN_ROUND), nullptr, 0, &tratto))) return false;
 
-        DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&fdw);
+        if (FAILED(DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED, __uuidof(IDWriteFactory), (IUnknown**)&fdw)) || !fdw) return false;
+        bool fontOk = true;   // un formato non creato: niente dock (lo usano tutti i disegni senza controlli)
         auto formato = [&](const wchar_t* font, DWRITE_FONT_WEIGHT peso, float px, IDWriteTextFormat** out) {
-            fdw->CreateTextFormat(font, nullptr, peso, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px * dpi, L"it-it", out);
+            if (FAILED(fdw->CreateTextFormat(font, nullptr, peso, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px * dpi, L"it-it", out)) || !*out) {
+                // ripiego su Segoe UI (c'e' sempre): solo se manca anche quello il dock non parte
+                if (FAILED(fdw->CreateTextFormat(L"Segoe UI", nullptr, peso, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, px * dpi, L"it-it", out)) || !*out) { fontOk = false; return; }
+            }
             (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
             (*out)->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             (*out)->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -881,16 +893,17 @@ private:
         formato(fTesto, DWRITE_FONT_WEIGHT_NORMAL, 11.5f, &fmtData);
         // testi dei pannelli: allineati a sinistra, con "..." se non entrano
         auto sinistra = [&](const wchar_t* font, DWRITE_FONT_WEIGHT peso, float px, IDWriteTextFormat** out) {
-            formato(font, peso, px, out); (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
+            formato(font, peso, px, out); if (*out) (*out)->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_LEADING);
         };
         sinistra(fTitoli, DWRITE_FONT_WEIGHT_SEMI_BOLD, 15.0f, &fmtTitolo);
         sinistra(fTitoli, DWRITE_FONT_WEIGHT_SEMI_BOLD, 34.0f, &fmtGrande);
         sinistra(fTesto, DWRITE_FONT_WEIGHT_SEMI_BOLD, 13.0f, &fmtVoce);
         sinistra(fTesto, DWRITE_FONT_WEIGHT_NORMAL, 11.5f, &fmtSotto);
         sinistra(fTesto, DWRITE_FONT_WEIGHT_MEDIUM, 13.0f, &fmtNotizia);   // titoli delle notizie: a capo, al massimo due righe
+        formato(fTesto, DWRITE_FONT_WEIGHT_NORMAL, 11.0f, &fmtNome);
+        if (!fontOk) return false;
         fmtNotizia->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP); fmtNotizia->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
         fmtNotizia->SetLineSpacing(DWRITE_LINE_SPACING_METHOD_UNIFORM, 17.0f * dpi, 13.5f * dpi);   // righe fisse: ne entrano esattamente due
-        formato(fTesto, DWRITE_FONT_WEIGHT_NORMAL, 11.0f, &fmtNome);
         const DWRITE_TRIMMING tr{DWRITE_TRIMMING_GRANULARITY_CHARACTER, 0, 0};
         for (IDWriteTextFormat* f : {fmtNome, fmtSotto, fmtVoce, fmtNotizia}) {
             IDWriteInlineObject* punti = nullptr;
@@ -1191,13 +1204,13 @@ private:
             // "sopra al dock" dalla posizione vera del mouse (mouseDentro puo' restare vero se Windows non avvisa dell'uscita)
             const bool sopraIcone = WindowFromPoint(pt) == icone;
             const bool vicino = (sopraIcone && mouseSulDock) || (alto && x >= zonaDockL - 40 * dpi && x <= zonaDockR + 40 * dpi);
-            if (vicino || lAperto || !nessunaScheda()) fuoriDal = -1;   // (pannello aperto: il dock resta su con lui)
+            if (vicino || lAperto || !nessunaScheda() || dockSu) fuoriDal = -1;   // (pannello o impostazioni aperti: il dock resta su)
             else if (fuoriDal < 0) fuoriDal = adesso();
             else if (adesso() - fuoriDal > 0.35) { rivelato = false; fuoriDal = -1; dirty = true; }
         }
         if (rivelatoI) {
             const bool vicino = (WindowFromPoint(pt) == icone && !mouseSulDock) || (alto && zonaIsola);
-            if (vicino || !nessunaScheda()) fuoriDalI = -1;
+            if (vicino || !nessunaScheda() || dockSu) fuoriDalI = -1;
             else if (fuoriDalI < 0) fuoriDalI = adesso();
             else if (adesso() - fuoriDalI > 0.35) { rivelatoI = false; fuoriDalI = -1; dirty = true; }
         }
@@ -1303,10 +1316,10 @@ private:
             movimento = true;
         }
         // con un pannello del centro di controllo aperto (anche dal notch) il dock resta su; scende quando si chiude
-        const bool giu = spostamento || (vuoleNascondersi && !rivelato && t > rivelaFino && !lAperto && nessunaScheda());
+        const bool giu = spostamento || (vuoleNascondersi && !rivelato && t > rivelaFino && !lAperto && nessunaScheda() && !dockSu);
         if (giu) movimento |= molla(yNascosto, velNascosto, fuori, 260, 0.9);
         else movimento |= molla(yNascosto, velNascosto, 0, 340, 0.42);
-        const bool giuI = spostamento || (vuoleNascondersiI && !rivelatoI && nessunaScheda());
+        const bool giuI = spostamento || (vuoleNascondersiI && !rivelatoI && nessunaScheda() && !dockSu);
         if (giuI) movimento |= molla(yNascostoI, velNascostoI, fuori, 260, 0.9);
         else movimento |= molla(yNascostoI, velNascostoI, 0, 340, 0.42);
         if (vuoleNascondersi && t <= rivelaFino) movimento = true;   // allo scadere della comparsa temporanea deve riscendere
@@ -1779,7 +1792,8 @@ private:
     static const UINT WM_NOTIFICHE_LETTE = WM_APP + 32;
     CRITICAL_SECTION csN{}; bool csNOk = false;
     HANDLE eventoN = nullptr, threadNH = nullptr;
-    volatile LONG fineN = 0, genN = 0;      // genN: numero dell'ultima richiesta
+    std::atomic<LONG> fineN{0};             // (atomico: lo scrive il thread principale mentre il thread lo legge, R20261113-010114-S3)
+    volatile LONG genN = 0;                 // genN: numero dell'ultima richiesta
     std::vector<notifiche::Notifica> lettaN; bool permessoLetto = false; LONG genLetta = 0;   // dal thread (sotto csN)
     LONG genValida = 0;                     // letture partite prima di questa richiesta: vecchie (notifiche tolte nel frattempo)
     bool letteN = false;                    // arrivata almeno una lettura (prima il pannello mostra "…")
@@ -1801,6 +1815,9 @@ private:
     int pannelloTipo = P_NESSUNO, pannelloChiuso = P_NESSUNO;
     bool pDirty = false, pAnimazione = false, pChiusura = false, pMouseDentro = false, trascinaVolume = false;
     double pT0 = 0, pChiusoT = -10, pK = -1;
+    // passaggio alle impostazioni e ritorno: -1 il contenuto svanisce sul posto (il vetro lo prende la finestra delle
+    // impostazioni, che cresce da qui), 1 ricompare sul posto (le impostazioni ci sono appena rientrate), 0 niente
+    int pDissolvi = 0; double pDissT0 = 0; float pOpContenuto = 1;
     float PW = 0, PH = 0, PWMAX = 0, PHMAX = 0;
     float phDisponibile = 0;             // spazio sopra l'isola all'ultima apertura (vedi altezzaMassimaP)
     RECT rettPannello{};                 // posizione finale sullo schermo
@@ -1822,6 +1839,7 @@ private:
         int pannelloTipo = 0, pannelloChiuso = 0;
         bool pDirty = false, pAnimazione = false, pChiusura = false, pMouseDentro = false, trascinaVolume = false, trascinaLum = false;
         double pT0 = 0, pChiusoT = -10, pK = -1;
+        int pDissolvi = 0; double pDissT0 = 0; float pOpContenuto = 1;
         float PW = 0, PH = 0;
         RECT rettPannello{};
         std::vector<Elemento> elementi; std::vector<double> evidP;
@@ -1878,6 +1896,8 @@ private:
     void nascondiSchede();
 
     void chiudiPannello();
+
+    void cediPannello();
 
     float altezzaControllo() const;
 
@@ -1996,9 +2016,11 @@ private:
             d->mouseDentro = true; d->mouseSulDock = true; d->mouseX = x; d->mouseY = y;   // la lente segue il trascinamento
             const int i = d->iconaInPunto(x, y);
             const int s = (file && i >= 0 && d->voci[i].avvio == AVVIO_CESTINO) ? i : -1;
-            if (s != d->dropSopra) d->dropSopra = s;
+            // (solo se la sorgente permette lo spostamento: *e porta gli effetti che consente)
+            const int c = (*e & DROPEFFECT_MOVE) ? s : -1;
+            if (c != d->dropSopra) d->dropSopra = c;
             d->dirty = true;
-            *e = s >= 0 ? DROPEFFECT_MOVE : DROPEFFECT_NONE;
+            *e = c >= 0 ? DROPEFFECT_MOVE : DROPEFFECT_NONE;   // (aspetto del cursore: "sposta" nel Cestino)
             return S_OK;
         }
         HRESULT STDMETHODCALLTYPE DragLeave() override { d->dropSopra = -1; d->mouseDentro = false; d->mouseSulDock = false; d->sopra = -1; d->dirty = true; return S_OK; }
@@ -2010,10 +2032,11 @@ private:
             FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM m{};
             if (FAILED(o->GetData(&f, &m))) { *e = DROPEFFECT_NONE; return S_OK; }
             std::wstring lista;   // percorsi separati da \0, con \0\0 in fondo (come vuole SHFileOperation)
-            if (HDROP hd = (HDROP)GlobalLock(m.hGlobal)) {
+            // DragQueryFile vuole l'handle del blocco, non il puntatore di GlobalLock: con memoria mobile i due sono
+            // diversi e non si trovava nessun file (audit FW-AUDIT-016)
+            if (const HDROP hd = (HDROP)m.hGlobal) {
                 const UINT n = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
                 for (UINT i = 0; i < n; i++) { wchar_t p[MAX_PATH * 4]; if (DragQueryFileW(hd, i, p, MAX_PATH * 4)) { lista += p; lista.push_back(L'\0'); } }
-                GlobalUnlock(m.hGlobal);
             }
             ReleaseStgMedium(&m);
             if (lista.empty()) { *e = DROPEFFECT_NONE; return S_OK; }
@@ -2021,15 +2044,27 @@ private:
             if (d->registro) d->scrivi("file trascinati sul cestino: nel Cestino di Windows");
             // nel Cestino (FOF_ALLOWUNDO: si possono ripristinare), in un thread a parte per non fermare il dock
             auto* copia = new std::wstring(std::move(lista));
-            CloseHandle(CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
+            const HANDLE t = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD {
                 std::wstring* l = (std::wstring*)p;
                 CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
                 SHFILEOPSTRUCTW op{}; op.wFunc = FO_DELETE; op.pFrom = l->c_str(); op.fFlags = FOF_ALLOWUNDO;
                 SHFileOperationW(&op);
                 CoUninitialize(); delete l; return 0;
-            }, copia, 0, nullptr));
+            }, copia, 0, nullptr);
+            if (!t) { delete copia; if (d->registro) d->scrivi("cestino: thread non partito, file non toccati"); *e = DROPEFFECT_NONE; return S_OK; }
+            CloseHandle(t);
             d->giroCestino = 0;
-            *e = DROPEFFECT_MOVE;
+            // Spostamento "ottimizzato": i file li sposta FluidWin. Alla sorgente si risponde NONE e si scrive
+            // CFSTR_PERFORMEDDROPEFFECT = NONE: con MOVE (com'era prima) Esplora file considera lo spostamento non fatto
+            // e cancella lui gli originali, senza Cestino (documentazione della shell, "Handling Optimized Move
+            // Operations"; audit FW-AUDIT-017)
+            if (HGLOBAL g = GlobalAlloc(GMEM_MOVEABLE, sizeof(DWORD))) {
+                if (DWORD* v = (DWORD*)GlobalLock(g)) { *v = DROPEFFECT_NONE; GlobalUnlock(g); }
+                FORMATETC pf = {(CLIPFORMAT)RegisterClipboardFormatW(L"Performed DropEffect"), nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL};
+                STGMEDIUM sm{}; sm.tymed = TYMED_HGLOBAL; sm.hGlobal = g;
+                if (FAILED(o->SetData(&pf, &sm, TRUE))) GlobalFree(g);   // (con TRUE, se riesce, la memoria e' sua)
+            }
+            *e = DROPEFFECT_NONE;
             return S_OK;
         }
     } bersaglioDrop;
@@ -2169,7 +2204,7 @@ private:
     std::deque<std::pair<std::wstring, int>> iconeDaFare;
     std::unordered_set<std::wstring> iconeChieste;   // lato + percorso: gia' in coda (non si chiede due volte)
     HANDLE eventoIcone = nullptr, threadIconeH = nullptr;
-    volatile LONG fineIcone = 0;
+    std::atomic<LONG> fineIcone{0};   // (atomico come fineN, R20261113-010114-S3)
     int iconeAttese = 0;
 
     static DWORD WINAPI threadIcone(LPVOID p);
@@ -2241,8 +2276,14 @@ public:
     void apriDopo(int cosa, int tipo);
     void suTimerDopo();
 
-    // apre le impostazioni di FluidWin (dal centro di controllo)
-    void (*impostazioni)() = nullptr;
+    // apre le impostazioni di FluidWin (dal centro di controllo): da = rettangolo del vetro del pannello sullo schermo,
+    // da cui le impostazioni crescono
+    void (*impostazioni)(const RECT* da) = nullptr;
+    // le impostazioni aperte dal centro di controllo si sono richiuse nel suo rettangolo: il centro ricompare li'
+    void riapriControllo();
+    // impostazioni aperte dal centro di controllo: il dock resta su come col pannello aperto (scende quando si chiudono)
+    bool dockSu = false;
+    void tieniSu(bool b) { if (dockSu != b) { dockSu = b; dirty = true; } }
 
     void apriLauncher();
 
@@ -2408,21 +2449,33 @@ private:
     }
 
     // porta in primo piano una finestra dell'app, ripristinandola se e' ridotta a icona
+    // (ripristinaAltrui: un'app bloccata non ferma il dock; il ripiego e' lo stesso delle app amministratore)
     void portaDavanti(HWND h) {
         if (IsIconic(h)) {
-            if (!ShowWindow(h, SW_RESTORE) && IsIconic(h)) {
+            if (!ripristinaAltrui(h) && IsIconic(h)) {
                 SwitchToThisWindow(h, TRUE);
-                if (registro) scrivi("clic dock: finestra di un'app amministratore, ripristinata come fa Alt+Tab");
+                if (registro) scrivi("clic dock: finestra che non risponde o di un'app amministratore, ripristinata come fa Alt+Tab");
             } else SetForegroundWindow(h);
         } else if (!SetForegroundWindow(h)) SwitchToThisWindow(h, TRUE);
     }
 
     void menu(int i, POINT pt) {
-        if (i < 0 || i >= (int)voci.size() || voci[i].uscente) return;
+        // Spazio vuoto del dock, launcher e centro di controllo: le impostazioni di FluidWin. Prima il tasto destro li'
+        // non faceva niente, e le impostazioni si aprivano solo dal centro di controllo, dalla ricerca o dall'icona
+        // nell'area di notifica (nascosta con la barra di Windows): difficili da trovare
+        const bool suApp = i >= 0 && i < (int)voci.size() && voci[i].avvio != AVVIO_LAUNCHER && voci[i].avvio != AVVIO_CONTROLLO;
+        if (!suApp) {
+            if (i >= 0 && i < (int)voci.size() && voci[i].uscente) return;
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra({menu::titolo(L"FluidWin"), menu::voce(testi::t(L"Impostazioni di FluidWin…", L"FluidWin settings…"), 1)},
+                                            {pt.x - (LONG)(100 * dpi), pt.y - (LONG)(14 * dpi)}, icone, true);
+            if (s == 1 && impostazioni) impostazioni(nullptr);
+            return;
+        }
+        if (voci[i].uscente) return;
         // copia: mentre il menu e' aperto (ha un suo ciclo dei messaggi) l'elenco delle app puo' essere rifatto da
         // capo, e un riferimento a voci[i] resterebbe a puntare a memoria liberata
         const Voce v = voci[i];
-        if (v.avvio == AVVIO_LAUNCHER || v.avvio == AVVIO_CONTROLLO) return;
         if (v.avvio == AVVIO_CESTINO || v.avvio == AVVIO_PILA) {   // cestino e pila: menu loro
             const bool c = v.avvio == AVVIO_CESTINO;
             std::vector<menu::Voce> vv = {menu::titolo(v.nome), menu::voce(c ? testi::t(L"Apri", L"Open") : testi::t(L"Apri la cartella", L"Open folder"), 1)};

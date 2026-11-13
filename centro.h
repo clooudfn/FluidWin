@@ -18,6 +18,7 @@ inline auto Motore::scambiaScheda() -> void {
     std::swap(pDirty, a.pDirty); std::swap(pAnimazione, a.pAnimazione); std::swap(pChiusura, a.pChiusura); std::swap(pMouseDentro, a.pMouseDentro);
     std::swap(trascinaVolume, a.trascinaVolume); std::swap(trascinaLum, a.trascinaLum);
     std::swap(pT0, a.pT0); std::swap(pChiusoT, a.pChiusoT); std::swap(pK, a.pK); std::swap(PW, a.PW); std::swap(PH, a.PH);
+    std::swap(pDissolvi, a.pDissolvi); std::swap(pDissT0, a.pDissT0); std::swap(pOpContenuto, a.pOpContenuto);
     std::swap(rettPannello, a.rettPannello); std::swap(elementi, a.elementi); std::swap(evidP, a.evidP);
     std::swap(pSopra, a.pSopra); std::swap(pPremuto, a.pPremuto);
     std::swap(posDietro, a.posDietro); std::swap(posObj, a.posObj); std::swap(gira, a.gira); std::swap(davanti, a.davanti); std::swap(chiudiAlle, a.chiudiAlle);
@@ -52,20 +53,29 @@ inline auto Motore::creaPannello(HINSTANCE inst) -> bool {
                                WS_POPUP, 0, 0, 10, 10, nullptr, nullptr, inst, nullptr);
     vetroPannello = creaVetro(inst);
     BOOL niente = TRUE; DwmSetWindowAttribute(pannello, DWMWA_TRANSITIONS_FORCEDISABLED, &niente, sizeof(niente));
+    // ogni passo puo' fallire: false (niente centro), mai un puntatore nullo usato dopo (audit FW-AUDIT-004)
     IDXGIDevice* dd = nullptr; IDXGIAdapter* ad = nullptr; IDXGIFactory2* fab = nullptr;
-    dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd); dd->GetAdapter(&ad); ad->GetParent(__uuidof(IDXGIFactory2), (void**)&fab);
-    DXGI_SWAP_CHAIN_DESC1 sd{};
-    sd.Width = (UINT)PWMAX; sd.Height = (UINT)PHMAX; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
-    sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
-    sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-    const HRESULT hr = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &scP);
-    fab->Release(); ad->Release(); dd->Release();
+    HRESULT hr = dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd);
+    if (SUCCEEDED(hr)) hr = dd->GetAdapter(&ad);
+    if (SUCCEEDED(hr)) hr = ad->GetParent(__uuidof(IDXGIFactory2), (void**)&fab);
+    if (SUCCEEDED(hr)) {
+        DXGI_SWAP_CHAIN_DESC1 sd{};
+        sd.Width = (UINT)PWMAX; sd.Height = (UINT)PHMAX; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        hr = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &scP);
+    }
+    if (fab) fab->Release();
+    if (ad) ad->Release();
+    if (dd) dd->Release();
     if (FAILED(hr)) return false;
-    dcomp->CreateTargetForHwnd(pannello, TRUE, &targetP);
-    dcomp->CreateVisual(&visualP); visualP->SetContent(scP);
-    dcomp->CreateEffectGroup(&effettoP); visualP->SetEffect(effettoP);   // dissolvenza in apertura e chiusura
+    if (FAILED(dcomp->CreateTargetForHwnd(pannello, TRUE, &targetP)) || FAILED(dcomp->CreateVisual(&visualP)) ||
+        FAILED(dcomp->CreateEffectGroup(&effettoP))) return false;
+    visualP->SetContent(scP);
+    visualP->SetEffect(effettoP);   // dissolvenza in apertura e chiusura
     targetP->SetRoot(visualP); dcomp->Commit();
-    IDXGISurface* sup = nullptr; scP->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup);
+    IDXGISurface* sup = nullptr;
+    if (FAILED(scP->GetBuffer(0, __uuidof(IDXGISurface), (void**)&sup)) || !sup) return false;
     D2D1_BITMAP_PROPERTIES1 bp = D2D1::BitmapProperties1(D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_CANNOT_DRAW,
                                                          D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED));
     dc->CreateBitmapFromDxgiSurface(sup, &bp, &bersaglioP); sup->Release();
@@ -77,6 +87,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     usa(1 - slot);
     const bool altraAperta = pannelloTipo != P_NESSUNO && !pChiusura;
     usa(slot);
+    if (pDissolvi < 0) nascondiPannello();   // stava svanendo verso le impostazioni: si riapre da capo
     if (pannelloTipo == tipo && !pChiusura) {
         if (!davanti && altraAperta) { mescola(slot); return; }   // era dietro: torna davanti girando da sinistra
         chiudiPannello(); return;                                   // era davanti: si chiude
@@ -225,8 +236,31 @@ inline auto Motore::chiudiTutte() -> void {
 
 inline auto Motore::nascondiSchede() -> void { for (int s : {0, 1}) { usa(s); nascondiPannello(); } }
 
+// verso le impostazioni di FluidWin: il vetro lo prende subito la loro finestra (cresce da questo rettangolo), il
+// contenuto svanisce sul posto sopra di lei. Niente rimpicciolimento verso l'icona: sembrerebbe chiudersi e basta
+inline auto Motore::cediPannello() -> void {
+    if (pannelloTipo == P_NESSUNO || pChiusura || pDissolvi < 0) return;
+    if (trascinaVolume || trascinaLum || trascinaMixer >= 0) { trascinaVolume = trascinaLum = false; trascinaMixer = -1; ReleaseCapture(); }
+    pDissolvi = -1; pDissT0 = adesso(); pAnimazione = true; pDirty = true; chiudiAlle = -1;
+    ShowWindow(vetroPannello, SW_HIDE);
+    scrivi("centro di controllo: passa alle impostazioni");
+}
+
+// ritorno dalle impostazioni: il centro di controllo si riapre gia' grande dove le impostazioni sono rientrate, il
+// vetro subito (prende il posto del loro) e il contenuto in dissolvenza
+inline auto Motore::riapriControllo() -> void {
+    usa(slotDiTipo(P_CONTROLLO));
+    if (pannelloTipo != P_NESSUNO) nascondiPannello();   // (aperto nel frattempo, o ancora in dissolvenza)
+    apriPannello(P_CONTROLLO);
+    if (pannelloTipo != P_CONTROLLO) return;
+    pT0 = adesso() - 1; pK = 1;   // apertura gia' finita
+    pDissolvi = 1; pDissT0 = adesso(); pOpContenuto = 0; pAnimazione = true; pDirty = true;
+    posizionaPannello(1);
+    scrivi("centro di controllo: ritorno dalle impostazioni");
+}
+
 inline auto Motore::chiudiPannello() -> void {
-    if (pannelloTipo == P_NESSUNO || pChiusura) return;
+    if (pannelloTipo == P_NESSUNO || pChiusura || pDissolvi < 0) return;   // (verso le impostazioni: svanisce da solo)
     // chiuso mentre si apriva: la chiusura parte dall'altezza a cui e' arrivato, non da tutto aperto
     // (tutte le viste crescono dall'icona del centro di controllo e ci rientrano)
     const double k = std::clamp(pK < 0 ? 0.0 : pK, 0.0, 1.0);
@@ -259,6 +293,7 @@ inline auto Motore::nascondiPannello() -> void {
     if (pannelloTipo != P_NESSUNO) { pannelloChiuso = pannelloTipo; pChiusoT = adesso(); }
     if (registro && pannelloTipo != P_NESSUNO) { char b[80]; snprintf(b, 80, "pannello %d nascosto%s", pannelloTipo, pChiusura ? " (fine chiusura)" : ""); scrivi(b); }
     pannelloTipo = P_NESSUNO; pChiusura = false; pAnimazione = false; pDirty = false;
+    pDissolvi = 0; pOpContenuto = 1;
     dirty = true;   // pannello chiuso: il dock puo' tornare giu' (se deve)
     phVis = 0; phVel = 0; tVista = -1; vistaPrima = P_NESSUNO;
     posDietro = posObj = 0; gira = false; davanti = true; chiudiAlle = -1;
@@ -292,7 +327,7 @@ inline auto Motore::posizionaPannello(double k) -> void {
     SetWindowPos(vetroPannello, nullptr, x + (int)std::lround(a.x), r.top + (int)std::lround(a.y),
                  std::max(1, (int)std::lround(b.x - a.x)), std::max(1, (int)std::lround(b.y - a.y)), SWP_NOACTIVATE | SWP_NOZORDER);
     SetLayeredWindowAttributes(vetroPannello, 0, (BYTE)std::lround(std::clamp(alfa, 0.0, 1.0) * 255), LWA_ALPHA);
-    effettoP->SetOpacity((float)std::clamp(alfa, 0.0, 1.0));
+    effettoP->SetOpacity((float)std::clamp(alfa, 0.0, 1.0) * pOpContenuto);   // (pOpContenuto: vedi cediPannello)
     dcomp->Commit();
 }
 
@@ -301,7 +336,13 @@ inline auto Motore::renderPannello() -> bool {
     const double ora = adesso();
     double k;
     const bool posaInMoto = posDietro != posObj || chiudiAlle > 0;
-    if (!pChiusura) {
+    if (pDissolvi != 0) {   // passaggio alle impostazioni o ritorno: fermo e grande, cambia solo il contenuto
+        const double x = std::clamp((ora - pDissT0) / 0.15, 0.0, 1.0);
+        pOpContenuto = (float)(pDissolvi > 0 ? 1 - std::pow(1 - x, 3) : 1 - x);
+        k = 1; pAnimazione = x < 1 || posaInMoto;
+        if (x >= 1 && pDissolvi < 0) { nascondiPannello(); return false; }
+        if (x >= 1) pDissolvi = 0;
+    } else if (!pChiusura) {
         // (niente rimbalzo oltre 1: il contenuto uscirebbe dalla sua finestra e verrebbe tagliato)
         const double x = std::clamp((ora - pT0) / 0.25, 0.0, 1.0);
         k = 1 - std::pow(1 - x, 4);
@@ -777,6 +818,7 @@ inline DWORD WINAPI Motore::threadNotifiche(LPVOID p) {
             EnterCriticalSection(&m->csN); m->lettaN = std::move(lista); m->permessoLetto = ok; m->genLetta = g; LeaveCriticalSection(&m->csN);
             PostMessageW(m->icone, WM_NOTIFICHE_LETTE, 0, 0);
         }
+        l.chiudi();   // prima di RoUninitialize (FW-AUDIT-011)
     }
     RoUninitialize();
     return 0;
@@ -815,6 +857,9 @@ inline auto Motore::notificheLette() -> void {
 
 // all'uscita: si aspetta la lettura in corso (al massimo 2 s), poi il thread finisce
 inline auto Motore::fermaNotifiche() -> void {
+    // il lettore del thread principale (eliminare notifiche dal centro): rilasciato anche lui, sul suo thread
+    // (R20261113-010114-S5); se serve ancora si riprepara da solo alla prossima eliminazione
+    lettoreN.chiudi();
     if (!threadNH) return;
     fineN = 1; SetEvent(eventoN);
     WaitForSingleObject(threadNH, 2000);
@@ -1378,8 +1423,12 @@ inline auto Motore::fotoIconaSfondo(const std::wstring& exe) -> ID2D1Bitmap* {
 }
 
 // app dello Store: dal percorso ...\WindowsApps\Nome_versione_arch__editore\... all'AppUserModelID
-// (solo dal lavoro in sottofondo delle app in background: uno alla volta, quindi la cache non e' contesa)
+// La chiamano due thread: il lavoro in sottofondo delle app in background e il thread principale (aggiornaApp, per
+// un'app dello Store fissata e poi aggiornata). Prima la cache non aveva protezione: la si poteva riempire e leggere
+// insieme (audit FW-AUDIT-015). Ora l'elenco si costruisce in una copia locale, senza lucchetto (costa ~1 s di shell),
+// e si pubblica e si legge sotto il mutex
 inline auto Motore::avvioPacchetto(const std::wstring& exe) -> std::wstring {
+    static std::mutex mx;
     static std::unordered_map<std::wstring, std::wstring> aumidPacchetti;   // famiglia del pacchetto -> AppUserModelID
     const size_t p = exe.find(L"\\windowsapps\\");
     if (p == std::wstring::npos) return L"";
@@ -1388,7 +1437,16 @@ inline auto Motore::avvioPacchetto(const std::wstring& exe) -> std::wstring {
     const size_t u = pac.find(L'_'), e = pac.rfind(L"__");
     if (u == std::wstring::npos || e == std::wstring::npos) return L"";
     const std::wstring famiglia = pac.substr(0, u) + L"_" + pac.substr(e + 2);
-    if (aumidPacchetti.empty()) {   // elenco delle app installate (una volta sola)
+    auto cerca = [&]() -> std::wstring {
+        auto it = aumidPacchetti.find(famiglia);
+        return it == aumidPacchetti.end() ? L"" : L"shell:AppsFolder\\" + it->second;
+    };
+    {
+        const std::lock_guard<std::mutex> k(mx);
+        if (!aumidPacchetti.empty()) return cerca();
+    }
+    std::unordered_map<std::wstring, std::wstring> elenco;   // elenco delle app installate (finche' non riesce)
+    {
         IShellItem* cart = nullptr;
         if (SUCCEEDED(SHGetKnownFolderItem(FOLDERID_AppsFolder, KF_FLAG_DEFAULT, nullptr, IID_PPV_ARGS(&cart)))) {
             IEnumShellItems* en = nullptr;
@@ -1398,7 +1456,7 @@ inline auto Motore::avvioPacchetto(const std::wstring& exe) -> std::wstring {
                     LPWSTR n = nullptr;
                     if (SUCCEEDED(it->GetDisplayName(SIGDN_PARENTRELATIVEPARSING, &n))) {
                         const std::wstring id = n; const size_t k = id.find(L'!');
-                        if (k != std::wstring::npos) aumidPacchetti.emplace(minuscolo(id.substr(0, k)), id);
+                        if (k != std::wstring::npos) elenco.emplace(minuscolo(id.substr(0, k)), id);
                         CoTaskMemFree(n);
                     }
                     it->Release();
@@ -1408,8 +1466,9 @@ inline auto Motore::avvioPacchetto(const std::wstring& exe) -> std::wstring {
             cart->Release();
         }
     }
-    auto it = aumidPacchetti.find(famiglia);
-    return it == aumidPacchetti.end() ? L"" : L"shell:AppsFolder\\" + it->second;
+    const std::lock_guard<std::mutex> k(mx);
+    if (aumidPacchetti.empty()) aumidPacchetti = std::move(elenco);   // (se l'altro thread l'ha gia' pubblicato, vale il suo)
+    return cerca();
 }
 
 // il tooltip e' il nome che l'app mostra di se': si tolgono stato ("Steam - sincronizzazione") e versioni ("B26.0730.1")
@@ -1579,7 +1638,13 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             sistema::Sistema::impostaTema(!sistema::Sistema::temaScuro());
             aggiornaTemaVetri(); dirty = true; pDirty = true;
             break;
-        case A_FLUIDWIN:     chiudiPannello(); if (impostazioni) impostazioni(); break;
+        case A_FLUIDWIN: {   // le impostazioni crescono dal vetro del pannello (il contenuto qui svanisce sul posto)
+            RECT r{};
+            const bool da = impostazioni && GetWindowRect(vetroPannello, &r) && !IsRectEmpty(&r);
+            if (da) cediPannello(); else chiudiPannello();
+            if (impostazioni) impostazioni(da ? &r : nullptr);
+            break;
+        }
         case A_TIMER: {
             std::vector<menu::Voce> voci = {menu::titolo(L"Timer")};
             const int minuti[] = {1, 3, 5, 10, 15, 25, 30, 45, 60};

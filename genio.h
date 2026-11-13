@@ -125,30 +125,38 @@ public:
         dev = gpu::condivisa().dev; ctx = gpu::condivisa().ctx;
         if (!dev) return false;
         dev->AddRef(); ctx->AddRef();
-        IDXGIDevice* dd = nullptr; dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd);
+        // Ogni passo puo' fallire (memoria video finita, driver che si riavvia): un errore qui deve dare false (il
+        // chiamante ripiega sull'animazione a molla), mai un puntatore nullo usato alla riga dopo (audit FW-AUDIT-004).
+        // Quelli locali si rilasciano qui; quelli gia' salvati nei membri restano fino all'uscita (succede una volta,
+        // all'avvio, e senza genio non si riprova)
+        IDXGIDevice* dd = nullptr;
+        if (FAILED(dev->QueryInterface(__uuidof(IDXGIDevice), (void**)&dd)) || !dd) return false;
         { IDXGIDevice1* d1 = nullptr; if (SUCCEEDED(dev->QueryInterface(__uuidof(IDXGIDevice1), (void**)&d1))) { d1->SetMaximumFrameLatency(1); d1->Release(); } }   // latenza minima: un solo fotogramma in coda
         IDXGIFactory2* fab = nullptr;
-        if (FAILED(CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), (void**)&fab))) return false;
+        if (FAILED(CreateDXGIFactory2(0, __uuidof(IDXGIFactory2), (void**)&fab))) { dd->Release(); return false; }
         DXGI_SWAP_CHAIN_DESC1 sd{};
         sd.Width = W; sd.Height = H; sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
         sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT; sd.BufferCount = 2;
         sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL; sd.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-        if (FAILED(fab->CreateSwapChainForComposition(dev, &sd, nullptr, &sc))) return false;
+        const HRESULT hsc = fab->CreateSwapChainForComposition(dev, &sd, nullptr, &sc);
         fab->Release();
-        if (FAILED(DCompositionCreateDevice(dd, __uuidof(IDCompositionDevice), (void**)&dcomp))) return false;
+        if (FAILED(hsc)) { dd->Release(); return false; }
+        const HRESULT hdc = DCompositionCreateDevice(dd, __uuidof(IDCompositionDevice), (void**)&dcomp);
         dd->Release();
-        dcomp->CreateTargetForHwnd(finestra, TRUE, &target);
-        dcomp->CreateVisual(&visual);
+        if (FAILED(hdc)) return false;
+        if (FAILED(dcomp->CreateTargetForHwnd(finestra, TRUE, &target)) || FAILED(dcomp->CreateVisual(&visual))) return false;
         visual->SetContent(sc);
         target->SetRoot(visual);
         dcomp->Commit();
 
-        ID3D11Texture2D* bb = nullptr; sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb);
-        dev->CreateRenderTargetView(bb, nullptr, &rtv); bb->Release();
+        ID3D11Texture2D* bb = nullptr;
+        if (FAILED(sc->GetBuffer(0, __uuidof(ID3D11Texture2D), (void**)&bb)) || !bb) return false;
+        const HRESULT hrt = dev->CreateRenderTargetView(bb, nullptr, &rtv); bb->Release();
+        if (FAILED(hrt)) return false;
 
         ID3DBlob *bvs = nullptr, *bps = nullptr, *err = nullptr;
-        if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "vs", "vs_4_0", 0, 0, &bvs, &err))) return false;
-        if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "ps", "ps_4_0", 0, 0, &bps, &err))) return false;
+        if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "vs", "vs_4_0", 0, 0, &bvs, &err))) { if (err) err->Release(); return false; }
+        if (FAILED(D3DCompile(SHADER, strlen(SHADER), nullptr, nullptr, nullptr, "ps", "ps_4_0", 0, 0, &bps, &err))) { if (err) err->Release(); bvs->Release(); return false; }
         dev->CreateVertexShader(bvs->GetBufferPointer(), bvs->GetBufferSize(), nullptr, &vs);
         dev->CreatePixelShader(bps->GetBufferPointer(), bps->GetBufferSize(), nullptr, &ps);
         D3D11_INPUT_ELEMENT_DESC el[] = {
@@ -175,7 +183,8 @@ public:
         dev->CreateBlendState(&bd, &blend);
         D3D11_RASTERIZER_DESC rd{}; rd.FillMode = D3D11_FILL_SOLID; rd.CullMode = D3D11_CULL_NONE;
         dev->CreateRasterizerState(&rd, &rast);
-        return true;
+        // (le Create* qui sopra lasciano nullptr se falliscono: il disegno li usa tutti senza altri controlli)
+        return vs && ps && layout && vbuf && cbuf && camp && blend && rast;
     }
 
     // Fotografa la finestra (anche app DirectX/Chromium) e la carica sulla GPU, ritagliata alla parte visibile

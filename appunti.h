@@ -12,6 +12,8 @@
 #include <vector>
 #include <algorithm>
 #include <cwctype>
+#include <cstdint>
+#include <cstring>
 
 namespace appunti {
 
@@ -123,19 +125,46 @@ private:
         return false;
     }
 
-    // anteprima alta al massimo 96 px (GDI disegna qualsiasi CF_DIB, anche i formati strani)
+public:
+    // Dove cominciano i pixel di un CF_DIB, solo se GDI puo' leggerlo tutto senza uscire dal buffer; 0 se no.
+    // Il CF_DIB lo scrive un'altra app qualsiasi: prima si controllava solo che l'intestazione ci fosse, e StretchDIBits
+    // riceveva misure e tavolozza piu' grandi dei byte veri (letture fuori dal buffer, audit FW-AUDIT-010). Si accettano
+    // solo i formati non compressi (BI_RGB, BI_BITFIELDS): gli altri (RLE, JPEG, PNG) negli appunti sono rarissimi e la
+    // loro misura in byte non si puo' controllare senza decodificarli. Conti a 64 bit: niente traboccamenti
+    static size_t inizioPixelDib(const BYTE* p, size_t n) {
+        if (!p || n < sizeof(BITMAPINFOHEADER)) return 0;
+        BITMAPINFOHEADER bh;
+        memcpy(&bh, p, sizeof(bh));
+        if (bh.biSize < sizeof(BITMAPINFOHEADER) || bh.biSize > n) return 0;
+        // misure: (anche -32768..-1 per le immagini dall'alto; mai LONG_MIN, che std::abs non sa rappresentare)
+        if (bh.biWidth <= 0 || bh.biWidth > 32768 || bh.biHeight == 0 || bh.biHeight < -32768 || bh.biHeight > 32768) return 0;
+        const unsigned bpp = bh.biBitCount;
+        if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 16 && bpp != 24 && bpp != 32) return 0;
+        uint64_t off = bh.biSize;
+        if (bh.biCompression == BI_BITFIELDS) {
+            if (bpp != 16 && bpp != 32) return 0;
+            if (bh.biSize == sizeof(BITMAPINFOHEADER)) off += 12;   // le tre maschere dopo l'intestazione (V4/V5 le hanno dentro)
+        } else if (bh.biCompression != BI_RGB) return 0;
+        // tavolozza: GDI ne legge biClrUsed colori (o tutti quelli possibili se e' 0)
+        const uint64_t massimo = bpp <= 8 ? (1u << bpp) : 256;
+        const uint64_t colori = bh.biClrUsed ? bh.biClrUsed : (bpp <= 8 ? massimo : 0);
+        if (colori > massimo) return 0;
+        off += colori * 4;
+        const uint64_t riga = ((uint64_t)bh.biWidth * bpp + 31) / 32 * 4;   // le righe sono allineate a 4 byte
+        const uint64_t alta = (uint64_t)(bh.biHeight < 0 ? -(int64_t)bh.biHeight : bh.biHeight);
+        if (off + riga * alta > n) return 0;
+        return (size_t)off;
+    }
+
+private:
+    // anteprima alta al massimo 96 px
     static bool anteprima(Voce& v) {
+        const size_t off = inizioPixelDib(v.dib.data(), v.dib.size());
+        if (!off) return false;
         const BITMAPINFOHEADER* bh = (const BITMAPINFOHEADER*)v.dib.data();
-        if (bh->biSize < sizeof(BITMAPINFOHEADER) || bh->biWidth <= 0 || bh->biHeight == 0) return false;
         v.w = bh->biWidth; v.h = std::abs(bh->biHeight);
         const double k = std::min(1.0, std::min(96.0 / v.h, 160.0 / v.w));
         v.aw = std::max(1, (int)(v.w * k)); v.ah = std::max(1, (int)(v.h * k));
-        // dove cominciano i pixel: dopo l'intestazione, le maschere (BI_BITFIELDS) e la tavolozza
-        size_t off = bh->biSize;
-        if (bh->biCompression == BI_BITFIELDS && bh->biSize == sizeof(BITMAPINFOHEADER)) off += 12;
-        const DWORD colori = bh->biClrUsed ? bh->biClrUsed : (bh->biBitCount <= 8 ? (1u << bh->biBitCount) : 0);
-        off += colori * 4;
-        if (off >= v.dib.size()) return false;
         BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), v.aw, -v.ah, 1, 32, BI_RGB};
         void* bits = nullptr;
         HDC scr = GetDC(nullptr), mem = CreateCompatibleDC(scr);

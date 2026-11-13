@@ -65,7 +65,10 @@ public:
             d->Release();
             const bool app = std::any_of(u.app.begin(), u.app.end(), [](const App& a) { return !a.sistema; });
             if (u.predefinita || app) uscite.push_back(std::move(u));
-            else if (u.vol) u.vol->Release();
+            else {   // uscita scartata: si rilascia tutto, anche le sessioni (prima solo u.vol: FW-AUDIT-020)
+                if (u.vol) u.vol->Release();
+                for (auto& a : u.app) for (auto* s : a.vol) s->Release();
+            }
         }
         if (snap != INVALID_HANDLE_VALUE) CloseHandle(snap);
         col->Release();

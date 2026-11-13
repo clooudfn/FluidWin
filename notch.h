@@ -7,8 +7,8 @@
 //    titolo, artista e i tasti indietro / play-pausa / avanti.
 // Il mouse di solito lo attraversa (sta dove si afferrano le finestre ingrandite): diventa cliccabile solo col mouse
 // fermo sopra per un attimo (senza tasti premuti) o mentre mostra una notifica. Un clic sull'ora apre le notifiche.
-// Con un'app a schermo intero (video, presentazioni) resta, ma piu' il mouse si avvicina piu' diventa trasparente;
-// con un gioco non c'e' proprio (vedi modo()).
+// Con un'app a schermo intero (video, presentazioni, giochi) non c'e' (vedi modo()): il volume lo mostra allora
+// l'indicatore di vetro.
 //
 // Disegno: una finestra a strati di misura fissa (la piu' grande che serve), la forma disegnata al centro con
 // Direct2D software in un DIB tenuto da parte; ogni fotogramma e' un UpdateLayeredWindow. La trasparenza col mouse
@@ -39,7 +39,9 @@
 
 namespace notch {
 
-enum Modo { NORMALE = 0, SFUMATO = 1, NASCOSTO = 2 };   // schermo intero: niente, app (sfuma col mouse), gioco
+// schermo intero: niente, o un'app a schermo intero (video, presentazione, gioco). Prima sotto un video restava
+// visibile e sfumava solo col mouse vicino: coprendo il film dava fastidio, ora sparisce come con i giochi
+enum Modo { NORMALE = 0, NASCOSTO = 2 };
 
 class Notch {
 public:
@@ -99,12 +101,11 @@ public:
         visibilita();
     }
 
-    // schermo intero: NORMALE, SFUMATO (app: trasparente col mouse vicino), NASCOSTO (gioco)
+    // schermo intero: NORMALE, NASCOSTO (qualsiasi app a schermo intero: video, presentazioni, giochi)
     void modo(int m) {
         if (m == modoAtt) return;
         modoAtt = m;
         if (m != NORMALE) { sopra = false; attesa = 0; finisciNotifica(); }   // sopra un'app a schermo intero niente notifiche
-        if (m != SFUMATO && alfa != 1) { alfa = 1; }
         visibilita();
         cliccabile(false);
         bersagli(); ridisegna();
@@ -186,7 +187,7 @@ private:
     int scena = ORA, scenaPrima = ORA;
     double tScena = 0, tPrec = 0;
     bool animando = false;
-    float alfa = 1;   // alfa della finestra (schermo intero di un'app: piu' trasparente col mouse vicino)
+    float alfa = 1;   // alfa della finestra (sempre piena: UpdateLayeredWindow la usa a ogni fotogramma)
 
     // contenuti
     float livello = 0, livelloVis = 0; bool muto = false; double fineVolume = 0;
@@ -352,22 +353,13 @@ private:
         RECT largo = {c.left - m, c.top, c.right + m, c.bottom + m};
         const bool dentro = PtInRect(&largo, p) != FALSE;
         const bool tasti = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) || (GetAsyncKeyState(VK_RBUTTON) & 0x8000);
-        if (modoAtt == SFUMATO) {
-            // piu' il mouse si avvicina piu' sparisce (a contatto non si vede): sotto c'e' l'app a schermo intero
-            const double dx = std::max({(double)c.left - p.x, 0.0, (double)p.x - c.right});
-            const double dy = std::max({(double)c.top - p.y, 0.0, (double)p.y - c.bottom});
-            double k = std::clamp(std::sqrt(dx * dx + dy * dy) / (150.0 * dpi), 0.0, 1.0);
-            k = k * k * (3 - 2 * k);
-            if (std::fabs(k - alfa) > 0.01 || (k == 1 && alfa != 1) || (k == 0 && alfa != 0)) { alfa = (float)k; mostraAlfa(); }
+        // col mouse fermo sopra per un attimo (senza tasti: non mentre si trascina una finestra) si apre
+        if (!sopra) {
+            attesa = dentro && !tasti ? attesa + 1 : 0;
+            if (attesa >= 6) { sopra = true; fuori = 0; bersagli(); }
         } else {
-            // col mouse fermo sopra per un attimo (senza tasti: non mentre si trascina una finestra) si apre
-            if (!sopra) {
-                attesa = dentro && !tasti ? attesa + 1 : 0;
-                if (attesa >= 6) { sopra = true; fuori = 0; bersagli(); }
-            } else {
-                fuori = dentro ? 0 : fuori + 1;
-                if (fuori >= 5) { sopra = false; attesa = 0; bersagli(); }
-            }
+            fuori = dentro ? 0 : fuori + 1;
+            if (fuori >= 5) { sopra = false; attesa = 0; bersagli(); }
         }
         // tasto sotto il mouse (aperto) e x della notifica
         const POINT pc = {p.x - posX(), p.y - schermo.top};
@@ -833,10 +825,10 @@ private:
             if (ok && o) {
                 FORMATETC f = {CF_HDROP, nullptr, DVASPECT_CONTENT, -1, TYMED_HGLOBAL}; STGMEDIUM m{};
                 if (SUCCEEDED(o->GetData(&f, &m))) {
-                    if (HDROP hd = (HDROP)GlobalLock(m.hGlobal)) {
+                    // l'handle del blocco, non il puntatore di GlobalLock (audit FW-AUDIT-016, come nel dock)
+                    if (const HDROP hd = (HDROP)m.hGlobal) {
                         const UINT k = DragQueryFileW(hd, 0xFFFFFFFF, nullptr, 0);
                         for (UINT i = 0; i < k && i < 50; i++) { wchar_t p[MAX_PATH * 4]; if (DragQueryFileW(hd, i, p, MAX_PATH * 4)) n->appoggia(p); }
-                        GlobalUnlock(m.hGlobal);
                     }
                     ReleaseStgMedium(&m);
                     *e = DROPEFFECT_COPY;   // copia: il file resta dov'era

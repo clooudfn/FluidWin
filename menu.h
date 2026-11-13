@@ -184,6 +184,9 @@ private:
         static const wchar_t* fam = famiglia(fdw);   // (il font scelto non cambia: si cerca una volta sola)
         fdw->CreateTextFormat(fam, nullptr, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 13.5f * dpi, L"it-it", &fmt);
         fdw->CreateTextFormat(fam, nullptr, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 12.0f * dpi, L"it-it", &fmtTitolo);
+        // (audit FW-AUDIT-004) senza formati o, sotto, senza render target il menu non si apre: esegui() trova fin o rt
+        // nulli e torna 0, come un menu annullato. Prima si usavano subito, nulli
+        if (!fmt || !fmtTitolo) return;
         for (IDWriteTextFormat* f : {fmt, fmtTitolo}) {
             f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
             f->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
@@ -242,8 +245,14 @@ private:
         f2d->CreateHwndRenderTarget(D2D1::RenderTargetProperties(D2D1_RENDER_TARGET_TYPE_DEFAULT,
                                         D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED), 96, 96),
                                     D2D1::HwndRenderTargetProperties(fin, D2D1::SizeU(W, H)), &rt);
+        if (rt) rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &pen);
+        if (!rt || !pen) {
+            if (rt) rt->Release();
+            rt = nullptr;
+            DestroyWindow(fin); fin = nullptr;   // (non ancora mostrata)
+            return;
+        }
         rt->SetTextAntialiasMode(D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE);   // sul vetro il ClearType farebbe aloni colorati
-        rt->CreateSolidColorBrush(D2D1::ColorF(0, 0, 0, 1), &pen);
     }
 
     // allunga il menu (freccia in fondo): la finestra cresce verso il basso, o sale se sotto non c'e' posto

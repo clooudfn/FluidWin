@@ -46,6 +46,13 @@
 static const wchar_t* PROP_NASCOSTA = L"FluidWin.Nascosta";   // finestra resa trasparente da noi
 static const wchar_t* PROP_TRANSIZ  = L"FluidWin.Transizioni"; // animazioni native spente da noi
 static const wchar_t* PROP_ALFA     = L"FluidWin.AlfaApp";     // trasparenza originale delle finestre gia' layered
+// stile layered aggiunto da noi, finestra gia' opaca, stile ancora da togliere (lo toglie un thread: vedi togliStile).
+// Resta sulla finestra anche dopo l'uscita di FluidWin: ripristinaTutte (uscita, guardiano, avvio) ci riprova
+static const wchar_t* PROP_STILE    = L"FluidWin.Stile";
+// "sempre in primo piano" (Ctrl+Win+T) messo da noi: il segno sta sulla finestra, cosi' lo trovano anche il guardiano e
+// il prossimo avvio (prima lo sapeva solo questo processo: dopo un crash la finestra restava in primo piano, FW-AUDIT-002)
+static const wchar_t* PROP_PRIMO_PIANO = L"FluidWin.PrimoPiano";
+static const UINT     WM_STILE_TOLTO = WM_APP + 16;            // wParam finestra, lParam 1 se lo stile e' stato tolto
 static const UINT     WM_TRAY       = WM_APP + 1;
 
 struct Molla {
@@ -322,6 +329,9 @@ static bool nascondibile(HWND h) {
 
 // Rende la finestra vera trasparente (con l'alfa indicato); false se non si puo'
 static bool rendiLayered(HWND h, BYTE alfa) {
+    // il thread che toglie il nostro stile layered non ha ancora finito: niente animazione (lo stile cambierebbe sotto
+    // l'animazione), e la finestra non va scambiata per una layered di suo
+    if (GetPropW(h, PROP_STILE)) { logf("stile layered ancora da togliere %p: niente trasparenza", h); return false; }
     if (!GetPropW(h, PROP_NASCOSTA)) {
         const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
         if (ex & WS_EX_LAYERED) {
@@ -332,6 +342,8 @@ static bool rendiLayered(HWND h, BYTE alfa) {
             SetPropW(h, PROP_NASCOSTA, (HANDLE)1);
             gNascoste.insert(h);
         } else {
+            // cambiare lo stile aspetta l'app senza limite (vedi altrui.h): bloccata, niente animazione
+            if (!risponde(h, 300)) { logf("finestra che non risponde %p: niente trasparenza", h); return false; }
             SetPropW(h, PROP_NASCOSTA, (HANDLE)1);
             SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
             segnaCambioStile(h);
@@ -355,6 +367,53 @@ static void alfaFinestra(HWND h, BYTE alfa) {
     SetLayeredWindowAttributes(h, 0, alfa, LWA_ALPHA);
 }
 
+// Toglie lo stile layered aggiunto da noi, in un thread: SetWindowLongPtr aspetta l'app senza limite (vedi altrui.h),
+// anche se un attimo prima ha risposto. La finestra e' gia' opaca; finche' lo stile non e' tolto resta PROP_STILE.
+// Un'app bloccata a lungo: si riprova ogni secondo finche' risponde, sparisce o FluidWin esce (allora ripristinaTutte)
+static std::atomic<LONG> gTogliendo{0};   // thread in corso (all'uscita si aspettano un poco, come gNascondendo)
+static std::atomic<bool> gFineStile{false};   // FluidWin esce: i thread smettono di riprovare (atomici: FW-AUDIT-006)
+// Toglie WS_EX_LAYERED; false solo se SetWindowLongPtr e' fallito davvero (0 con un errore: per esempio un'app avviata
+// come amministratore). Se riesce ma l'app si rimette lo stile da sola (WM_STYLECHANGING), lo stile e' suo: non lo si
+// combatte, e il segno si toglie lo stesso (togliendolo all'uscita si romperebbe una sua finestra layered).
+// Prima il risultato non si guardava e il segno spariva anche quando non era stato tolto niente (FW-AUDIT-005)
+static bool togliLayered(HWND h) {
+    const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED;
+    SetLastError(0);   // subito prima del setter: lo zero di SetWindowLongPtr e' ambiguo senza (R20261112-190918, nota su 005)
+    const LONG_PTR r = SetWindowLongPtrW(h, GWL_EXSTYLE, ex);
+    return r != 0 || GetLastError() == 0;
+}
+
+static DWORD WINAPI togliStile(LPVOID p) {
+    const HWND h = (HWND)p;
+    BOOL tolto = FALSE;
+    int falliti = 0;
+    while (!gFineStile && IsWindow(h) && GetPropW(h, PROP_STILE)) {
+        if (risponde(h, 1000)) {
+            if (!togliLayered(h)) {   // rifiutato: qualche tentativo, poi il segno resta (ci riprova ripristinaTutte)
+                if (++falliti >= 3) break;
+                Sleep(1000);
+                continue;
+            }
+            // alcune app (il nuovo Blocco note) dopo il cambio di stile possono lasciare un pezzo non ridisegnato: si
+            // chiede di ridisegnare tutto (senza aspettare l'app). Solo qui: le layered di loro non cambiano stile
+            RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
+            tolto = TRUE;
+            break;
+        }
+        Sleep(1000);   // (con un'app che Windows da' gia' per bloccata risponde torna subito)
+    }
+    PostMessageW(gMessaggi, WM_STILE_TOLTO, (WPARAM)h, tolto);
+    gTogliendo--;
+    return 0;
+}
+
+// risposta del thread (thread principale): il segno si toglie qui, dove si decide se animare la finestra
+static void stileTolto(HWND h, bool tolto) {
+    // (non tolto dal thread: finestra sparita, FluidWin in uscita, o tolto intanto da ripristinaTutte)
+    if (!tolto) { logf("stile layered: il thread ha finito senza toglierlo %p", h); return; }
+    if (IsWindow(h)) { RemovePropW(h, PROP_STILE); segnaCambioStile(h); }
+}
+
 // Rimette la finestra com'era: opaca (o con la trasparenza sua), senza lo stile layered aggiunto da noi
 // e con le animazioni native
 static void rendiVisibileFinestra(HWND h) {
@@ -364,12 +423,20 @@ static void rendiVisibileFinestra(HWND h) {
         SetLayeredWindowAttributes(h, 0, (BYTE)orig, LWA_ALPHA);   // layered per conto suo: resta layered
         RemovePropW(h, PROP_ALFA);
     } else {
-        SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
-        SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
-        segnaCambioStile(h);
-        // alcune app (il nuovo Blocco note) dopo il cambio di stile possono lasciare un pezzo non ridisegnato: si
-        // chiede di ridisegnare tutto (senza aspettare l'app). Solo qui: le layered di loro non cambiano stile
-        RedrawWindow(h, nullptr, nullptr, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
+        // Ordine: segno dello stile, via il segno della trasparenza, POI alfa 255. Il thread nascondiNata puo' stare
+        // scrivendo alfa 0 proprio adesso: se trova il segno ancora li' non ripara niente, quindi il segno deve
+        // sparire prima dell'alfa 255, e l'ultima scrittura resta la nostra (R20261113-014029-S2). Con FluidWin che
+        // cade tra le due righe, il segno dello stile basta al guardiano: togliendo lo stile la finestra ricompare
+        SetPropW(h, PROP_STILE, (HANDLE)1);
+        RemovePropW(h, PROP_NASCOSTA);
+        SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);   // (non aspetta l'app: con questo torna gia' visibile)
+        // lo stile invece lo toglie un thread (togliStile): il thread principale non aspetta mai l'app. Il segno va
+        // messo prima del thread: se FluidWin si chiudesse male, il guardiano lo trova
+        gTogliendo++;
+        if (!pool::lancia(togliStile, h, THREAD_PRIORITY_NORMAL, true)) {
+            gTogliendo--;
+            logf("thread per togliere lo stile non partito %p: lo togliera' ripristinaTutte all'uscita", h);
+        }
     }
     RemovePropW(h, PROP_NASCOSTA);
     gNascoste.erase(h);
@@ -410,42 +477,94 @@ static void rinascondiBarreWindows() {
     }
 }
 
-// La finestra risponde ai messaggi entro 'ms'? SetWindowLongPtr su una finestra di un altro programma aspetta che lei
-// risponda, senza limite: con una finestra che non li legge mai (una nascosta di nvcontainer, NVCapContext) si restava
-// bloccati per sempre, guardiano e avvio di FluidWin compresi
-static bool risponde(HWND h, UINT ms) {
-    DWORD_PTR r = 0;
-    return SendMessageTimeoutW(h, WM_NULL, 0, 0, SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT, ms, &r) != 0;
-}
-
 // Usata dal guardiano e all'avvio: rimette a posto qualsiasi finestra lasciata nascosta o senza animazioni
-static void ripristinaTutte() {
-    ripristinaBarra();
-    dock::togliAppbarRimasta();   // spazio riservato al dock rimasto da un FluidWin terminato male
-    mostraBarreWindows(true);
-    EnumWindows([](HWND h, LPARAM) -> BOOL {
+// Una finestra: tutto quello che FluidWin le ha cambiato e di cui resta il segno (proprieta')
+static void ripristinaFinestra(HWND h) {
         if (GetPropW(h, PROP_NASCOSTA)) {
             if (const INT_PTR orig = (INT_PTR)GetPropW(h, PROP_ALFA)) {
                 SetLayeredWindowAttributes(h, 0, (BYTE)orig, LWA_ALPHA);
                 RemovePropW(h, PROP_ALFA);
-            } else {
+            } else {   // (stesso ordine di rendiVisibileFinestra: alfa 255 per ultima, R20261113-014029-S2)
+                SetPropW(h, PROP_STILE, (HANDLE)1);   // lo stile si toglie qui sotto, o al prossimo giro se non risponde
+                RemovePropW(h, PROP_NASCOSTA);
                 SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);   // (questo non aspetta la finestra: torna visibile)
-                if (risponde(h, 300)) SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
             }
             RemovePropW(h, PROP_NASCOSTA);
+        }
+        // stile layered aggiunto da noi e non ancora tolto: se non risponde il segno resta, e ci riprova il prossimo
+        // giro (guardiano o prossimo avvio di FluidWin) invece di perderlo
+        if (GetPropW(h, PROP_STILE)) {
+            if (!risponde(h, 300)) logf("ripristino: %p non risponde, stile layered ancora da togliere (segno lasciato)", h);
+            else if (togliLayered(h)) RemovePropW(h, PROP_STILE);
+            else logf("ripristino: stile layered di %p non tolto (errore %lu), segno lasciato", h, GetLastError());
         }
         if (GetPropW(h, PROP_TRANSIZ)) {
             BOOL no = FALSE; DwmSetWindowAttribute(h, DWMWA_TRANSITIONS_FORCEDISABLED, &no, sizeof(no));
             RemovePropW(h, PROP_TRANSIZ);
         }
-        // finestre classiche a cui FluidWin ha tolto i tasti originali (WS_SYSMENU): tornano com'erano
-        if (GetPropW(h, L"FluidWin.SenzaTasti")) {
-            if (risponde(h, 300)) SetWindowLongPtrW(h, GWL_STYLE, GetWindowLongPtrW(h, GWL_STYLE) | WS_SYSMENU);
-            SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
-            RemovePropW(h, L"FluidWin.SenzaTasti");
+        // "sempre in primo piano" messo da un FluidWin che non ha fatto in tempo a toglierlo (crash, guardiano, avvio).
+        // Asincrono: non aspetta l'app, quindi niente blocchi nemmeno nel guardiano
+        // Il segno si toglie solo quando la finestra risulta gia' normale: la richiesta asincrona puo' non essere ancora
+        // eseguita (app ferma) o fallire, e senza segno nessuno ci riproverebbe (R20261112-190918-S4). Finche' resta
+        // in primo piano il segno rimane e il giro dopo (guardiano, avvio, uscita) ripete la richiesta
+        // Sempre in coda, anche se l'app risponde: risponde() misura solo WM_NULL, e un'app che si blocca in
+        // WM_WINDOWPOSCHANGING teneva fermo un SetWindowPos sincrono, cioe' l'avvio di FluidWin o suCrash
+        // (R20261113-005324-S1). Il segno di una finestra gia' normale si toglie subito; quello di una finestra con la
+        // richiesta in coda all'avvio lo rilascia controllaPrimoPiano appena la vede normale (riprendiPrimoPiano)
+        if (GetPropW(h, PROP_PRIMO_PIANO)) {
+            if (!(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST)) RemovePropW(h, PROP_PRIMO_PIANO);
+            else SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
         }
-        return TRUE;
-    }, 0);
+        // finestre classiche a cui FluidWin ha tolto i tasti originali (WS_SYSMENU): tornano com'erano
+        // (il segno si toglie solo a ripristino fatto: prima spariva anche se la finestra non rispondeva, FW-AUDIT-029)
+        if (GetPropW(h, L"FluidWin.SenzaTasti") && risponde(h, 300)) {
+            const LONG_PTR st = GetWindowLongPtrW(h, GWL_STYLE) | WS_SYSMENU;
+            SetLastError(0);   // subito prima del setter (come togliLayered)
+            const LONG_PTR r = SetWindowLongPtrW(h, GWL_STYLE, st);
+            if (r != 0 || GetLastError() == 0) {
+                SetWindowPos(h, nullptr, 0, 0, 0, 0, SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_ASYNCWINDOWPOS);
+                RemovePropW(h, L"FluidWin.SenzaTasti");
+            }
+        }
+}
+
+static bool haSegni(HWND h) {
+    for (const wchar_t* p : {PROP_NASCOSTA, PROP_STILE, PROP_TRANSIZ, PROP_PRIMO_PIANO, L"FluidWin.SenzaTasti"})
+        if (GetPropW(h, p)) return true;
+    return false;
+}
+
+// conLimite (solo il guardiano): ogni finestra segnata in un thread suo, con un limite di tempo. risponde() misura solo
+// WM_NULL: un'app che risponde e si blocca subito dopo (durante WM_STYLECHANGING, per esempio) teneva fermo il
+// guardiano, e con lui il ripristino di tutte le altre finestre (audit FW-AUDIT-001). Il thread rimasto appeso finisce
+// con il processo del guardiano; la finestra tiene il suo segno e ci riprova il prossimo avvio di FluidWin.
+// Fuori dal guardiano (uscita, crash, avvio) resta tutto sul thread che chiama, come prima
+static void ripristinaTutte(bool conLimite = false) {
+    ripristinaBarra();
+    dock::togliAppbarRimasta();   // spazio riservato al dock rimasto da un FluidWin terminato male
+    mostraBarreWindows(true);
+    if (!conLimite) {
+        EnumWindows([](HWND h, LPARAM) -> BOOL { ripristinaFinestra(h); return TRUE; }, 0);
+        return;
+    }
+    std::vector<HWND> segnate;   // (GetPropW non aspetta le finestre: l'elenco si fa senza rischi)
+    EnumWindows([](HWND h, LPARAM l) -> BOOL { if (haSegni(h)) ((std::vector<HWND>*)l)->push_back(h); return TRUE; }, (LPARAM)&segnate);
+    for (HWND h : segnate) {
+        HANDLE t = CreateThread(nullptr, 0, [](LPVOID p) -> DWORD { ripristinaFinestra((HWND)p); return 0; }, h, 0, nullptr);
+        // Senza thread non si ripiega sul ripristino completo: SetWindowLongPtr potrebbe fermare il guardiano senza
+        // limite (R20261113-011012-S1). Solo cio' che non aspetta l'app: la finestra torna opaca (alfa sua o 255);
+        // tutti i segni restano, e il resto lo fa il prossimo avvio di FluidWin
+        if (!t) {
+            logf("guardiano: thread non creato per %p (%lu): solo opacita', segni lasciati", h, GetLastError());
+            if (GetPropW(h, PROP_NASCOSTA)) {
+                const INT_PTR orig = (INT_PTR)GetPropW(h, PROP_ALFA);
+                SetLayeredWindowAttributes(h, 0, orig ? (BYTE)orig : 255, LWA_ALPHA);
+            }
+            continue;
+        }
+        if (WaitForSingleObject(t, 3000) == WAIT_TIMEOUT) logf("guardiano: %p bloccata durante il ripristino, si passa alla prossima", h);
+        CloseHandle(t);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -599,9 +718,23 @@ static void primoPiano() {
     if (!h || pid == GetCurrentProcessId()) return;
     wchar_t c[64] = L""; GetClassNameW(h, c, 64);
     if (!wcscmp(c, L"Progman") || !wcscmp(c, L"WorkerW") || !wcscmp(c, L"Shell_TrayWnd")) return;
+    // SetWindowPos aspetta l'app senza limite (vedi altrui.h): se non risponde non si cambia niente. Non asincrona: la
+    // richiesta resterebbe in coda, una seconda pressione leggerebbe ancora lo stato vecchio (e non la annullerebbe) e
+    // potrebbe essere applicata dopo l'uscita di FluidWin, lasciando la finestra in primo piano
+    if (!risponde(h, 300)) {
+        logf("sempre in primo piano: %ls non risponde, niente cambiato", c);
+        if (gDockOk) gDock.ilNotch().avviso(testi::t(L"L'app non risponde", L"The app is not responding"), sensori::S_PUNTINA, -1, false);
+        return;
+    }
     const bool era = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST) != 0;
-    SetWindowPos(h, era ? HWND_NOTOPMOST : HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-    if (era) gInPrimoPiano.erase(h); else gInPrimoPiano.insert(h);
+    // il segno prima del cambio (se FluidWin cadesse a meta'); senza segno niente cambio: una finestra in primo piano
+    // senza segno non la rimetterebbe a posto nessuno (R20261112-190918-S3)
+    if (!era && !SetPropW(h, PROP_PRIMO_PIANO, (HANDLE)1)) { logf("sempre in primo piano: segno non salvato (%lu, %ls), niente cambiato", GetLastError(), c); return; }
+    const BOOL fatto = SetWindowPos(h, era ? HWND_NOTOPMOST : HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    if (era) { if (fatto) { gInPrimoPiano.erase(h); RemovePropW(h, PROP_PRIMO_PIANO); } }
+    else if (fatto) gInPrimoPiano.insert(h);
+    else RemovePropW(h, PROP_PRIMO_PIANO);
+    if (!fatto) { logf("sempre in primo piano: SetWindowPos non riuscito (%lu, %ls)", GetLastError(), c); return; }
     wchar_t t[128] = L""; GetWindowTextW(h, t, 128);
     std::wstring testo = era ? testi::t(L"Non più in primo piano", L"No longer on top") : testi::t(L"Sempre in primo piano", L"Always on top");
     if (t[0]) testo += std::wstring(L" · ") + t;
@@ -609,10 +742,45 @@ static void primoPiano() {
     if (gDockOk) gDock.ilNotch().avviso(testo, sensori::S_PUNTINA, -1, !era);
 }
 
+// All'uscita. Una finestra che non risponde prima si saltava e restava in primo piano: ora la richiesta resta in coda
+// (SWP_ASYNCWINDOWPOS, non aspetta l'app) e l'app la esegue quando si riprende
+// Il segno si toglie solo a cambio riuscito; con la richiesta in coda resta, e il guardiano (che parte subito dopo
+// l'uscita) o il prossimo avvio lo tolgono quando vedono la finestra normale (R20261112-190918-S4)
 static void togliPrimoPiano() {
-    for (HWND h : gInPrimoPiano)
-        if (IsWindow(h) && risponde(h, 300)) SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    for (HWND h : gInPrimoPiano) {
+        if (!IsWindow(h) || !GetPropW(h, PROP_PRIMO_PIANO)) continue;
+        const UINT f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        if (risponde(h, 300)) {
+            if (SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, f)) RemovePropW(h, PROP_PRIMO_PIANO);
+            else logf("sempre in primo piano: %p non tolto (%lu), segno lasciato", h, GetLastError());
+        } else { SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, f | SWP_ASYNCWINDOWPOS); logf("sempre in primo piano: %p non risponde, tolto in coda (segno lasciato)", h); }
+    }
     gInPrimoPiano.clear();
+}
+
+// Ogni 500 ms: una finestra tornata normale da sola (l'app, o l'utente con un altro programma) non e' piu' "nostra":
+// il segno si rilascia, cosi' una sua scelta successiva di stare in primo piano non viene annullata all'uscita
+// (R20261112-190918-S5). Limite: un ritorno normale e di nuovo in primo piano entro 500 ms non si vede
+static void controllaPrimoPiano() {
+    for (auto it = gInPrimoPiano.begin(); it != gInPrimoPiano.end();) {
+        const HWND h = *it;
+        if (!IsWindow(h)) { it = gInPrimoPiano.erase(it); continue; }
+        if (!(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_TOPMOST)) {   // (non aspetta la finestra: legge lo stile)
+            RemovePropW(h, PROP_PRIMO_PIANO);
+            logf("sempre in primo piano: %p tornata normale da sola, segno rilasciato", h);
+            it = gInPrimoPiano.erase(it); continue;
+        }
+        ++it;
+    }
+}
+
+// All'avvio, dopo ripristinaTutte: le finestre che hanno ancora il segno (richiesta di tornare normali in coda) restano
+// "nostre" finche' controllaPrimoPiano non le vede normali e ne rilascia il segno; se all'uscita sono ancora in primo
+// piano, togliPrimoPiano ci riprova. Senza, il segno restava su una finestra gia' normale e un "sempre in primo piano"
+// scelto poi dall'utente con un altro programma sarebbe stato annullato al prossimo ripristino
+static void riprendiPrimoPiano() {
+    EnumWindows([](HWND h, LPARAM) -> BOOL { if (GetPropW(h, PROP_PRIMO_PIANO)) gInPrimoPiano.insert(h); return TRUE; }, 0);
+    if (!gInPrimoPiano.empty()) logf("sempre in primo piano: %zu finestre ancora da rimettere normali (in coda)", gInPrimoPiano.size());
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1134,7 +1302,7 @@ static void elementiCoperture(std::vector<genio::Elemento>& el) {
         el.push_back(e);
     }
 }
-static volatile LONG gNascondendo = 0;   // thread ancora in corso (all'uscita si aspettano un poco)
+static std::atomic<LONG> gNascondendo{0};   // thread ancora in corso (all'uscita si aspettano un poco)
 
 static DWORD WINAPI nascondiNata(LPVOID p) {
     const HWND h = (HWND)p;
@@ -1142,13 +1310,24 @@ static DWORD WINAPI nascondiNata(LPVOID p) {
     const LONG_PTR ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
     // l'app ha 3 s per rispondere (si puo' star ancora avviando); una finestra che non legge mai i messaggi (vedi
     // risponde) non si tocca: SetWindowLongPtr la aspetterebbe per sempre, tenendo occupato il thread
-    if (!(ex & WS_EX_LAYERED) && risponde(h, 3000)) {
+    // (solo se ha ancora il segno messo da suCreata: un HWND riusato da una finestra nuova non ce l'ha, FW-AUDIT-007)
+    if (!(ex & WS_EX_LAYERED) && GetPropW(h, PROP_NASCOSTA) && risponde(h, 3000) && GetPropW(h, PROP_NASCOSTA)) {
         SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_LAYERED);
         ok = (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) && SetLayeredWindowAttributes(h, 0, 0, LWA_ALPHA);
         if (!ok && IsWindow(h)) SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+        // Il segno puo' essere stato tolto dal thread principale tra il controllo qui sopra e il cambio di stile
+        // (rendiVisibileFinestra, che con la finestra non ancora layered non poteva renderla opaca): nessuno la
+        // rimetterebbe visibile. La disfa questo thread, che l'ha appena cambiata (R20261113-010114-S1). Non lo fa il
+        // completamento sul thread principale: dopo il PostMessage l'HWND potrebbe essere di un'altra finestra
+        // (R20261113-011618-S1)
+        if (ok && !GetPropW(h, PROP_NASCOSTA)) {
+            SetLayeredWindowAttributes(h, 0, 255, LWA_ALPHA);
+            SetWindowLongPtrW(h, GWL_EXSTYLE, GetWindowLongPtrW(h, GWL_EXSTYLE) & ~WS_EX_LAYERED);
+            ok = FALSE;
+        }
     }
     PostMessageW(gMessaggi, WM_NATA_NASCOSTA, (WPARAM)h, ok);
-    InterlockedDecrement(&gNascondendo);
+    gNascondendo--;
     return 0;
 }
 
@@ -1159,10 +1338,10 @@ static void suCreata(HWND h) {
     if (gInAttesa.count(h) || GetPropW(h, PROP_NASCOSTA) || (GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED)) return;
     spegniTransizioniNative(h);
     SetPropW(h, PROP_NASCOSTA, (HANDLE)1);   // prima del thread: se FluidWin si chiudesse male, il guardiano la rimette a posto
-    InterlockedIncrement(&gNascondendo);
+    gNascondendo++;
     // nel pool di thread (vedi pool.h): "lungo" perche' aspetta l'app, che puo' essere ancora occupata ad avviarsi
     if (!pool::lancia(nascondiNata, h, THREAD_PRIORITY_NORMAL, true)) {
-        InterlockedDecrement(&gNascondendo); RemovePropW(h, PROP_NASCOSTA); riaccendiTransizioniNative(h); return;
+        gNascondendo--; RemovePropW(h, PROP_NASCOSTA); riaccendiTransizioniNative(h); return;
     }
     Attesa& a = gInAttesa[h] = {ora()};
     // Foto dello sfondo subito, senza aspettare il thread (un'attesa di pochi ms ne dura 15: la risoluzione dei timer
@@ -1183,6 +1362,13 @@ static void nataNascosta(HWND h, bool ok) {
     if (it != gInAttesa.end()) it->second.copertura.libera();   // (serve solo mentre il thread lavora)
     if (!ok) {   // non e' diventata trasparente (o non c'e' piu'): resta com'e'
         if (IsWindow(h)) RemovePropW(h, PROP_NASCOSTA);
+        if (it != gInAttesa.end()) gInAttesa.erase(it);
+        return;
+    }
+    // senza piu' il segno (tolto dopo che il thread l'ha controllato, e chi l'ha tolto l'ha rimessa visibile; oppure
+    // HWND gia' di un'altra finestra): non si tocca, ci si dimentica dell'attesa (R20261113-011618-S1)
+    if (!GetPropW(h, PROP_NASCOSTA)) {
+        logf("finestra nata %p: senza segno al completamento, lasciata com'e'", h);
         if (it != gInAttesa.end()) gInAttesa.erase(it);
         return;
     }
@@ -2089,7 +2275,11 @@ static void gestisciEvento(DWORD ev, HWND h) {
             if (auto at = gInAttesa.find(h); at != gInAttesa.end()) { at->second.copertura.libera(); gInAttesa.erase(at); }
             if (h == gTrascinoApp) gTrascinoApp = nullptr;
             if (h == gInSpostamento) gInSpostamento = nullptr;
-            for (auto it = gGelatine.begin(); it != gGelatine.end();) if (it->hwnd == h) { it->foto.libera(); it = gGelatine.erase(it); } else ++it;
+            // tutte le risorse, come a fine gelatina: prima si liberava solo la foto, la texture della copia viva restava
+            // fino all'uscita (audit FW-AUDIT-003). Non liberaGelatina: durante la distruzione IsWindow puo' essere
+            // ancora vero, e rimettere visibile una finestra che muore lancerebbe il thread di togliStile per niente
+            for (auto it = gGelatine.begin(); it != gGelatine.end();)
+                if (it->hwnd == h) { fermaViva(*it); it->viva.libera(); it->foto.libera(); it = gGelatine.erase(it); } else ++it;
             if (gDockOk && GetAncestor(h, GA_ROOT) == h) gDock.segnaCambiamento();
             break;
         case EVENT_OBJECT_LOCATIONCHANGE: {
@@ -2560,6 +2750,7 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
     // prova del riavvio (solo con --log): come se la GPU fosse stata persa
     if (m == WM_APP + 60 && gLog) { if (w == 1) gGenio.perso = true; else gDock.perso = true; PostMessageW(h, WM_NULL, 0, 0); return 0; }
     if (m == WM_NATA_NASCOSTA) { nataNascosta((HWND)w, l != 0); return 0; }
+    if (m == WM_STILE_TOLTO) { stileTolto((HWND)w, l != 0); return 0; }
     switch (m) {
         case WM_TRAY:
             if (LOWORD(l) == WM_RBUTTONUP || LOWORD(l) == WM_LBUTTONUP) {
@@ -2745,18 +2936,19 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
                     logf("notifiche ferme? stato %d da %llu s, in coda %zu, ultima lettura %llu s fa", st, (ora - tStato) / 1000, gBanner.inCoda(), lett ? (ora - lett) / 1000 : 0);
                 }
             }
+            controllaPrimoPiano();
             if (gDockOk) {
                 rinascondiBarreWindows();
                 const bool si = schermoInteroAttivo(); gLauncherTasto = !si;
                 const int tipo = si ? (giocoASchermoIntero() ? 2 : 1) : 0;
                 static int tipoPrima = 0;
-                if (gLog && tipo != tipoPrima) logf("notch: %s", tipo == 2 ? "gioco a schermo intero, nascosto" : tipo == 1 ? "app a schermo intero, sfuma col mouse" : "normale");
+                if (gLog && tipo != tipoPrima) logf("notch: %s", tipo == 2 ? "gioco a schermo intero, nascosto" : tipo == 1 ? "app a schermo intero (video), nascosto" : "normale");
                 tipoPrima = tipo;
                 gDock.schermoIntero(tipo); gDock.controllaFinestre(); gDock.timer(); if (gLog) logf("dock: mosse=%ld fotogrammi=%ld lente=%.2f", gDock.diagMosse, gDock.diagFotogrammi, gDock.diagLente()); } return 0;
         // spegnimento o disconnessione: Windows chiude il processo appena si torna da qui, e chiude anche il guardiano,
         // quindi i banner di Windows vanno rimessi adesso (senza, restavano spenti finche' FluidWin non veniva
         // riavviato e chiuso normalmente)
-        case WM_ENDSESSION: if (w) { impostaPausa(true); ripristinaTutte(); banner::ripristinaBannerWindows(); } return 0;
+        case WM_ENDSESSION: if (w) { impostaPausa(true); ripristinaTutte(); } return 0;   // (i banner di Windows restano spenti: vedi banner.h)
     }
     return DefWindowProcW(h, m, w, l);
 }
@@ -2764,23 +2956,93 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
 // ---------------------------------------------------------------------------------------------
 // Guardiano: processo separato che rimette a posto le finestre se FluidWin termina in modo anomalo
 
-static int guardiano(DWORD pid) {
-    HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pid);
-    if (p) { WaitForSingleObject(p, INFINITE); CloseHandle(p); }
-    ripristinaTutte();
-    banner::ripristinaBannerWindows();   // FluidWin non c'e' piu': tornano i banner di Windows
+// Il guardiano riceve due maniglie ereditate (non nomi ne' PID da riaprire): il processo di FluidWin da aspettare e un
+// evento "fermati" senza nome, che FluidWin accende in un riavvio voluto perche' il guardiano finisca senza rimettere
+// a posto (altrimenti, finito il FluidWin vecchio, rimetterebbe in vista la barra mentre il nuovo la nasconde).
+// Ereditate dalla nascita, valgono anche se FluidWin e' gia' finito quando il guardiano parte (intermedio lento) e non
+// si confondono con un altro FluidWin che riceva lo stesso PID; nessun altro processo puo' aprire l'evento per nome.
+// Prima: PID riaperto con OpenProcess ed evento con nome dal PID (R20261113-115217-S1, R20261113-120006-S1).
+// Il PID resta sulla riga di comando solo come ripiego, se le maniglie non fossero valide.
+static int guardiano(DWORD pid, HANDLE proc, HANDLE ferma) {
+    const HANDLE h[2] = {ferma, proc};   // il segnale per primo: se arrivano insieme (riavvio) vince lui
+    DWORD r = proc && ferma ? WaitForMultipleObjects(2, h, FALSE, INFINITE) : WAIT_FAILED;
+    if (r == WAIT_FAILED) {   // maniglie non valide: come prima, il processo dal PID (e il segnale, se c'e')
+        if (HANDLE p = OpenProcess(SYNCHRONIZE, FALSE, pid)) {
+            const HANDLE h2[2] = {ferma, p};
+            r = ferma && WaitForSingleObject(ferma, 0) != WAIT_FAILED ? WaitForMultipleObjects(2, h2, FALSE, INFINITE) : WaitForSingleObject(p, INFINITE) + 1;
+            CloseHandle(p);
+        } else if (ferma && WaitForSingleObject(ferma, 0) == WAIT_OBJECT_0) r = WAIT_OBJECT_0;
+    }
+    if (r == WAIT_OBJECT_0) ExitProcess(0);   // riavvio voluto: ci pensa il FluidWin nuovo
+    ripristinaTutte(true);   // (i banner di Windows restano spenti finche' l'opzione e' accesa: vedi banner.h)
+    // (un thread di ripristino rimasto appeso dentro un'altra app non deve tenere vivo il guardiano: ExitProcess lo
+    // chiude senza aspettarlo; il ritorno normale passerebbe dai distruttori statici con quel thread ancora attivo)
+    ExitProcess(0);
     return 0;
 }
 
-static HANDLE gGuardiano = nullptr;   // il suo processo: in un riavvio voluto si ferma prima (vedi riavvia)
+static HANDLE gFermaGuardiano = nullptr;   // l'evento qui sopra (ereditabile, senza nome)
+static HANDLE gIoPerGuardiano = nullptr;   // questo processo, ereditabile, solo SYNCHRONIZE
+
+// Avvia FluidWin.exe <argomento> <pid> <processo> <evento> lasciandogli ereditare solo quelle due maniglie
+static bool avviaConManiglie(const wchar_t* argomento, DWORD pid, HANDLE proc, HANDLE ferma, PROCESS_INFORMATION& pi) {
+    wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    // sulla riga di comando solo le maniglie che il figlio eredita davvero (0 le altre): un valore non ereditato nel
+    // figlio non e' quell'oggetto, e potrebbe essere un altro (R20261113-120814-S1)
+    HANDLE eredita[2]; DWORD quante = 0;
+    if (proc) eredita[quante++] = proc;
+    if (ferma) eredita[quante++] = ferma;
+    wchar_t cmd[MAX_PATH + 128];
+    swprintf(cmd, MAX_PATH + 128, L"\"%ls\" %ls %lu %llu %llu", exe, argomento, pid, (unsigned long long)(UINT_PTR)proc, (unsigned long long)(UINT_PTR)ferma);
+    if (!quante) {   // nessuna maniglia: niente da ereditare, il guardiano usera' il PID
+        STARTUPINFOW s{}; s.cb = sizeof(s);
+        return CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &s, &pi);
+    }
+    SIZE_T n = 0;
+    InitializeProcThreadAttributeList(nullptr, 1, 0, &n);
+    std::vector<char> spazio(n);
+    auto lista = (LPPROC_THREAD_ATTRIBUTE_LIST)spazio.data();
+    if (!InitializeProcThreadAttributeList(lista, 1, 0, &n)) return false;
+    bool ok = UpdateProcThreadAttribute(lista, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, eredita, quante * sizeof(HANDLE), nullptr, nullptr);
+    STARTUPINFOEXW si{}; si.StartupInfo.cb = sizeof(si); si.lpAttributeList = lista;
+    ok = ok && CreateProcessW(nullptr, cmd, nullptr, nullptr, TRUE, CREATE_NO_WINDOW | EXTENDED_STARTUPINFO_PRESENT, nullptr, nullptr, &si.StartupInfo, &pi);
+    DeleteProcThreadAttributeList(lista);
+    return ok;
+}
+
+// Il guardiano non e' figlio di FluidWin: "Termina albero processi" (e "Termina attivita'" sul gruppo FluidWin) di
+// Gestione attivita' chiude il processo e i suoi figli, e con il guardiano chiuso insieme barra di Windows e finestre
+// restavano com'erano fino al prossimo avvio (provato con taskkill /T). Lo avvia un processo intermedio
+// (--lancia-guardiano) che finisce subito: il guardiano resta senza genitore vivo, fuori dall'albero. L'intermedio
+// eredita le due maniglie e le passa al guardiano; esce con 1 se lo ha creato, 0 se non c'e' riuscito
+static int lanciaGuardiano(DWORD pid, HANDLE proc, HANDLE ferma) {   // il processo intermedio
+    PROCESS_INFORMATION pi;
+    if (!avviaConManiglie(L"--guardiano", pid, proc, ferma, pi)) ExitProcess(0);
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+    ExitProcess(1);
+    return 0;
+}
 
 static void avviaGuardiano() {
-    wchar_t exe[MAX_PATH]; GetModuleFileNameW(nullptr, exe, MAX_PATH);
-    wchar_t cmd[MAX_PATH + 64]; swprintf(cmd, MAX_PATH + 64, L"\"%ls\" --guardiano %lu", exe, GetCurrentProcessId());
-    STARTUPINFOW si{}; si.cb = sizeof(si); PROCESS_INFORMATION pi;
-    if (CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
-        CloseHandle(pi.hThread); gGuardiano = pi.hProcess;
+    SECURITY_ATTRIBUTES sa{sizeof(sa), nullptr, TRUE};   // ereditabile
+    gFermaGuardiano = CreateEventW(&sa, TRUE, FALSE, nullptr);   // (manuale: resta acceso per tutti i guardiani)
+    if (!DuplicateHandle(GetCurrentProcess(), GetCurrentProcess(), GetCurrentProcess(), &gIoPerGuardiano, SYNCHRONIZE, TRUE, 0)) gIoPerGuardiano = nullptr;
+    if (!gFermaGuardiano || !gIoPerGuardiano) logf("guardiano: maniglie non create (%lu), ripiego sul PID", GetLastError());
+    PROCESS_INFORMATION pi;
+    if (gFermaGuardiano && gIoPerGuardiano && avviaConManiglie(L"--lancia-guardiano", GetCurrentProcessId(), gIoPerGuardiano, gFermaGuardiano, pi)) {
+        CloseHandle(pi.hThread);
+        DWORD esito = 0;
+        const bool finito = WaitForSingleObject(pi.hProcess, 5000) == WAIT_OBJECT_0 && GetExitCodeProcess(pi.hProcess, &esito);
+        CloseHandle(pi.hProcess);
+        if (finito && esito == 1) { logf("guardiano avviato fuori dall'albero dei processi"); return; }
+        // Un secondo guardiano solo se l'intermedio dice di non averlo creato (0). Lento, o caduto con un altro codice:
+        // il guardiano puo' esserci gia', e non se ne avvia un altro (due insieme rimetterebbero a posto le stesse
+        // finestre); il segnale, ereditato, ferma comunque in un riavvio anche uno che parte in ritardo
+        if (!finito || esito != 0) { logf("guardiano: processo intermedio non concluso (%s, codice %lu), guardiano non confermato", finito ? "finito" : "dopo 5 s", esito); return; }
     }
+    // ripiego: figlio diretto, come prima (meglio un guardiano nell'albero che nessuno)
+    logf("guardiano: processo intermedio non riuscito, avviato come figlio");
+    if (avviaConManiglie(L"--guardiano", GetCurrentProcessId(), gIoPerGuardiano, gFermaGuardiano, pi)) { CloseHandle(pi.hThread); CloseHandle(pi.hProcess); }
 }
 
 // Riavvio di FluidWin (la GPU e' stata persa: dock e genio non si possono piu' disegnare). Parte un FluidWin nuovo,
@@ -2797,11 +3059,11 @@ static void riavvia(const char* perche) {
     // (se non riesce non si riprova a ogni fotogramma: FluidWin resta com'e', senza dock ne' genio)
     if (!CreateProcessW(nullptr, cmd, nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) { logf("riavvio non riuscito (%lu)", GetLastError()); return; }
     CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
-    if (gGuardiano) { TerminateProcess(gGuardiano, 0); CloseHandle(gGuardiano); gGuardiano = nullptr; }
+    if (gFermaGuardiano) SetEvent(gFermaGuardiano);   // tutti i guardiani di questo FluidWin finiscono senza ripristinare
     PostQuitMessage(0);
 }
 
-static LONG WINAPI suCrash(EXCEPTION_POINTERS*) { ripristinaTutte(); banner::ripristinaBannerWindows(); return EXCEPTION_CONTINUE_SEARCH; }
+static LONG WINAPI suCrash(EXCEPTION_POINTERS*) { ripristinaTutte(); return EXCEPTION_CONTINUE_SEARCH; }
 
 // ---------------------------------------------------------------------------------------------
 // Un fotogramma: animazioni e dock
@@ -2833,7 +3095,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     int argc; wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     bool riavviato = false, vuoleLog = false;
     for (int i = 1; argv && i < argc; i++) {
-        if (!wcscmp(argv[i], L"--guardiano") && i + 1 < argc) { const DWORD pid = wcstoul(argv[i + 1], nullptr, 10); LocalFree(argv); return guardiano(pid); }
+        // --guardiano / --lancia-guardiano <pid> <processo> <evento> (maniglie ereditate: vedi guardiano)
+        const bool g = !wcscmp(argv[i], L"--guardiano"), lg = !wcscmp(argv[i], L"--lancia-guardiano");
+        if ((g || lg) && i + 1 < argc) {
+            const DWORD pid = wcstoul(argv[i + 1], nullptr, 10);
+            const HANDLE proc = i + 2 < argc ? (HANDLE)(UINT_PTR)wcstoull(argv[i + 2], nullptr, 10) : nullptr;
+            const HANDLE ferma = i + 3 < argc ? (HANDLE)(UINT_PTR)wcstoull(argv[i + 3], nullptr, 10) : nullptr;
+            LocalFree(argv);
+            return g ? guardiano(pid, proc, ferma) : lanciaGuardiano(pid, proc, ferma);
+        }
         // riavvio (vedi riavvia): prima si aspetta che il FluidWin di prima abbia finito di rimettere tutto a posto
         if (!wcscmp(argv[i], L"--dopo") && i + 1 < argc) {
             riavviato = true;
@@ -2851,6 +3121,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (riavviato) logf("FluidWin riavviato");
 
     ripristinaTutte();          // recupero da un'eventuale chiusura anomala precedente
+    riprendiPrimoPiano();
     avviaGuardiano();
     SetUnhandledExceptionFilter(suCrash);
     SetPriorityClass(GetCurrentProcess(), ABOVE_NORMAL_PRIORITY_CLASS);
@@ -2934,12 +3205,15 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.cambiato = applicaImpostazioni;
     gImpostazioni.copiaDiagnostica = copiaDiagnostica;
     gImpostazioni.registro = [](const char* s) { logf("%s", s); };
-    gDock.impostazioni = apriImpostazioni;
+    gDock.impostazioni = [](const RECT* da) { gImpostazioni.raggioWindhawk = raggio::windhawk(); gImpostazioni.apri(da); };
+    gImpostazioni.tornaAlCentro = [] { if (gDockOk) gDock.riapriControllo(); };
+    gImpostazioni.dockSu = [](bool b) { if (gDockOk) gDock.tieniSu(b); };
+    gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };
     gDock.riavviami = riavvia;
     applicaImpostazioni();
     // banner di FluidWin spenti: quelli di Windows tornano com'erano anche se l'ultima chiusura e' stata brusca
     // (FluidWin e guardiano chiusi insieme, per esempio togliendo la corrente)
-    if (!impostazioni::valori().banner) banner::ripristinaBannerWindows();
+    if (!impostazioni::valori().banner) if (const int restano = banner::ripristinaBannerWindows()) logf("banner di Windows: %s %d", restano < 0 ? "chiave delle copie non apribile, niente ripristinato" : "copie non ripristinate (restano):", restano);   // opzione spenta: banner di Windows come prima
     SetTimer(gMessaggi, 7, 60, nullptr);   // angolo della panoramica
 
     if (gDockOk) {
@@ -3002,13 +3276,16 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (gThreadMouse) PostThreadMessageW(gThreadMouse, WM_QUIT, 0, 0);
     impostaPausa(true);
     if (gDockOk) gDock.chiudi();
-    banner::ripristinaBannerWindows();   // senza FluidWin tornano i banner di Windows (alla prossima apertura si rispengono)
+    gBanner.chiudiLettore();
     togliPrimoPiano();
     appunti::Cronologia::io().ferma();
     if (gOsdOk) gOsd.chiudi();
     // finestre appena create che un thread sta rendendo trasparenti: si aspetta che finisca (poco: con un'app
     // bloccata il thread non cambia niente finche' non risponde), poi le rimette a posto ripristinaTutte
-    for (int i = 0; i < 50 && gNascondendo > 0; i++) Sleep(10);
+    // Lo stesso per quelli che tolgono il nostro stile layered (togliStile); poi smettono di riprovare e quelle rimaste
+    // (app bloccate) le prende ripristinaTutte, che ne lascia il segno per il prossimo giro se ancora non rispondono
+    for (int i = 0; i < 50 && (gNascondendo > 0 || gTogliendo > 0); i++) Sleep(10);
+    gFineStile = true;
     ripristinaTutte();
     Shell_NotifyIconW(NIM_DELETE, &gIcona);
     if (gLog) fclose(gLog);

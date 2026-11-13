@@ -5,6 +5,7 @@
 #pragma once
 #include "vetro.h"
 #include "menu.h"
+#include "altrui.h"
 #include <windowsx.h>
 #include <vector>
 #include <functional>
@@ -46,7 +47,7 @@ public:
         if (f.empty()) return nullptr;
         const int n = (int)f.size();
         const HWND h = f[(((passi - 1) % n) + n) % n];
-        if (IsIconic(h)) ShowWindow(h, SW_RESTORE);
+        if (IsIconic(h)) ripristinaAltrui(h);   // (un'app bloccata non ferma FluidWin; portaDavanti ripiega da sola)
         portaDavanti(h);
         return h;
     }
@@ -78,7 +79,7 @@ public:
         std::sort(perZ.begin(), perZ.end(), [](const Elemento* a, const Elemento* b) { return a->z > b->z; });
         for (Elemento* e : perZ) if (FAILED(DwmRegisterThumbnail(v.fin, e->h, &e->th))) e->th = nullptr;
         prima = GetForegroundWindow();
-        inCorso = true; chiudendo = false; scelta = nullptr; sopra = -1; k = 0;
+        inCorso = true; chiudendo = false; giaDavanti = false; scelta = nullptr; sopra = -1; k = 0;
         altTab = daAltTab; ordZ.clear(); GetCursorPos(&mouseInizio);
         if (daAltTab) {
             // Tab va avanti nell'ordine di sovrapposizione (le ultime usate prima), che e' anche quello della griglia;
@@ -101,8 +102,10 @@ public:
         ShowWindow(v.fin, SW_HIDE);
         inCorso = false;
         if (scelta && IsWindow(scelta)) {
-            if (IsIconic(scelta)) ShowWindow(scelta, SW_RESTORE);
-            portaDavanti(scelta);
+            if (!giaDavanti) {
+                if (IsIconic(scelta)) ripristinaAltrui(scelta);   // (vedi vaiDiretta)
+                portaDavanti(scelta);
+            }
             wchar_t c[48] = L""; GetClassNameW(scelta, c, 48);
             diag += L"; scelta " + std::wstring(c) + (GetForegroundWindow() == scelta ? L" (davanti)" : L" (NON davanti)");
         } else {
@@ -171,6 +174,7 @@ private:
     RECT schermo{};
     HWND prima = nullptr, scelta = nullptr;
     bool inCorso = false, chiudendo = false;
+    bool giaDavanti = false;   // la scelta e' gia' stata portata davanti all'inizio della chiusura (vedi ciclo)
     int sopra = -1;
     double k = 0;   // 0 finestre al loro posto, 1 griglia
 
@@ -300,11 +304,20 @@ private:
                 TranslateMessage(&msg); DispatchMessageW(&msg);
             }
             const double t = ora();
-            if (chiudendo && tC < 0) tC = t;
+            if (chiudendo && tC < 0) {
+                tC = t;
+                // La finestra scelta viene davanti subito, sotto la panoramica che si chiude: prima arrivava solo a
+                // chiusura finita, 280-300 ms dopo aver lasciato Alt (misurato), e Alt+Tab sembrava lento. Le ridotte a
+                // icona restano a dopo: ripristinarle fa partire il genio, che a panoramica aperta non si disegna
+                // (WM_ACTIVATE "inattiva" non annulla niente: chiudendo e' gia' vero)
+                if (scelta && IsWindow(scelta) && !IsIconic(scelta)) { portaDavanti(scelta); giaDavanti = true; }
+            }
+            // con Alt+Tab animazioni piu' corte (come il selettore di Windows, si usa di corsa)
+            const double durApri = altTab ? 0.22 : 0.30, durChiudi = altTab ? 0.20 : 0.26;
             double nuovo;
-            if (tC < 0) nuovo = vetro::uscita(t / 0.30);                       // apertura: verso la griglia
-            else nuovo = std::min(k, 1.0) * (1 - vetro::uscita((t - tC) / 0.26));   // chiusura: tutte tornano al loro posto
-            if (tC >= 0 && t - tC >= 0.26) { k = 0; aggiornaMiniature(); DwmFlush(); return; }
+            if (tC < 0) nuovo = vetro::uscita(t / durApri);                       // apertura: verso la griglia
+            else nuovo = std::min(k, 1.0) * (1 - vetro::uscita((t - tC) / durChiudi));   // chiusura: tutte tornano al loro posto
+            if (tC >= 0 && t - tC >= durChiudi) { k = 0; aggiornaMiniature(); DwmFlush(); return; }
             const bool cambia = std::abs(nuovo - k) > 1e-4;
             k = nuovo;
             if (cambia) { aggiornaMiniature(); disegna(); }

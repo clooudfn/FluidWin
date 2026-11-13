@@ -19,6 +19,7 @@
 #include <cmath>
 #include <cstring>
 #include <vector>
+#include <atomic>
 
 namespace onda {
 
@@ -142,7 +143,9 @@ public:
         const LONG s = InterlockedExchange(&richiesta, 0);
         if (s == 1) SetWindowPos(fin, sotto && IsWindowVisible(sotto) ? sotto : HWND_TOPMOST, z.left, z.top, z.right - z.left, z.bottom - z.top,
                                  SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        else if (s == 2) ShowWindow(fin, SW_HIDE);
+        // (non se nel frattempo si e' riaperta: il thread puo' aver deciso "nascondi" appena prima di apri(),
+        // R20261113-010114-S2; la riapertura la rimostra comunque al suo primo fotogramma)
+        else if (s == 2 && !aperta) ShowWindow(fin, SW_HIDE);
     }
 
     HWND finestra() const { return fin; }
@@ -152,7 +155,7 @@ public:
     // schermo invece che dei timer di Windows (~64 al secondo)
     UINT messaggio = RegisterWindowMessageW(L"FluidWin.Onda");
     HWND avvisa = nullptr;
-    volatile bool battito = false;
+    std::atomic<bool> battito{false};   // (flag letti dal thread dell'onda: atomici, FW-AUDIT-006)
     void battitoRicevuto() { InterlockedExchange(&battitoInViaggio, 0); }
     bool attiva() const { return fin && !rotta && aperta; }
 
@@ -164,8 +167,8 @@ private:
     struct { float x, y; } centro{};
     float scala = 1;
     double t0 = 0, tChiudi = -1;
-    volatile bool aperta = false, mostrata = false;
-    volatile bool rotta = false;
+    std::atomic<bool> aperta{false}, mostrata{false};
+    std::atomic<bool> rotta{false};
     volatile LONG richiesta = 0;   // 1 mostra, 2 nascondi
     volatile LONG battitoInViaggio = 0;
     bool fotoNuova = false;            // il thread deve fotografare lo schermo (apertura nuova)
@@ -340,12 +343,18 @@ private:
             if (!mostrata) { mostrata = true; chiedi(1); }   // primo fotogramma pronto: ora si puo' mostrare
             if (battito && avvisa && InterlockedCompareExchange(&battitoInViaggio, 1, 0) == 0) PostMessageW(avvisa, messaggio, 1, 0);
             if (sp <= 0) {   // sfumata: sparisce e il thread si riaddormenta
-                const float zero[4] = {0, 0, 0, 0};
-                ctx->ClearRenderTargetView(rtv, zero); sc->Present(1, 0);
+                // Solo se la chiusura e' ancora quella di questo fotogramma: riaperta nel frattempo (Win+Tab di nuovo
+                // durante l'ultimo fotogramma) si continua, senza pulire ne' nascondere. Prima "nascondi" partiva
+                // comunque e l'onda nuova restava nascosta (audit FW-AUDIT-019)
                 EnterCriticalSection(&cs);
-                if (tChiudi >= 0 && tChiudi == fine) aperta = false;   // (riaperta nel frattempo: si continua)
+                const bool chiusa = tChiudi >= 0 && tChiudi == fine;
+                if (chiusa) aperta = false;
                 LeaveCriticalSection(&cs);
-                chiedi(2);
+                if (chiusa) {
+                    const float zero[4] = {0, 0, 0, 0};
+                    ctx->ClearRenderTargetView(rtv, zero); sc->Present(1, 0);
+                    chiedi(2);
+                }
             }
         }
     }
