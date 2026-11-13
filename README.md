@@ -96,6 +96,28 @@ Every feature can be turned on or off from the settings, divided into simple sec
 
 ...and a lot more.
 
+## What's new in 1.2.1
+
+A release focused on fixes and on the feedback received after 1.2.0.
+
+- **Dock:** a dot for each open window (up to three) and the list of windows in the right-click menu; apps with
+  untitled windows (and Discord, File Explorer, Teams, updated Store apps) are recognized as already open instead of
+  starting again or showing two icons.
+- **New Dock section in the settings:** auto-hide on or off, keep maximized windows above the dock, icon size, space
+  between icons, opacity and color. The notch can be turned off, and the time and date can be shown in the dock.
+- **Settings are easier to find:** right-click an empty spot of the dock (or the launcher or control center icon).
+- **Alt+Tab:** the overview follows the Tab order, and the chosen window comes forward as soon as you release Alt.
+- **The notch hides during full-screen videos** (and presentations), as it already did with games.
+- **Start with Windows** option.
+- **Lighter:** less memory and less work at start-up (the app list and its icons load only when you open the
+  launcher), and the notifications panel opens at once.
+- **Right-click menu:** a new right-click replaces the open menu; faster in folders with many files; scrolls when it
+  is too long.
+- **Safer restore:** if FluidWin is closed from Task Manager (even with "End process tree"), the Windows taskbar and
+  your windows go back to normal. An app that stops responding no longer freezes FluidWin, and many rare cases where a
+  window could stay transparent or "always on top" are fixed.
+- Many smaller fixes found by an independent code review.
+
 ## What's new in 1.2.0
 
 - The notch comes alive: volume, notifications, music, timer, shelf, microphone and camera dots.
@@ -133,7 +155,8 @@ You need **Windows 11**.
 ## How to close it
 
 Open the **control center** (the last icon on the right of the dock), then **In background**, **FluidWin**, **Exit**.
-From the same menu you can open the **settings** and turn each feature on or off.
+From the same menu you can open the **settings** and turn each feature on or off. You can also open them by
+right-clicking an empty spot of the dock.
 
 To remove it completely, close it and delete its folder.
 
