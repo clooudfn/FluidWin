@@ -249,8 +249,10 @@ inline auto Motore::controlloCompatto() const -> bool {
 #endif
     return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi) > altezzaMassimaP(); }
 inline auto Motore::altezzaControllo() const -> float {
-    if (!controlloCompatto()) return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi);
-    return std::round((430 + (sis.luminosita >= 0 ? 48 : 0)) * dpi);
+    // (luminosita' e batteria: una riga in piu' solo se il monitor si regola e se c'e' una batteria)
+    const int righe = (sis.luminosita >= 0 ? 1 : 0) + (sensori::Sensori::io().batteria >= 0 ? 1 : 0);
+    if (!controlloCompatto()) return std::round((518 + 52 * righe) * dpi);
+    return std::round((430 + 48 * righe) * dpi);
 }
 
 inline auto Motore::nascondiPannello() -> void {
@@ -985,6 +987,64 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
         wchar_t pl[16]; swprintf(pl, 16, L"%d%%", lum);
         pennello->SetColor(scuro && vl < 0.9f ? ink : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.7f));
         scrivi(pl, fmtNome, {rl.right - 56 * dpi, rl.top, rl.right - 8 * dpi, rl.bottom});
+    }
+
+    // batteria (portatili): carica, se si sta caricando e quanto manca. Riempita come il volume: verde in carica,
+    // rossa sotto il 20% a batteria, bianca altrimenti. Il clic apre Alimentazione e batteria di Windows
+    if (const sensori::Sensori& se = sensori::Sensori::io(); se.batteria >= 0) {
+        y += sh + 8 * dpi;
+        const D2D1_RECT_F rb = {16 * dpi, y, PW - 16 * dpi, y + sh};
+        const float vb = std::clamp(se.batteria / 100.0f, 0.0f, 1.0f), riempito = larg * vb;
+        aggiungi(rb, A_ENERGIA, 0);
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
+        dc->FillRoundedRectangle({rb, rr, rr}, pennello);
+        const bool verde = se.inCarica, rosso = !se.inCarica && se.batteria <= 20;
+        const D2D1_COLOR_F pieno = verde ? D2D1::ColorF(0.20f, 0.78f, 0.35f, 1) : rosso ? D2D1::ColorF(1.0f, 0.27f, 0.23f, 1)
+                                         : D2D1::ColorF(1, 1, 1, scuro ? 0.92f : 0.97f);
+        const D2D1_COLOR_F suPieno = (verde || rosso) ? D2D1::ColorF(1, 1, 1, 0.95f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.85f);
+        dc->PushAxisAlignedClip({rb.left, rb.top, rb.left + riempito, rb.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        pennello->SetColor(pieno);
+        dc->FillRoundedRectangle({rb, rr, rr}, pennello);
+        dc->PopAxisAlignedClip();
+        // colore del testo: sul pieno o sul vuoto, secondo dove comincia
+        auto inchiostroIn = [&](float x) { return x < rb.left + riempito ? suPieno : ink; };
+        // simbolo: la pila con la sua carica, e il fulmine con l'alimentatore collegato
+        {
+            const float cx = rb.left + 26 * dpi, cy = (rb.top + rb.bottom) / 2, w = 10 * dpi, h = 5.5f * dpi;
+            pennello->SetColor(inchiostroIn(cx));
+            dc->DrawRoundedRectangle({{cx - w, cy - h, cx + w - 2 * dpi, cy + h}, 2 * dpi, 2 * dpi}, pennello, 1.4f * dpi);
+            dc->FillRoundedRectangle({{cx + w - 1 * dpi, cy - 2 * dpi, cx + w + 1 * dpi, cy + 2 * dpi}, 0.8f * dpi, 0.8f * dpi}, pennello);
+            if (se.inCarica) {   // fulmine
+                ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* k = nullptr;
+                if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&k))) {
+                    k->BeginFigure({cx + 1.5f * dpi, cy - 4.5f * dpi}, D2D1_FIGURE_BEGIN_FILLED);
+                    const D2D1_POINT_2F p[] = {{cx - 3 * dpi, cy + 0.8f * dpi}, {cx - 0.2f * dpi, cy + 0.8f * dpi}, {cx - 1.5f * dpi, cy + 4.5f * dpi},
+                                               {cx + 3 * dpi, cy - 0.8f * dpi}, {cx + 0.2f * dpi, cy - 0.8f * dpi}};
+                    k->AddLines(p, 5); k->EndFigure(D2D1_FIGURE_END_CLOSED); k->Close();
+                    dc->FillGeometry(g, pennello);
+                }
+                if (k) k->Release();
+                if (g) g->Release();
+            } else {             // carica dentro la pila
+                const float l = (2 * w - 5 * dpi) * vb;
+                dc->FillRoundedRectangle({{cx - w + 1.5f * dpi, cy - h + 1.5f * dpi, cx - w + 1.5f * dpi + l, cy + h - 1.5f * dpi}, 1 * dpi, 1 * dpi}, pennello);
+            }
+        }
+        // stato: in carica, collegato (carica completa), oppure a batteria con il tempo che manca
+        std::wstring stato;
+        if (se.caricando) stato = testi::t(L"In carica", L"Charging");
+        else if (se.inCarica) stato = testi::t(L"Collegato", L"Plugged in");
+        else if (se.minutiRestanti >= 0) {
+            wchar_t b[64];
+            if (se.minutiRestanti >= 60) swprintf(b, 64, testi::t(L"%d h %02d min rimasti", L"%d h %02d min left"), se.minutiRestanti / 60, se.minutiRestanti % 60);
+            else swprintf(b, 64, testi::t(L"%d min rimasti", L"%d min left"), se.minutiRestanti);
+            stato = b;
+        } else stato = testi::t(L"A batteria", L"On battery");
+        pennello->SetColor(inchiostroIn(rb.left + 50 * dpi));
+        scrivi(stato, fmtSotto, {rb.left + 48 * dpi, rb.top, rb.right - 64 * dpi, rb.bottom});   // (a sinistra, dopo il simbolo)
+        wchar_t pb[16]; swprintf(pb, 16, L"%d%%", se.batteria);
+        pennello->SetColor(inchiostroIn(rb.right - 30 * dpi));
+        scrivi(pb, fmtNome, {rb.right - 56 * dpi, rb.top, rb.right - 8 * dpi, rb.bottom});
     }
 
     // uscita audio
