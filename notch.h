@@ -191,6 +191,7 @@ private:
 
     // contenuti
     float livello = 0, livelloVis = 0; bool muto = false; double fineVolume = 0;
+    static constexpr float AV_SIMBOLO = 22, AV_SPAZIO = 9, AV_MARGINE = 18;   // avviso: simbolo, spazio, margini (px a 100%)
     std::wstring testoAvviso; bool avvisoAcceso = false; double fineAvviso = 0; float larghezzaAvviso = 0;
     int simboloAvviso = 0, valoreAvviso = -1;
     ULONGLONG secondoTimer = 0; UINT versioneSensori = 0;
@@ -267,7 +268,8 @@ private:
             case VOLUME:   w = 292 * d; h = 32 * d; R = 14 * d; break;
             case NOTIFICA: w = 372 * d; h = 78 * d; R = 26 * d; break;
             case SCAFFALE: w = 372 * d; h = 96 * d; R = 26 * d; break;
-            case AVVISO:   w = std::clamp(larghezzaAvviso + 76 * d, 220 * d, 372 * d); h = 32 * d; R = 14 * d; break;
+            // avviso: largo quanto simbolo e testo con un margine uguale ai due lati (vedi AVVISO in disegna)
+            case AVVISO:   w = std::clamp(larghezzaAvviso + (AV_SIMBOLO + AV_SPAZIO + 2 * AV_MARGINE) * d, 150 * d, 372 * d); h = 32 * d; R = 14 * d; break;
             case TIMER:    w = largoOra + 104 * d; h = 22 * d; R = 9 * d; break;
             case TIMER_APERTO: w = 312 * d; h = 60 * d; R = 24 * d; break;
             case SUONA:    w = 300 * d; h = 42 * d; R = 20 * d; break;
@@ -672,11 +674,16 @@ private:
                 }
                 break;
             case AVVISO: {
-                const float cx = L + 24 * d, cy = h / 2;
+                // simbolo e testo come un blocco solo, centrato nel notch (prima stavano a sinistra di un notch largo almeno
+                // 220 px, e un testo corto lasciava un vuoto a destra)
+                const float tw = std::min(larghezzaAvviso, w - (AV_SIMBOLO + AV_SPAZIO + 2 * AV_MARGINE) * d);
+                const float x0 = L + (w - (AV_SIMBOLO + AV_SPAZIO) * d - tw) / 2;
+                const float cx = x0 + AV_SIMBOLO * d / 2, cy = h / 2;
                 if (simboloAvviso == sensori::S_BATTERIA) batteriaSimbolo(cx, cy, a, valoreAvviso, avvisoAcceso);
                 else if (simboloAvviso == sensori::S_CUFFIE) cuffie(cx, cy, a);
                 else puntina(cx, cy, a, avvisoAcceso);
-                scrivi(testoAvviso, fPiccolo, {L + 44 * d, 0, L + w - 18 * d, h}, a);
+                const float xt = x0 + (AV_SIMBOLO + AV_SPAZIO) * d;
+                scrivi(testoAvviso, fPiccolo, {xt, 0, std::min(xt + tw + 4 * d, L + w - AV_MARGINE * d / 2), h}, a);
                 break;
             }
             case MUSICA: {

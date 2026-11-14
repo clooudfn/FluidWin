@@ -220,7 +220,11 @@ public:
         if (quasiNera()) {
             const POINT centro = {(visibile.left + visibile.right) / 2, (visibile.top + visibile.bottom) / 2};
             HWND sopra = WindowFromPoint(centro);
-            if (sopra && GetAncestor(sopra, GA_ROOT) == h && BitBlt(mem, 0, 0, ww, wh, scr, wr.left, wr.top, SRCCOPY)) { GdiFlush(); ok = TRUE; fotoDaSchermo = true; }
+            // (solo se e' davvero opaca: una finestra resa quasi trasparente da FluidWin mentre la anima e' ancora
+            // "sotto il punto", ma sullo schermo si vede la foto o lo sfondo, non lei: R20261114-022427-S8)
+            COLORREF k = 0; BYTE alfa = 255; DWORD fl = 0;
+            const bool opaca = !(GetWindowLongPtrW(h, GWL_EXSTYLE) & WS_EX_LAYERED) || (GetLayeredWindowAttributes(h, &k, &alfa, &fl) && (!(fl & LWA_ALPHA) || alfa == 255));
+            if (opaca && sopra && GetAncestor(sopra, GA_ROOT) == h && BitBlt(mem, 0, 0, ww, wh, scr, wr.left, wr.top, SRCCOPY)) { GdiFlush(); ok = TRUE; fotoDaSchermo = true; }
         }
         const bool fatto = ok && carica(h, visibile, wr, (const UINT*)bits, out);
         SelectObject(mem, vecchio); DeleteDC(mem); DeleteObject(dib); ReleaseDC(nullptr, scr);

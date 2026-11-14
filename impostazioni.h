@@ -3,6 +3,9 @@
 #pragma once
 #include "vetro.h"
 #include "testi.h"
+#include "cursori.h"
+#include "pool.h"
+#include <shellapi.h>   // DragAcceptFiles: il pacchetto di cursori si trascina nella finestra
 #include <windowsx.h>
 #include <commdlg.h>   // ChooseColorW: il colore del dock scelto a piacere
 #include <vector>
@@ -33,6 +36,7 @@ struct Valori {
     DWORD dockColore = 0;         // colore del fondo del dock: 0 automatico (tema), altrimenti 0x01RRGGBB
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     int lingua = 0;               // lingua dell'interfaccia (testi::ITALIANO o testi::INGLESE)
+    std::wstring cursore;         // pacchetto di cursori di FluidWin in uso ("" = quelli di Windows; vedi cursori.h)
 };
 constexpr int OPACITA_MIN = 20, OPACITA_PASSO = 5;
 constexpr int ICONE_MIN = 32, ICONE_MAX = 64, ICONE_PASSO = 2;
@@ -51,6 +55,14 @@ inline DWORD leggiDword(const wchar_t* nome, DWORD predefinito) {
 
 inline void scriviDword(const wchar_t* nome, DWORD v) {
     RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, nome, REG_DWORD, &v, sizeof(v));
+}
+
+inline std::wstring leggiTesto(const wchar_t* nome) {
+    wchar_t b[256] = L""; DWORD n = sizeof(b);
+    return RegGetValueW(HKEY_CURRENT_USER, CHIAVE, nome, RRF_RT_REG_SZ, nullptr, b, &n) == ERROR_SUCCESS ? b : L"";
+}
+inline void scriviTesto(const wchar_t* nome, const std::wstring& v) {
+    RegSetKeyValueW(HKEY_CURRENT_USER, CHIAVE, nome, REG_SZ, v.c_str(), (DWORD)((v.size() + 1) * sizeof(wchar_t)));
 }
 
 // Avvio con Windows: il valore "FluidWin" nella chiave Run dell'utente (come le altre app che si aprono all'accesso;
@@ -108,6 +120,8 @@ inline void carica() {
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.lingua = leggiDword(L"Lingua", (DWORD)testi::predefinita()) == testi::INGLESE ? testi::INGLESE : testi::ITALIANO;
     testi::lingua() = v.lingua;
+    v.cursore = leggiTesto(L"Cursore");
+    if (!cursori::esiste(v.cursore)) v.cursore.clear();   // (pacchetto cancellato a mano dalla cartella)
     // la capsula dei tasti non c'e' piu' (1.1.1): via i suoi valori rimasti dalle versioni prima
     RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"Capsula");
     RegDeleteKeyValueW(HKEY_CURRENT_USER, CHIAVE, L"CapsulaMisura");
@@ -124,6 +138,7 @@ inline void salva() {
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
     scriviDword(L"DockSpazio", v.dockSpazio);
+    scriviTesto(L"Cursore", v.cursore);
 }
 
 // ---- la finestra ----
@@ -178,6 +193,8 @@ public:
             fMarchio = v.formato(16 * d, DWRITE_FONT_WEIGHT_SEMI_BOLD);
         }
         valori().avvio = avvioAttivo();   // (puo' essere cambiato da Gestione attivita' mentre FluidWin era aperto)
+        DragAcceptFiles(v.fin, TRUE);
+        rileggiPacchetti();
         anim.clear();
         aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
         if (daCentro) { t0 -= 1000; k = 1; }   // il vetro c'e' gia' (prende il posto di quello del centro): niente dissolvenza
@@ -255,7 +272,9 @@ public:
             case WM_PAINT: disegna(); return true;
             // un'altra app prende il primo piano (clic altrove): aperte dal centro di controllo, si chiudono da sole.
             // (le finestre di FluidWin, come quella dei colori, non contano: l'app resta FluidWin)
-            case WM_ACTIVATEAPP: if (!w) chiudiFuori(); return false;
+            // Nella sezione Cursore no: per trascinarci un pacchetto si clicca prima il file in Esplora file, e quel clic
+            // le chiudeva (si chiudono con la x o con Esc)
+            case WM_ACTIVATEAPP: if (!w && sezione != S_CURSORE) chiudiFuori(); return false;
             case WM_ACTIVATE: {   // il centro di controllo riaperto dalla sua icona mentre queste erano aperte: lascia a lui
                 wchar_t c[32] = L"";
                 if (LOWORD(w) == WA_INACTIVE && l && daCentro && morph == 0 && GetClassNameW((HWND)l, c, 32) && !wcscmp(c, L"FluidWin.Pannello")) {
@@ -292,6 +311,42 @@ public:
                 else if (w == VK_DOWN || w == VK_UP) vaiASezione((sezione + (w == VK_DOWN ? 1 : SEZIONI - 1)) % SEZIONI);   // frecce: sezioni
                 return true;
             case WM_CLOSE: chiudi(); return true;
+            case WM_MOUSEWHEEL:   // sezione Cursore: l'elenco dei pacchetti scorre (non ci stanno tutti: R20261114-141207-S7)
+                if (sezione == S_CURSORE && !morph) {
+                    // (si sommano: ogni WHEEL_DELTA una riga; prima un delta di 60 per volta non scorreva mai, R20261114-142613)
+                    rotella += GET_WHEEL_DELTA_WPARAM(w);
+                    scorriCursori -= rotella / WHEEL_DELTA; rotella %= WHEEL_DELTA;
+                    disegna();
+                }
+                return true;
+            case WM_DROPFILES: {   // pacchetto di cursori trascinato nella finestra (anche fuori dalla sezione: ci si va)
+                HDROP hd = (HDROP)w;
+                wchar_t p[MAX_PATH] = L"";
+                const bool uno = DragQueryFileW(hd, 0, p, MAX_PATH) > 0;
+                DragFinish(hd);
+                if (uno) { vaiASezione(S_CURSORE); installa(p); }
+                return true;
+            }
+            case WM_CURSORI_INSTALLATI: {
+                cursori::Esito* e = (cursori::Esito*)l;
+                installando = false;
+                if (e->ok) {
+                    statoCursori = testi::t(L"Installato: ", L"Installed: ") + e->nome + L" (" + std::to_wstring(e->quanti) + testi::t(L" cursori)", L" cursors)");
+                    erroreCursori = false;
+                    valori().cursore = e->nome;   // si usa subito
+                    salva();
+                    if (cambiato) cambiato();
+                } else {
+                    const size_t bar = e->errore.find(L'|');
+                    statoCursori = testi::t(L"Non installato: ", L"Not installed: ") + (bar == std::wstring::npos ? e->errore : testi::t(e->errore.substr(0, bar).c_str(), e->errore.substr(bar + 1).c_str()));
+                    erroreCursori = true;
+                }
+                delete e;
+                rileggiPacchetti();
+                vetro::battito(v.fin, 1);
+                disegna();
+                return true;
+            }
             case WM_NCHITTEST: {   // si trascina dalla fascia in alto (non dalla x) e dalla testata della barra laterale
                 if (morph) return false;
                 POINT p{GET_X_LPARAM(l), GET_Y_LPARAM(l)}; ScreenToClient(v.fin, &p);
@@ -305,7 +360,7 @@ public:
 
 private:
     static constexpr float LARGO = 780, ALTO = 500, BARRA = 240;
-    enum { S_GENERALE, S_DOCK, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, SEZIONI };
+    enum { S_GENERALE, S_DOCK, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, S_CURSORE, SEZIONI };
     // nome e spiegazione in italiano e in inglese, sezione
     struct Voce { const wchar_t *nome, *name, *spiega, *explain; bool Valori::*campo; int sezione; };
     const std::vector<Voce> voci = {
@@ -408,6 +463,94 @@ private:
 
     static bool stato(const Voce& x) { return valori().*(x.campo); }
 
+    // ---- cursori (sezione Cursore): 700 la zona del pacchetto, 710 quelli di Windows, 720+i i pacchetti, 760+i rimuovi
+    static constexpr UINT WM_CURSORI_INSTALLATI = WM_APP + 50;
+    static constexpr int Z_PACCHETTO = 700, Z_WINDOWS = 710, Z_SCEGLI = 720, Z_RIMUOVI = 760, MAX_PACCHETTI = 30;
+    std::vector<cursori::Pacchetto> pacchetti;
+    std::vector<ID2D1Bitmap*> anteprime;   // la freccia di ogni pacchetto, fatta per il render target di giroAnteprime
+    unsigned giroAnteprime = ~0u;
+    bool installando = false, erroreCursori = false;
+    int scorriCursori = 0;   // prima riga mostrata dell'elenco (0 = "Cursori di Windows"): rotella del mouse
+    int rotella = 0;         // scatti piccoli della rotella (touchpad, rotelle ad alta precisione) messi da parte
+    std::wstring statoCursori;
+
+    void liberaAnteprime() { for (auto* b : anteprime) if (b) b->Release(); anteprime.clear(); }
+    void rileggiPacchetti() { pacchetti = cursori::elenco(); if ((int)pacchetti.size() > MAX_PACCHETTI) pacchetti.resize(MAX_PACCHETTI); liberaAnteprime(); }
+
+    // la freccia del pacchetto come bitmap (pixel premoltiplicati); nullptr se non si legge
+    ID2D1Bitmap* anteprima(const std::wstring& file, int lato) {
+        if (file.empty() || !v.rt) return nullptr;
+        HCURSOR c = (HCURSOR)LoadImageW(nullptr, file.c_str(), IMAGE_CURSOR, lato, lato, LR_LOADFROMFILE);
+        if (!c) c = LoadCursorFromFileW(file.c_str());
+        if (!c) return nullptr;
+        ICONINFO ii{}; ID2D1Bitmap* out = nullptr;
+        if (GetIconInfo(c, &ii) && ii.hbmColor) {
+            BITMAP bm{}; GetObject(ii.hbmColor, sizeof(bm), &bm);
+            const int w = bm.bmWidth, h = bm.bmHeight;
+            if (w > 0 && h > 0 && w <= 256 && h <= 256) {
+                std::vector<UINT> px((size_t)w * h);
+                BITMAPINFO bi{}; bi.bmiHeader = {sizeof(BITMAPINFOHEADER), w, -h, 1, 32, BI_RGB};
+                HDC scr = GetDC(nullptr); GetDIBits(scr, ii.hbmColor, 0, h, px.data(), &bi, DIB_RGB_COLORS); ReleaseDC(nullptr, scr);
+                // solo la parte disegnata (i cursori stanno in un angolo di un quadrato molto piu' grande: misurato su
+                // OutLier, la freccia occupa 15 x 15 px di 32 x 32)
+                int x0 = w, y0 = h, x1 = -1, y1 = -1;
+                for (int y = 0; y < h; y++) for (int x = 0; x < w; x++) if (px[(size_t)y * w + x] >> 24) { x0 = std::min(x0, x); y0 = std::min(y0, y); x1 = std::max(x1, x); y1 = std::max(y1, y); }
+                if (x1 >= x0 && y1 >= y0) {
+                    const int cw = x1 - x0 + 1, ch = y1 - y0 + 1;
+                    std::vector<UINT> taglio((size_t)cw * ch);
+                    for (int y = 0; y < ch; y++) for (int x = 0; x < cw; x++) {
+                        const UINT p = px[(size_t)(y0 + y) * w + x0 + x], a = p >> 24;   // Direct2D vuole i colori premoltiplicati
+                        taglio[(size_t)y * cw + x] = (a << 24) | ((((p >> 16) & 255) * a / 255) << 16) | ((((p >> 8) & 255) * a / 255) << 8) | ((p & 255) * a / 255);
+                    }
+                    v.rt->CreateBitmap(D2D1::SizeU(cw, ch), taglio.data(), cw * 4,
+                                       D2D1::BitmapProperties(D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_PREMULTIPLIED)), &out);
+                }
+            }
+        }
+        if (ii.hbmColor) DeleteObject(ii.hbmColor);
+        if (ii.hbmMask) DeleteObject(ii.hbmMask);
+        DestroyCursor(c);
+        return out;
+    }
+
+    // installazione in un thread (tar puo' metterci qualche secondo); la risposta torna con WM_CURSORI_INSTALLATI
+    void installa(const std::wstring& file) {
+        if (installando) return;
+        installando = true; erroreCursori = false;
+        statoCursori = testi::t(L"Installazione di ", L"Installing ") + cursori::nomeFile(file) + L"…";
+        struct Lavoro { std::wstring file; HWND fin; };
+        Lavoro* l = new Lavoro{file, v.fin};
+        if (!pool::lancia([](LPVOID p) -> DWORD {
+                Lavoro* l = (Lavoro*)p;
+                cursori::Esito* e = new cursori::Esito(cursori::installa(l->file));
+                if (!PostMessageW(l->fin, WM_CURSORI_INSTALLATI, 0, (LPARAM)e)) delete e;
+                delete l;
+                return 0;
+            }, l, THREAD_PRIORITY_BELOW_NORMAL, true)) {
+            delete l; installando = false; erroreCursori = true;
+            statoCursori = testi::t(L"Non installato: lavoro non partito", L"Not installed: job did not start");
+        }
+        vetro::battito(v.fin, 1);
+        disegna();
+    }
+
+    // clic sulla zona del pacchetto: lo si sceglie da una finestra (oltre che trascinandolo)
+    void scegliPacchetto() {
+        // (la finestra di scelta ha il suo ciclo dei messaggi: un clic che arriva mentre e' aperta non ne apre una
+        // seconda; misurato: un clic solo ne apriva due, una sopra l'altra)
+        static bool aperta = false;
+        if (aperta) return;
+        aperta = true;
+        if (registro) registro("impostazioni: scelta del pacchetto di cursori");
+        wchar_t p[MAX_PATH] = L"";
+        OPENFILENAMEW of{}; of.lStructSize = sizeof(of); of.hwndOwner = v.fin; of.lpstrFile = p; of.nMaxFile = MAX_PATH;
+        of.lpstrFilter = L"Cursori (.zip, .rar, .7z)\0*.zip;*.rar;*.7z\0\0";
+        of.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR;
+        const bool scelto = GetOpenFileNameW(&of) != FALSE;
+        aperta = false;
+        if (scelto) installa(p);
+    }
+
     int zonaIn(float x, float y) const {
         for (const auto& z : zone) if (x >= z.r.left && x < z.r.right && y >= z.r.top && y < z.r.bottom) return z.id;
         return -1;
@@ -431,12 +574,32 @@ private:
             disegna();
             return;
         }
+        if (id == Z_PACCHETTO) { if (!installando) scegliPacchetto(); return; }
+        if (id >= Z_WINDOWS && id < Z_RIMUOVI + MAX_PACCHETTI) {
+            if (id == Z_WINDOWS) valori().cursore.clear();
+            else if (id < Z_RIMUOVI) { const int i = id - Z_SCEGLI; if (i >= 0 && i < (int)pacchetti.size()) valori().cursore = pacchetti[i].nome; }
+            else {
+                const int i = id - Z_RIMUOVI;
+                if (i >= 0 && i < (int)pacchetti.size()) {
+                    const std::wstring n = pacchetti[i].nome;
+                    if (valori().cursore == n) { valori().cursore.clear(); salva(); if (cambiato) cambiato(); }   // prima via dallo schermo
+                    cursori::rimuovi(n);
+                    statoCursori = testi::t(L"Rimosso: ", L"Removed: ") + n; erroreCursori = false;
+                    rileggiPacchetti();
+                }
+            }
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
         if (id == 400) {   // diagnostica negli appunti
             if (copiaDiagnostica && copiaDiagnostica()) { copiataAlle = vetro::ms(); vetro::battito(v.fin, 1); }
             disegna();
             return;
         }
-        if (id >= 300) { vaiASezione(id - 300); return; }
+        if (id >= 300 && id < 300 + SEZIONI) { vaiASezione(id - 300); return; }
         if (id >= 100) { valori().lingua = id - 100; testi::lingua() = valori().lingua; }
         else if (id < (int)voci.size()) {
             bool& b = valori().*(voci[id].campo); b = !b;
@@ -471,6 +634,7 @@ private:
             case S_ANIMAZIONI: return testi::t(L"Animazioni", L"Animations");
             case S_NOTCH: return testi::t(L"Notch e notifiche", L"Notch & notifications");
             case S_TASTIERA: return testi::t(L"Tastiera e mouse", L"Keyboard and mouse");
+            case S_CURSORE: return testi::t(L"Cursore", L"Cursor");
         }
         return L"";
     }
@@ -500,6 +664,9 @@ private:
                 v.rt->DrawRoundedRectangle({{cx - 9 * d, cy - 5.5f * d, cx + 9 * d, cy + 5.5f * d}, 2 * d, 2 * d}, v.pen, sp);
                 for (int i = 0; i < 4; i++) v.rt->FillEllipse({{cx + (-5.5f + i * 3.7f) * d, cy - 1.5f * d}, 0.9f * d, 0.9f * d}, v.pen);
                 l(-4, 2.5f, 4, 2.5f); break;
+            case S_CURSORE:    // freccia del mouse
+                l(-5, -8, -5, 6); l(-5, 6, -1.5f, 2.5f); l(-1.5f, 2.5f, 1.5f, 8.5f); l(1.5f, 8.5f, 4, 7.3f); l(4, 7.3f, 1.2f, 1.8f);
+                l(1.2f, 1.8f, 6, 1.8f); l(6, 1.8f, -5, -8); break;
         }
     }
 
@@ -731,8 +898,93 @@ private:
             riga(testi::t(L"Ctrl+Win+T", L"Ctrl+Win+T"), testi::t(L"Tiene la finestra attiva sempre in primo piano (di nuovo per toglierlo)", L"Keeps the active window always on top (again to undo)"));
             riga(testi::t(L"Maiusc+clic destro", L"Shift+right-click"), testi::t(L"Il menu di Windows, anche con il menu di FluidWin acceso", L"The Windows menu, even with the FluidWin menu on"));
         }
+        if (sezione == S_CURSORE) disegnaCursori(L, R, y, e, ink, tenue, blu, rr, H);
         if (strato) { v.rt->PopLayer(); v.rt->SetTransform(D2D1::Matrix3x2F::Identity()); }
         v.finisci();
+    }
+
+    // Sezione Cursore: la zona dove trascinare il pacchetto (o cliccarla per sceglierlo), poi "Cursori di Windows" e i
+    // pacchetti installati (anteprima della freccia, nome, quanti cursori, pallino della scelta, Rimuovi)
+    void disegnaCursori(float L, float R, float y, double e, D2D1_COLOR_F ink, D2D1_COLOR_F tenue, D2D1_COLOR_F blu, float rr, float H) {
+        const float d = v.dpi, fe = (float)e;
+        const D2D1_COLOR_F inkS = {ink.r, ink.g, ink.b, ink.a * fe}, tenueS = {tenue.r, tenue.g, tenue.b, tenue.a * fe};
+        if (giroAnteprime != v.giroRt) { liberaAnteprime(); giroAnteprime = v.giroRt; }
+        // zona del pacchetto: bordo tratteggiato
+        {
+            const D2D1_RECT_F r = {L, y, R, y + 92 * d};
+            zone.push_back({r, Z_PACCHETTO});
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == Z_PACCHETTO ? 0.09f : 0.05f) * fe) : D2D1::ColorF(1, 1, 1, (sopra == Z_PACCHETTO ? 0.75f : 0.5f) * fe));
+            v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
+            v.pen->SetColor(erroreCursori ? D2D1::ColorF(0.95f, 0.30f, 0.30f, 0.8f * fe) : D2D1::ColorF(blu.r, blu.g, blu.b, (installando ? 0.9f : 0.55f) * fe));
+            const float m = 6 * d, x0 = r.left + m, x1 = r.right - m, y0 = r.top + m, y1 = r.bottom - m, tr = 6 * d, sp = 8 * d;
+            const int nx = (int)((x1 - x0 - 2 * tr) / (2 * sp)) + 1, ny = (int)((y1 - y0 - 2 * tr) / (2 * sp)) + 1;
+            for (int k = 0; k < nx; k++) { const float x = x0 + tr + k * 2 * sp, xe = std::min(x + sp, x1 - tr); v.rt->DrawLine({x, y0}, {xe, y0}, v.pen, 1.4f * d); v.rt->DrawLine({x, y1}, {xe, y1}, v.pen, 1.4f * d); }
+            for (int k = 0; k < ny; k++) { const float yy = y0 + tr + k * 2 * sp, ye = std::min(yy + sp, y1 - tr); v.rt->DrawLine({x0, yy}, {x0, ye}, v.pen, 1.4f * d); v.rt->DrawLine({x1, yy}, {x1, ye}, v.pen, 1.4f * d); }
+            const std::wstring titolo = installando ? statoCursori : std::wstring(testi::t(L"Trascina qui un pacchetto di cursori", L"Drop a cursor pack here"));
+            const std::wstring sotto = installando ? std::wstring(testi::t(L"Un momento…", L"One moment…"))
+                                     : !statoCursori.empty() ? statoCursori
+                                     : std::wstring(testi::t(L"File .zip, .rar o .7z, oppure clicca per sceglierlo. Valgono solo con FluidWin aperto",
+                                                             L".zip, .rar or .7z file, or click to choose it. Used only while FluidWin is open"));
+            v.testo(titolo, fVoce, {r.left + 22 * d, r.top + 20 * d, r.right - 22 * d, r.top + 44 * d}, inkS);
+            v.testo(sotto, fSotto, {r.left + 22 * d, r.top + 46 * d, r.right - 22 * d, r.top + 70 * d},
+                    erroreCursori && !installando ? D2D1::ColorF(0.95f, 0.30f, 0.30f, fe) : tenueS);
+            y += 100 * d;
+        }
+        // scelte: Windows e i pacchetti, quanti ne stanno; gli altri con la rotella (accanto al titolo quali si vedono)
+        const float riga = 50 * d, passo = 56 * d;
+        const int posto = std::max(1, (int)((H - 14 * d - y) / passo)), tutte = 1 + (int)pacchetti.size();
+        scorriCursori = std::clamp(scorriCursori, 0, std::max(0, tutte - posto));
+        if (tutte > posto) {
+            const std::wstring quali = std::to_wstring(scorriCursori + 1) + L"–" + std::to_wstring(std::min(tutte, scorriCursori + posto)) +
+                                       testi::t(L" di ", L" of ") + std::to_wstring(tutte) + testi::t(L" · scorri", L" · scroll");
+            v.testo(quali, fSotto, {R - 220 * d, 26 * d, R - 60 * d, 50 * d}, tenueS);
+        }
+        const std::wstring& scelto = valori().cursore;
+        for (int i = scorriCursori - 1; i < (int)pacchetti.size() && i + 1 < scorriCursori + posto; i++) {
+            const D2D1_RECT_F r = {L, y, R, y + riga};
+            const int id = i < 0 ? Z_WINDOWS : Z_SCEGLI + i;
+            const bool attivo = i < 0 ? scelto.empty() : scelto == pacchetti[i].nome;
+            zone.push_back({{r.left, r.top, r.right - (i < 0 ? 0 : 96 * d), r.bottom}, id});
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == id ? 0.10f : 0.06f) * fe) : D2D1::ColorF(1, 1, 1, (sopra == id ? 0.75f : 0.55f) * fe));
+            v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
+            // pallino della scelta
+            const float cx = r.left + 22 * d, cy = (r.top + r.bottom) / 2;
+            v.pen->SetColor(attivo ? D2D1::ColorF(blu.r, blu.g, blu.b, fe) : tenueS);
+            v.rt->DrawEllipse({{cx, cy}, 8 * d, 8 * d}, v.pen, 1.6f * d);
+            if (attivo) v.rt->FillEllipse({{cx, cy}, 4.5f * d, 4.5f * d}, v.pen);
+            float xt = r.left + 42 * d;
+            if (i >= 0) {   // anteprima della freccia
+                if ((int)anteprime.size() < (int)pacchetti.size()) anteprime.resize(pacchetti.size(), nullptr);
+                if (!anteprime[i]) anteprime[i] = anteprima(pacchetti[i].freccia, (int)std::lround(64 * d));
+                // su un riquadro chiaro: i cursori hanno quasi sempre il bordo scuro, sul tema scuro non si vedrebbero
+                const float q = 34 * d;
+                const D2D1_RECT_F rq = {xt, cy - q / 2, xt + q, cy + q / 2};
+                v.pen->SetColor(D2D1::ColorF(0.93f, 0.94f, 0.96f, (v.scuro ? 0.92f : 0.75f) * fe));
+                v.rt->FillRoundedRectangle({rq, 8 * d, 8 * d}, v.pen);
+                if (anteprime[i]) {
+                    const D2D1_SIZE_F s = anteprime[i]->GetSize();
+                    const float lato = 24 * d, k = std::min(lato / std::max(s.width, s.height), 1.5f * d);
+                    const float bw = s.width * k, bh = s.height * k, bx = (rq.left + rq.right - bw) / 2, by = (rq.top + rq.bottom - bh) / 2;
+                    v.rt->DrawBitmap(anteprime[i], {bx, by, bx + bw, by + bh}, fe, D2D1_BITMAP_INTERPOLATION_MODE_LINEAR);
+                }
+                xt += 46 * d;
+            }
+            const std::wstring nome = i < 0 ? std::wstring(testi::t(L"Cursori di Windows", L"Windows cursors")) : pacchetti[i].nome;
+            const std::wstring info = i < 0 ? std::wstring(testi::t(L"Quelli scelti nelle impostazioni di Windows", L"The ones chosen in Windows settings"))
+                                            : std::to_wstring(pacchetti[i].quanti) + testi::t(L" cursori", L" cursors");
+            v.testo(nome, fVoce, {xt, r.top + 5 * d, r.right - 104 * d, r.top + 26 * d}, inkS);
+            v.testo(info, fSotto, {xt, r.top + 25 * d, r.right - 104 * d, r.top + 45 * d}, tenueS);
+            if (i >= 0) {   // Rimuovi
+                const std::wstring tr = testi::t(L"Rimuovi", L"Remove");
+                const float lw = v.larghezza(tr, fCentro) + 24 * d;
+                const D2D1_RECT_F rb = {r.right - 12 * d - lw, cy - 14 * d, r.right - 12 * d, cy + 14 * d};
+                zone.push_back({rb, Z_RIMUOVI + i});
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == Z_RIMUOVI + i ? 0.16f : 0.08f) * fe) : D2D1::ColorF(0, 0, 0, (sopra == Z_RIMUOVI + i ? 0.10f : 0.05f) * fe));
+                v.rt->FillRoundedRectangle({rb, 14 * d, 14 * d}, v.pen);
+                v.testo(tr, fCentro, rb, inkS);
+            }
+            y += passo;
+        }
     }
 
     // interruttore in stile iOS, k = 0 spento .. 1 acceso; a = trasparenza

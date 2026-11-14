@@ -37,8 +37,13 @@ public:
     std::vector<std::wstring> micApp, camApp;   // app che usano microfono e webcam
     bool micMuto = false, micC = false;          // muto; c'e' un microfono
     int batteria = -1;                           // percentuale, -1 senza batteria
-    bool inCarica = false;
-    UINT versione = 0;                           // cambia quando cambia qualcosa di quanto sopra
+    bool inCarica = false;                       // alimentatore collegato
+    bool caricando = false;                      // ... e la batteria si sta davvero caricando (non gia' piena)
+    int minutiRestanti = -1;                     // a batteria: quanto manca secondo Windows, -1 se non si sa
+    UINT versione = 0;                           // cambia quando cambia qualcosa di quanto sopra (tranne minutiRestanti)
+    // cambia con minutiRestanti: la stima di Windows si muove quasi a ogni lettura (2 s) e la mostra solo il centro di
+    // controllo; con versione si ridisegnerebbe anche il notch ogni volta, a batteria
+    UINT versioneTempo = 0;
     // avviso per il notch: testo, simbolo, valore (batteria %, -1 se non si sa), acceso (in carica)
     std::function<void(const std::wstring&, int, int, bool)> avviso;
 
@@ -173,7 +178,10 @@ private:
         const bool c = !(ps.BatteryFlag & 128) && ps.BatteryFlag != 255 && ps.BatteryLifePercent <= 100;
         const int pc = c ? ps.BatteryLifePercent : -1;
         const bool carica = ps.ACLineStatus == 1;
-        if (pc != batteria || carica != inCarica) { batteria = pc; inCarica = carica; versione++; }
+        const bool sta = c && carica && (ps.BatteryFlag & 8);   // 8: in carica
+        const int minuti = c && !carica && ps.BatteryLifeTime != (DWORD)-1 ? (int)(ps.BatteryLifeTime / 60) : -1;
+        if (pc != batteria || carica != inCarica || sta != caricando) { batteria = pc; inCarica = carica; caricando = sta; versione++; }
+        if (minuti != minutiRestanti) { minutiRestanti = minuti; versioneTempo++; }
         if (!c) return;
         if (primaBatteria) { primaBatteria = false; caricaPrima = carica; sogliaAvvisata = pc <= 10 ? 10 : pc <= 20 ? 20 : 101; return; }
         wchar_t b[96];

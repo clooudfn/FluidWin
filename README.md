@@ -46,7 +46,7 @@ headphones or the battery is running low.
 
 The last icon of the dock opens the control center. Everything opens inside the same glass panel: Wi-Fi, Bluetooth,
 dark theme, keep awake, silent mode (also for a set time), timer, microphone, notifications, calendar, weather and
-news.
+news. On laptops it also shows the battery, with the time left.
 
 <p align="center">
   <img src="docs/gif/centro.gif" width="320" alt="The control center opening from the dock">
@@ -86,6 +86,12 @@ Alt, press Tab to move, let go to switch.
   <img src="docs/gif/ricerca.gif" width="640" alt="The search with the colored edges">
 </p>
 
+### Custom cursors
+
+Drop a cursor pack (a `.zip`, `.rar` or `.7z`, like the ones you find on DeviantArt) into the **Cursor** section of
+the settings: FluidWin figures out which cursor goes where and uses it while it is open. When FluidWin closes, your
+Windows cursors come back. It also works on Windows builds where the Windows settings don't apply custom cursors.
+
 ### Settings
 
 Every feature can be turned on or off from the settings, divided into simple sections.
@@ -95,6 +101,20 @@ Every feature can be turned on or off from the settings, divided into simple sec
 </p>
 
 ...and a lot more.
+
+## What's new in 1.2.2
+
+- **Maximize and restore animate the same way for every app**, with the maximize button, a double-click on the title
+  bar or Win+Up/Win+Down, and without the flicker at the start (also with Windows Settings, File Explorer, Discord and
+  apps that draw their own title bar buttons).
+- **Custom cursors:** a new Cursor section in the settings (see above).
+- **Battery** in the control center and in the notch notice, for laptops.
+- The jelly effect starts reliably even right after another animation; clicks during an animation no longer reach the
+  window behind.
+- The clock in the dock adapts to the space; Store apps open faster from the dock.
+- Fixed a rare crash at the end of an animation.
+- Fixed the genie effect for apps whose minimize button is drawn by the app or answers like a title bar (Free
+  Download Manager, Discord); "Close" in the dock closes like the Windows taskbar does.
 
 ## What's new in 1.2.1
 

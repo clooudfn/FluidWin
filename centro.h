@@ -281,10 +281,20 @@ inline auto Motore::controlloCompatto() const -> bool {
 #ifdef PROVA_COMPATTO
     return true;
 #endif
-    return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi) > altezzaMassimaP(); }
+    return std::round((518 + 52 * righeControllo()) * dpi) > altezzaMassimaP(); }
+// luminosita' e batteria: una riga in piu' solo se il monitor si regola e se c'e' una batteria. Le conta anche
+// controlloCompatto. Su uno schermo cosi' basso che nemmeno la versione compatta ci sta con tutte e due (720p al
+// 125%) la luminosita' lascia il posto alla batteria: sul portatile la si regola anche coi tasti
+inline auto Motore::rigaBatteria() const -> bool { return sensori::Sensori::io().batteria >= 0; }
+inline auto Motore::rigaLuminosita() const -> bool {
+    if (sis.luminosita < 0) return false;
+    return !rigaBatteria() || std::round((430 + 48 * 2) * dpi) <= altezzaMassimaP();
+}
+inline auto Motore::righeControllo() const -> int { return (rigaLuminosita() ? 1 : 0) + (rigaBatteria() ? 1 : 0); }
 inline auto Motore::altezzaControllo() const -> float {
-    if (!controlloCompatto()) return std::round((518 + (sis.luminosita >= 0 ? 52 : 0)) * dpi);
-    return std::round((430 + (sis.luminosita >= 0 ? 48 : 0)) * dpi);
+    const int righe = righeControllo();
+    if (!controlloCompatto()) return std::round((518 + 52 * righe) * dpi);
+    return std::round((430 + 48 * righe) * dpi);
 }
 
 inline auto Motore::nascondiPannello() -> void {
@@ -1076,7 +1086,7 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
 
     // luminosita' del monitor (solo se si puo' regolare via DDC/CI)
     const int lum = sis.luminosita;
-    if (lum >= 0) {
+    if (rigaLuminosita()) {
         y += sh + 8 * dpi;
         const D2D1_RECT_F rl = {16 * dpi, y, PW - 16 * dpi, y + sh};
         const float vl = lum / 100.0f;
@@ -1092,6 +1102,74 @@ inline auto Motore::disegnaControllo(bool scuro, D2D1_COLOR_F ink) -> void {
         wchar_t pl[16]; swprintf(pl, 16, L"%d%%", lum);
         pennello->SetColor(scuro && vl < 0.9f ? ink : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.7f));
         scrivi(pl, fmtNome, {rl.right - 56 * dpi, rl.top, rl.right - 8 * dpi, rl.bottom});
+    }
+
+    // batteria (portatili): carica, se si sta caricando e quanto manca. Riempita come il volume: verde in carica,
+    // rossa sotto il 20% a batteria, bianca altrimenti. Il clic apre Alimentazione e batteria di Windows
+    if (const sensori::Sensori& se = sensori::Sensori::io(); rigaBatteria()) {
+        y += sh + 8 * dpi;
+        const D2D1_RECT_F rb = {16 * dpi, y, PW - 16 * dpi, y + sh};
+        const float vb = std::clamp(se.batteria / 100.0f, 0.0f, 1.0f), riempito = larg * vb;
+        aggiungi(rb, A_ENERGIA, 0);
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
+        dc->FillRoundedRectangle({rb, rr, rr}, pennello);
+        const bool verde = se.inCarica, rosso = !se.inCarica && se.batteria <= 20;
+        const D2D1_COLOR_F pieno = verde ? D2D1::ColorF(0.20f, 0.78f, 0.35f, 1) : rosso ? D2D1::ColorF(1.0f, 0.27f, 0.23f, 1)
+                                         : D2D1::ColorF(1, 1, 1, scuro ? 0.92f : 0.97f);
+        const D2D1_COLOR_F suPieno = (verde || rosso) ? D2D1::ColorF(1, 1, 1, 0.95f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.85f);
+        dc->PushAxisAlignedClip({rb.left, rb.top, rb.left + riempito, rb.bottom}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+        pennello->SetColor(pieno);
+        dc->FillRoundedRectangle({rb, rr, rr}, pennello);
+        dc->PopAxisAlignedClip();
+        // stato: in carica, collegato (carica completa), oppure a batteria con il tempo che manca
+        std::wstring stato;
+        if (se.caricando) stato = testi::t(L"In carica", L"Charging");
+        else if (se.inCarica) stato = testi::t(L"Collegato", L"Plugged in");
+        else if (se.minutiRestanti >= 0) {
+            wchar_t b[64];
+            if (se.minutiRestanti >= 60) swprintf(b, 64, testi::t(L"%d h %02d min rimasti", L"%d h %02d min left"), se.minutiRestanti / 60, se.minutiRestanti % 60);
+            else swprintf(b, 64, testi::t(L"%d min rimasti", L"%d min left"), se.minutiRestanti);
+            stato = b;
+        } else stato = testi::t(L"A batteria", L"On battery");
+        wchar_t pb[16]; swprintf(pb, 16, L"%d%%", se.batteria);
+        // simbolo e testi si disegnano due volte, ritagliati: chiari sul pieno, col colore del tema sul vuoto. Cosi' una
+        // scritta a cavallo del bordo del pieno (batteria bassa) si legge anche col tema chiaro
+        auto sopra = [&](const D2D1_COLOR_F& colore) {
+            pennello->SetColor(colore);
+            // simbolo: la pila con la sua carica, e il fulmine con l'alimentatore collegato
+            {
+                const float cx = rb.left + 26 * dpi, cy = (rb.top + rb.bottom) / 2, w = 10 * dpi, h = 5.5f * dpi;
+                dc->DrawRoundedRectangle({{cx - w, cy - h, cx + w - 2 * dpi, cy + h}, 2 * dpi, 2 * dpi}, pennello, 1.4f * dpi);
+                dc->FillRoundedRectangle({{cx + w - 1 * dpi, cy - 2 * dpi, cx + w + 1 * dpi, cy + 2 * dpi}, 0.8f * dpi, 0.8f * dpi}, pennello);
+                if (se.inCarica) {   // fulmine
+                    ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* k = nullptr;
+                    if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&k))) {
+                        k->BeginFigure({cx + 1.5f * dpi, cy - 4.5f * dpi}, D2D1_FIGURE_BEGIN_FILLED);
+                        const D2D1_POINT_2F p[] = {{cx - 3 * dpi, cy + 0.8f * dpi}, {cx - 0.2f * dpi, cy + 0.8f * dpi}, {cx - 1.5f * dpi, cy + 4.5f * dpi},
+                                                   {cx + 3 * dpi, cy - 0.8f * dpi}, {cx + 0.2f * dpi, cy - 0.8f * dpi}};
+                        k->AddLines(p, 5); k->EndFigure(D2D1_FIGURE_END_CLOSED); k->Close();
+                        dc->FillGeometry(g, pennello);
+                    }
+                    if (k) k->Release();
+                    if (g) g->Release();
+                } else {             // carica dentro la pila
+                    const float l = (2 * w - 5 * dpi) * vb;
+                    dc->FillRoundedRectangle({{cx - w + 1.5f * dpi, cy - h + 1.5f * dpi, cx - w + 1.5f * dpi + l, cy + h - 1.5f * dpi}, 1 * dpi, 1 * dpi}, pennello);
+                }
+            }
+            scrivi(stato, fmtSotto, {rb.left + 48 * dpi, rb.top, rb.right - 64 * dpi, rb.bottom});   // (a sinistra, dopo il simbolo)
+            scrivi(pb, fmtNome, {rb.right - 56 * dpi, rb.top, rb.right - 8 * dpi, rb.bottom});
+        };
+        if (riempito > 0) {
+            dc->PushAxisAlignedClip({rb.left, rb.top, rb.left + riempito, rb.bottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+            sopra(suPieno);
+            dc->PopAxisAlignedClip();
+        }
+        if (riempito < larg) {
+            dc->PushAxisAlignedClip({rb.left + riempito, rb.top, rb.right, rb.bottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+            sopra(ink);
+            dc->PopAxisAlignedClip();
+        }
     }
 
     // uscita audio
@@ -1422,6 +1500,51 @@ inline auto Motore::fotoIconaSfondo(const std::wstring& exe) -> ID2D1Bitmap* {
     return b;
 }
 
+// AppUserModelID dell'app di una famiglia di pacchetti che compare nell'elenco delle app, letto dal manifesto del pacchetto
+// installato: la prima <Application> senza AppListEntry="none" (Teams, per esempio, ha anche tre app nascoste di
+// servizio). ~1-7 ms, contro ~0,9 s per elencare tutte le app. "" se non si trova
+static std::wstring aumidDalManifesto(const std::wstring& famiglia) {
+    UINT32 n = 0, len = 0;
+    if (GetPackagesByPackageFamily(famiglia.c_str(), &n, nullptr, &len, nullptr) != ERROR_INSUFFICIENT_BUFFER || !n) return L"";
+    std::vector<PWSTR> nomi(n); std::vector<WCHAR> buf(len);
+    if (GetPackagesByPackageFamily(famiglia.c_str(), &n, nomi.data(), &len, buf.data()) != ERROR_SUCCESS) return L"";
+    for (UINT32 i = 0; i < n; i++) {
+        UINT32 pl = 0;
+        if (GetPackagePathByFullName(nomi[i], &pl, nullptr) != ERROR_INSUFFICIENT_BUFFER || !pl) continue;
+        std::vector<WCHAR> pb(pl);
+        if (GetPackagePathByFullName(nomi[i], &pl, pb.data()) != ERROR_SUCCESS) continue;
+        HANDLE f = CreateFileW((std::wstring(pb.data()) + L"\\AppxManifest.xml").c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+        if (f == INVALID_HANDLE_VALUE) continue;
+        // (un manifesto vero e' di qualche decina di KB: oltre 1 MB non lo si legge e resta la via lenta)
+        const DWORD dim = GetFileSize(f, nullptr);
+        std::string x(dim == INVALID_FILE_SIZE || dim > 1024 * 1024 ? 0 : dim, '\0');
+        DWORD letti = 0;
+        if (!x.empty()) ReadFile(f, &x[0], (DWORD)x.size(), &letti, nullptr);
+        CloseHandle(f);
+        x.resize(letti);
+        // la famiglia con le maiuscole vere, dal nome completo (nome_versione_architettura_risorsa_editore)
+        const std::wstring pieno = nomi[i];
+        const size_t u = pieno.find(L'_'), e = pieno.rfind(L'_');
+        if (u == std::wstring::npos || e == std::wstring::npos) continue;
+        const std::wstring fam = pieno.substr(0, u) + pieno.substr(e);
+        for (size_t p = x.find("<Application "); p != std::string::npos; p = x.find("<Application ", p + 1)) {
+            const size_t fine = x.find("</Application>", p);
+            const std::string blocco = x.substr(p, fine == std::string::npos ? std::string::npos : fine - p);
+            if (blocco.find("AppListEntry=\"none\"") != std::string::npos) continue;
+            // l'attributo Id del tag di apertura, intero (" Id=" con lo spazio): altri attributi finiscono in "Id"
+            // (uap10:HostId) e darebbero un ID sbagliato invece della via lenta
+            const std::string tag = blocco.substr(0, blocco.find('>'));
+            const size_t a = tag.find(" Id=\"");
+            if (a == std::string::npos) continue;
+            const size_t b = tag.find('"', a + 5);
+            if (b == std::string::npos) continue;
+            const std::string id = tag.substr(a + 5, b - a - 5);
+            return fam + L"!" + std::wstring(id.begin(), id.end());
+        }
+    }
+    return L"";
+}
+
 // app dello Store: dal percorso ...\WindowsApps\Nome_versione_arch__editore\... all'AppUserModelID
 // La chiamano due thread: il lavoro in sottofondo delle app in background e il thread principale (aggiornaApp, per
 // un'app dello Store fissata e poi aggiornata). Prima la cache non aveva protezione: la si poteva riempire e leggere
@@ -1437,6 +1560,8 @@ inline auto Motore::avvioPacchetto(const std::wstring& exe) -> std::wstring {
     const size_t u = pac.find(L'_'), e = pac.rfind(L"__");
     if (u == std::wstring::npos || e == std::wstring::npos) return L"";
     const std::wstring famiglia = pac.substr(0, u) + L"_" + pac.substr(e + 2);
+    // la via veloce: il manifesto del pacchetto installato. L'elenco di tutte le app (~0,9 s, sotto) resta come riserva
+    if (const std::wstring v = aumidDalManifesto(famiglia); !v.empty()) return L"shell:AppsFolder\\" + v;
     auto cerca = [&]() -> std::wstring {
         auto it = aumidPacchetti.find(famiglia);
         return it == aumidPacchetti.end() ? L"" : L"shell:AppsFolder\\" + it->second;

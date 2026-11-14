@@ -16,6 +16,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <iphlpapi.h>
+#include <appmodel.h>   // pacchetti delle app dello Store (aumidDalManifesto)
 #include <shellapi.h>
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -477,8 +478,10 @@ public:
         // mixer aperto: si rilegge ogni secondo (app che iniziano o smettono di suonare, volumi cambiati da fuori)
         if (pannelloTipo == P_MIXER && !pChiusura && trascinaMixer < 0 && ++giroMixer % 2 == 0) rileggiMixer();
         // centro di controllo aperto: il tempo del timer e lo stato del microfono si aggiornano
-        if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro)) {
-            versioneSensoriCentro = sensori::Sensori::io().versione; pDirty = true;
+        if (pannelloTipo == P_CONTROLLO && (comodita::timerAttivo() || comodita::timerSuona() || sensori::Sensori::io().versione != versioneSensoriCentro
+                                            || sensori::Sensori::io().versioneTempo != versioneTempoCentro)) {
+            versioneSensoriCentro = sensori::Sensori::io().versione; versioneTempoCentro = sensori::Sensori::io().versioneTempo; pDirty = true;
+            if (!pChiusura) riadattaControllo();   // la batteria puo' comparire o sparire (ripresa dalla sospensione)
         }
         // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
         if (conteggioTimer == 6) leggiAppSfondo();
@@ -1232,7 +1235,9 @@ private:
     }
 
     // ora e data in fondo al dock: separatore e testo (larghezzaOra la misura render quando il testo cambia)
-    float larghezzaCoda() const { return oraNelDock && larghezzaOra > 0 ? GAP * 2 + 1 + larghezzaOra + 16 * dpi : 0; }
+    float larghezzaCoda() const { return oraNelDock && larghezzaOra > 0 ? GAP * 2 + 1 + (larghezzaOra + 16 * dpi) * scalaOra() : 0; }
+    // le due righe dell'ora (~34 px) devono stare nell'altezza delle icone: con icone piccole il testo si rimpicciolisce
+    float scalaOra() const { return std::clamp((S - 6 * dpi) / (34 * dpi), 0.7f, 1.0f); }
 
     // x di ogni icona a riposo; lo spazio prima di un'icona cresce e cala con lei
     std::vector<float> posizioniRiposo() const { return disponi(std::vector<float>(voci.size(), S)); }
@@ -1419,26 +1424,39 @@ private:
             const D2D1_RECT_F r = {x0 + GAP * 2 + 1, yb - S, x0 + coda, yb};
             isola = {r.left, fondoT, r.right + PAD, fondoB};   // il suo posto per il mouse (vedi oraNelDock)
             rettStato[ORA] = r; rettStato[CONTROLLO] = {};
-            // fondo dell'ora: un velo suo, sempre pieno, cosi' si legge anche col vetro del dock quasi trasparente
-            pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.55f) : D2D1::ColorF(1, 1, 1, 0.62f));
-            dc->FillRoundedRectangle({{r.left - 2 * dpi, r.top + 2 * dpi, r.right + 2 * dpi, r.bottom - 2 * dpi}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
             const double e = verso(evidenza[ORA], (statoSopra == ORA && mouseDentro) ? 1.0 : 0.0, 0.05);
             if (e != evidenza[ORA]) movimento = true;
             evidenza[ORA] = e;
             const float s = statoPremuto == ORA ? 0.92f : 1.0f;   // si "schiaccia" un poco alla pressione
+            const float k = scalaOra();                          // icone piccole: testo piu' piccolo (vedi scalaOra)
             const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
-            if (e > 0.01) {
-                const float hw = (r.right - r.left) / 2 * s, hh = (r.bottom - r.top) / 2 * s;
-                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * (float)e) : D2D1::ColorF(1, 1, 1, 0.55f * (float)e));
-                dc->FillRoundedRectangle({{cx - hw, cy - hh, cx + hw, cy + hh}, RAGGIO - 2 * dpi, RAGGIO - 2 * dpi}, pennello);
+            const float h2 = 17 * dpi;                           // altezza di una riga (a grandezza piena)
+            // capsula attorno al testo: la stessa per il fondo e per l'evidenza del mouse
+            const float pw = (larghezzaOra / 2 + 8 * dpi) * k * s, ph = (h2 + 3 * dpi) * k * s;
+            const D2D1_ROUNDED_RECT capsula = {{cx - pw, cy - ph, cx + pw, cy + ph}, std::min(9 * dpi, ph), std::min(9 * dpi, ph)};
+            // fondo: compare solo quanto il vetro del dock e' trasparente (opacita' nelle impostazioni), cosi' l'ora si legge
+            // anche sopra una finestra chiara; col vetro pieno non c'e'. Lo dice la trasparenza della finestra del vetro
+            {
+                BYTE av = 255; DWORD fl = 0;
+                if (!GetLayeredWindowAttributes(vetro, nullptr, &av, &fl) || !(fl & LWA_ALPHA)) av = 255;
+                const float quanto = std::clamp((1 - av / 255.0f) / 0.8f, 0.0f, 1.0f);
+                if (quanto > 0.02f) {
+                    pennello->SetColor(scuro ? D2D1::ColorF(0.12f, 0.12f, 0.14f, 0.5f * quanto) : D2D1::ColorF(1, 1, 1, 0.6f * quanto));
+                    dc->FillRoundedRectangle(capsula, pennello);
+                }
             }
-            dc->SetTransform(D2D1::Matrix3x2F::Scale(s, s, {cx, cy}));
+            if (e > 0.01) {
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * (float)e) : D2D1::ColorF(1, 1, 1, 0.55f * (float)e));
+                dc->FillRoundedRectangle(capsula, pennello);
+            }
+            // testo disegnato a grandezza piena e rimpicciolito attorno al centro (pressione e icone piccole)
+            dc->SetTransform(D2D1::Matrix3x2F::Scale(s * k, s * k, {cx, cy}));
             const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.92f) : D2D1::ColorF(0.08f, 0.08f, 0.1f, 0.86f);
-            const float h2 = 17 * dpi;
+            const float lt = larghezzaOra / 2 + 8 * dpi;
             pennello->SetColor(ink);
-            dc->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fmtOra, {r.left, cy - h2 - 1 * dpi, r.right, cy + 1 * dpi}, pennello);
+            dc->DrawText(testoOra.c_str(), (UINT32)testoOra.size(), fmtOra, {cx - lt, cy - h2 - 1 * dpi, cx + lt, cy + 1 * dpi}, pennello);
             pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.72f});
-            dc->DrawText(testoData.c_str(), (UINT32)testoData.size(), fmtData, {r.left, cy + 1 * dpi, r.right, cy + h2 - 1 * dpi}, pennello);
+            dc->DrawText(testoData.c_str(), (UINT32)testoData.size(), fmtData, {cx - lt, cy + 1 * dpi, cx + lt, cy + h2 - 1 * dpi}, pennello);
             dc->SetTransform(D2D1::Matrix3x2F::Identity());
         }
 
@@ -1706,11 +1724,7 @@ private:
         }
         if (widD.pronto.exchange(false) && pannelloTipo == P_WIDGET) { wid = widD.copia(); pDirty = true; }
         // radio e luminosita' lette dal thread: il pannello si ridisegna (e si allunga se la luminosita' e' regolabile)
-        if (sis.pronto.exchange(false) && pannelloTipo == P_CONTROLLO && !pChiusura) {
-            const float nuova = altezzaControllo();
-            if (nuova != PH) { PH = nuova; rettPannello.top = rettPannello.bottom - (int)PH; posizionaPannello(pK < 0 ? 1 : pK); }
-            pDirty = true;
-        }
+        if (sis.pronto.exchange(false) && pannelloTipo == P_CONTROLLO && !pChiusura) { riadattaControllo(); pDirty = true; }
     }
 
     IAudioEndpointVolume* volumeDispositivo() {
@@ -1902,6 +1916,14 @@ private:
     float altezzaControllo() const;
 
     bool controlloCompatto() const;
+    int righeControllo() const;
+    bool rigaLuminosita() const;
+    bool rigaBatteria() const;
+    // altezza del centro di controllo rifatta se le sue righe sono cambiate a pannello aperto
+    void riadattaControllo() {
+        const float nuova = std::min(altezzaControllo(), altezzaMassimaP());
+        if (nuova != PH) { PH = nuova; rettPannello.top = rettPannello.bottom - (int)PH; posizionaPannello(pK < 0 ? 1 : pK); }
+    }
 
     void nascondiPannello();
 
@@ -1982,7 +2004,7 @@ private:
     void simboloTimer(float cx, float cy);
 
     void simboloMicrofono(float cx, float cy, bool acceso);
-    UINT versioneSensoriCentro = 0;   // per ridisegnare il riquadro del microfono quando cambia
+    UINT versioneSensoriCentro = 0, versioneTempoCentro = 0;   // per ridisegnare il riquadro del microfono quando cambia
     // ---- numeri delle notifiche, cestino, pila ----
     std::unordered_map<std::wstring, int> numeriNotifiche;   // AppUserModelID (minuscolo) -> quante
     bool cestinoPieno = false; int giroCestino = 0;
@@ -2526,7 +2548,16 @@ private:
             for (auto& x : this->voci) if (!x.uscente && chiave(x) == chiave(v)) x.rimbalzoT0 = ultimoT;   // la voce di adesso
             dirty = true;
         }
-        else if (s == 2) { for (HWND h : v.finestre) if (IsWindow(h)) PostMessageW(h, WM_CLOSE, 0, 0); }
+        else if (s == 2) {
+            // come "Chiudi finestra" della barra di Windows: il comando di sistema (lo stesso del menu della finestra e di
+            // Alt+F4), non WM_CLOSE diretto, che alcune app trattano diversamente
+            for (HWND h : v.finestre) {
+                if (!IsWindow(h)) continue;
+                wchar_t c[64] = L""; GetClassNameW(h, c, 64);
+                if (registro) { char b[200]; snprintf(b, sizeof(b), "chiudi dal dock: %p (%ls)%s", (void*)h, c, IsIconic(h) ? " ridotta" : ""); registro(b); }
+                PostMessageW(h, WM_SYSCOMMAND, SC_CLOSE, 0);
+            }
+        }
         else if (s == 3) ShellExecuteW(nullptr, L"runas", (collegamento || !exeVero ? v.avvio : v.exe).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
         else if (s == 4) ShellExecuteW(nullptr, L"open", L"explorer.exe", (L"/select,\"" + v.exe + L"\"").c_str(), nullptr, SW_SHOWNORMAL);
         else if (s == 5) { DeleteFileW(v.avvio.c_str()); appDaAggiornare = true; dirty = true; }   // come "Rimuovi dalla barra"
