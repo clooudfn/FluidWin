@@ -120,6 +120,7 @@ struct Voce {
     std::vector<HWND> finestre;
     double rimbalzoT0 = -1;    // istante di inizio del rimbalzo (avvio), -1 = fermo
     double scala = 1;          // 0..1: le icone nuove crescono, quelle delle app chiuse si restringono (niente scatti)
+    double spostaX = 0;        // scostamento orizzontale temporaneo durante il riordino
     bool uscente = false;      // app chiusa: si restringe e poi sparisce
     D2D1_RECT_F rett{};        // ultima posizione disegnata (coordinate della finestra delle icone)
 };
@@ -331,6 +332,7 @@ public:
         SHAppBarMessage(ABM_SETSTATE, &tb);
 
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
+        leggiOrdineFissate();
         aggiornaStato(true);
         aggiornaApp();
         attivo = true;
@@ -719,6 +721,10 @@ private:
     size_t primaNonFissata = 0;      // indice della prima app aperta ma non aggiunta alla barra (separatore)
     size_t primaFine = 0;            // indice della prima voce di fondo (pila, cestino, centro di controllo): altro separatore
     std::vector<std::wstring> ordineAperte;   // le app aperte restano nel posto in cui sono comparse la prima volta
+    std::vector<std::wstring> ordineFissate;  // ordine salvato delle app fissate
+    int trascinaDa = -1;
+    bool trascinaInCorso = false;
+    float trascinaX0 = 0, trascinaY0 = 0, trascinaCurX = 0;
     bool dirty = true, inMovimento = false, appDaAggiornare = true, nascostoSchermoIntero = false, vetroDaRiposizionare = false;
     double ultimoAggiornamento = -10, ultimoT = 0, dtFotogramma = 1.0 / 180;
     bool mouseDentro = false, mouseSulDock = false; float mouseX = 0, mouseY = 0;
@@ -983,6 +989,90 @@ private:
     }
 
     static std::wstring chiave(const Voce& v) { return v.exe.empty() ? v.avvio : v.exe; }
+    static bool voceTrascinabile(const Voce& v) { return !v.uscente && !v.avvio.empty() && v.avvio[0] != L'*'; }
+
+    void leggiOrdineFissate() {
+        ordineFissate.clear();
+        DWORD cb = 0;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineFissate", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &cb) != ERROR_SUCCESS || cb <= sizeof(wchar_t)) return;
+        std::vector<wchar_t> buf(cb / sizeof(wchar_t), L'\0');
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineFissate", RRF_RT_REG_MULTI_SZ, nullptr, buf.data(), &cb) != ERROR_SUCCESS) return;
+        for (const wchar_t* p = buf.data(); *p; p += wcslen(p) + 1) ordineFissate.emplace_back(p);
+    }
+
+    void salvaOrdineFissate() const {
+        HKEY k = nullptr;
+        if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Software\\FluidWin", 0, nullptr, 0, KEY_WRITE, nullptr, &k, nullptr) != ERROR_SUCCESS) return;
+        std::vector<wchar_t> buf;
+        for (const auto& s : ordineFissate) {
+            if (s.empty()) continue;
+            buf.insert(buf.end(), s.begin(), s.end());
+            buf.push_back(L'\0');
+        }
+        buf.push_back(L'\0');
+        if (buf.size() == 1) buf.push_back(L'\0');
+        RegSetValueExW(k, L"OrdineFissate", 0, REG_MULTI_SZ, (const BYTE*)buf.data(), (DWORD)(buf.size() * sizeof(wchar_t)));
+        RegCloseKey(k);
+    }
+
+    void applicaOrdineFissate(std::vector<Voce>& nuove, size_t inizio, size_t fine) const {
+        if (ordineFissate.empty() || inizio >= fine || fine > nuove.size()) return;
+        auto idx = [&](const Voce& v) -> size_t {
+            const auto it = std::find(ordineFissate.begin(), ordineFissate.end(), chiave(v));
+            return (size_t)(it - ordineFissate.begin());
+        };
+        std::stable_sort(nuove.begin() + inizio, nuove.begin() + fine, [&](const Voce& a, const Voce& b) {
+            return idx(a) < idx(b);
+        });
+    }
+
+    void spostaVoceDrag(int da, int a, const std::vector<float>& riposoPrima) {
+        if (da == a || da < 0 || a < 0 || da >= (int)voci.size() || a >= (int)voci.size()) return;
+        if (da < a) std::rotate(voci.begin() + da, voci.begin() + da + 1, voci.begin() + a + 1);
+        else std::rotate(voci.begin() + a, voci.begin() + da, voci.begin() + da + 1);
+        trascinaDa = a;
+        const auto riposoDopo = posizioniRiposo();
+        const int lo = std::min(da, a), hi = std::max(da, a);
+        for (int k = lo; k <= hi; k++) {
+            if (k == a) continue;
+            const int oldIdx = (da < a) ? (k + 1) : (k - 1);
+            if (oldIdx >= 0 && oldIdx < (int)riposoPrima.size() && k < (int)riposoDopo.size()) {
+                voci[k].spostaX += (double)(riposoPrima[oldIdx] - riposoDopo[k]);
+            }
+        }
+    }
+
+    void terminaDrag(bool annulla) {
+        const int idx = trascinaDa;
+        trascinaDa = -1;
+        trascinaInCorso = false;
+        if (annulla || idx < 0 || idx >= (int)voci.size()) return;
+        if (voci[idx].fissata) {
+            ordineFissate.clear();
+            fissateCache.clear();
+            const size_t fineF = std::min(primaNonFissata, voci.size());
+            for (size_t i = 1; i < fineF; i++) {
+                if (!voceTrascinabile(voci[i])) continue;
+                ordineFissate.push_back(chiave(voci[i]));
+                Voce f = voci[i];
+                f.icona = nullptr;
+                f.finestre.clear();
+                f.rimbalzoT0 = -1;
+                f.scala = 1;
+                f.spostaX = 0;
+                f.rett = {};
+                fissateCache.push_back(std::move(f));
+            }
+            salvaOrdineFissate();
+        } else {
+            ordineAperte.clear();
+            const size_t inizioA = std::min(primaNonFissata, voci.size());
+            const size_t fineA = std::min(primaFine, voci.size());
+            for (size_t i = inizioA; i < fineA; i++) {
+                if (voceTrascinabile(voci[i])) ordineAperte.push_back(chiave(voci[i]));
+            }
+        }
+    }
 
     // cache di aggiornaApp (gira a ogni cambio di primo piano)
     std::vector<Voce> fissateCache;                 // le app fissate (senza icone ne' finestre)
@@ -993,6 +1083,7 @@ private:
     // App aggiunte alla barra (i loro collegamenti) + app con finestre aperte
     void aggiornaApp() {
         Cronometro cr(this, "aggiornaApp");
+        if (trascinaInCorso) { appDaAggiornare = true; return; }
         appDaAggiornare = false; ultimoAggiornamento = ultimoT;
         // icona premuta: la si ritrova per nome, gli indici possono cambiare
         const std::wstring chiavePremuta = (premuta >= 0 && premuta < (int)voci.size()) ? chiave(voci[premuta]) : L"";
@@ -1056,6 +1147,7 @@ private:
                 }
                 nuove.push_back(std::move(v));
             }
+            applicaOrdineFissate(nuove, 1, nuove.size());
             if (!valida) { fissateCache.assign(nuove.begin() + 1, nuove.end()); fissateOk = letta; }
         }
         const size_t fissate = nuove.size();
@@ -1292,6 +1384,8 @@ private:
         for (auto& v : voci) {
             const double o = v.uscente ? 0.0 : 1.0;
             if (v.scala != o) { v.scala = verso(v.scala, o, 0.07); movimento = true; }
+            if (std::abs(v.spostaX) > 0.25) { v.spostaX = verso(v.spostaX, 0.0, 0.045); movimento = true; }
+            else v.spostaX = 0;
         }
         for (size_t i = 0; i < voci.size();) {
             if (voci[i].uscente && voci[i].scala <= 0) {
@@ -1299,6 +1393,8 @@ private:
                 voci.erase(voci.begin() + i);
                 if (i < primaNonFissata) primaNonFissata--;
                 if (i < primaFine) primaFine--;
+                if ((int)i < trascinaDa) trascinaDa--;
+                else if ((int)i == trascinaDa) { trascinaDa = -1; trascinaInCorso = false; }
                 premuta = -1; sopra = -1;
             } else i++;
         }
@@ -1366,14 +1462,11 @@ private:
         zonaDockL = fondoL; zonaDockR = fondoR;
 
         // icone
-        for (size_t i = 0; i < voci.size(); i++) {
+        auto disegnaVoce = [&](size_t i) {
             Voce& v = voci[i];
-            const float sc = (float)v.scala, d = dim[i] * sc, x = xs[i];
-            if (sepPrima(i) > 0) {
-                const float sep = sepPrima(i), sx = x - (sep + GAP * sc) / 2;
-                pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.22f * sep / (GAP * 2 + 1)));
-                dc->DrawLine({sx, yb - S * 0.85f}, {sx, yb - S * 0.15f}, pennello, 1.0f);
-            }
+            const bool drag = trascinaInCorso && (int)i == trascinaDa;
+            const float sc = (float)v.scala, d = dim[i] * sc;
+            const float x = drag ? std::clamp(trascinaCurX - d / 2, fondoL + PAD, std::max(fondoL + PAD, fondoR - PAD - d)) : xs[i] + (float)v.spostaX;
             float salto = 0;
             if (v.rimbalzoT0 >= 0) {
                 const double e = t - v.rimbalzoT0;
@@ -1381,10 +1474,12 @@ private:
                 else { salto = (float)(std::abs(std::sin(e * M_PI / 0.55)) * S * 0.45 * std::exp(-e * 0.35)); movimento = true; }
             }
             const float premuto = (premuta == (int)i) ? 0.86f : 1.0f;   // un attimo piu' scura e piccola mentre la premi
-            const float dd = d * premuto;
-            D2D1_RECT_F r = {x + (d - dd) / 2, yb - dd - salto, x + (d - dd) / 2 + dd, yb - salto};
-            v.rett = {x, yb - d, x + d, yb};
-            if (d < 0.5f) continue;
+            const float scalaDrag = drag ? 1.04f : 1.0f;
+            const float lift = drag ? 4.0f * dpi : 0.0f;
+            const float dd = d * premuto * scalaDrag;
+            D2D1_RECT_F r = {x + (d - dd) / 2, yb - dd - salto - lift, x + (d - dd) / 2 + dd, yb - salto - lift};
+            v.rett = {x, yb - d - lift, x + d, yb - lift};
+            if (d < 0.5f) return;
             const float alfa = (premuto < 1 ? 0.8f : 1.0f) * std::min(1.0f, sc * 1.5f);
             if (v.icona) dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
@@ -1414,7 +1509,18 @@ private:
                     dc->FillEllipse({{x + d / 2 + dx, yb + PAD * 0.55f}, 2.0f * dpi, 2.0f * dpi}, pennello);
                 }
             }
+        };
+        for (size_t i = 0; i < voci.size(); i++) {
+            if (sepPrima(i) > 0) {
+                const float sc = (float)voci[i].scala;
+                const float sep = sepPrima(i), sx = xs[i] - (sep + GAP * sc) / 2;
+                pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.22f * sep / (GAP * 2 + 1)));
+                dc->DrawLine({sx, yb - S * 0.85f}, {sx, yb - S * 0.15f}, pennello, 1.0f);
+            }
+            if (trascinaInCorso && (int)i == trascinaDa) continue;
+            disegnaVoce(i);
         }
+        if (trascinaInCorso && trascinaDa >= 0 && trascinaDa < (int)voci.size()) disegnaVoce((size_t)trascinaDa);
 
         // ora e data in fondo al dock (impostazione): un separatore, poi l'ora e sotto la data, dopo il centro di controllo
         if (const float coda = larghezzaCoda(); coda > 0) {
@@ -1461,7 +1567,7 @@ private:
         }
 
         // icona sotto il mouse ricalcolata sulle posizioni appena disegnate (il dock si muove anche col mouse fermo)
-        sopra = (mouseDentro && mouseSulDock) ? iconaInPunto(mouseX, mouseY) : -1;
+        sopra = (mouseDentro && mouseSulDock && !trascinaInCorso) ? iconaInPunto(mouseX, mouseY) : -1;
 
         // (l'isola di stato in basso a destra non c'e' piu': il centro di controllo e' l'ultima icona del dock e l'ora sta
         // nel notch in alto al centro)
@@ -2599,31 +2705,74 @@ private:
                 d->statoSopra = isola ? d->statoInPunto(d->mouseX, d->mouseY) : -1;
                 // mouse arrivato sull'ora: le notifiche si cominciano a leggere, cosi' al clic sono quasi pronte
                 if (d->statoSopra == ORA && statoPrima != ORA && GetTickCount64() - d->chiestaN > 3000) d->chiediNotifiche();
+                if (d->trascinaDa >= 0 && d->trascinaDa < (int)d->voci.size()) {
+                    d->trascinaCurX = d->mouseX;
+                    if (!d->trascinaInCorso && std::abs(d->mouseX - d->trascinaX0) >= 6 * d->dpi) {
+                        d->trascinaInCorso = true;
+                        d->premuta = -1;
+                        d->sopra = -1;
+                    }
+                    if (d->trascinaInCorso) {
+                        const bool fissata = d->voci[d->trascinaDa].fissata;
+                        int minIdx = d->trascinaDa, maxIdx = d->trascinaDa;
+                        while (minIdx > 0 && d->voci[minIdx - 1].fissata == fissata && d->voceTrascinabile(d->voci[minIdx - 1])) minIdx--;
+                        while (maxIdx + 1 < (int)d->voci.size() && d->voci[maxIdx + 1].fissata == fissata && d->voceTrascinabile(d->voci[maxIdx + 1])) maxIdx++;
+                        const auto riposo = d->posizioniRiposo();
+                        int target = d->trascinaDa;
+                        while (target > minIdx && d->mouseX < riposo[target - 1] + d->S / 2.0f) target--;
+                        while (target < maxIdx && d->mouseX > riposo[target + 1] + d->S / 2.0f) target++;
+                        if (target != d->trascinaDa) d->spostaVoceDrag(d->trascinaDa, target, riposo);
+                    }
+                }
                 d->dirty = true;
                 return 0;
             }
             case WM_MOUSELEAVE:
+                if (d->trascinaInCorso) return 0;
                 d->mouseDentro = false; d->mouseSulDock = false; d->sopra = -1; d->premuta = -1;
                 d->statoSopra = -1; d->statoPremuto = -1; d->dirty = true;
                 return 0;
             case WM_LBUTTONDOWN: {
                 const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
-                if (d->sullIsola(x, y)) d->statoPremuto = d->statoInPunto(x, y);
-                else d->premuta = d->iconaInPunto(x, y);
+                if (d->sullIsola(x, y)) {
+                    d->statoPremuto = d->statoInPunto(x, y);
+                } else {
+                    const int i = d->iconaInPunto(x, y);
+                    d->premuta = i;
+                    if (i >= 0 && d->voceTrascinabile(d->voci[i])) {
+                        d->trascinaDa = i;
+                        d->trascinaInCorso = false;
+                        d->trascinaX0 = x;
+                        d->trascinaY0 = y;
+                        d->trascinaCurX = x;
+                        SetCapture(h);
+                    }
+                }
                 d->dirty = true; return 0;
             }
             case WM_LBUTTONUP: {
                 const float x = (float)GET_X_LPARAM(l), y = (float)GET_Y_LPARAM(l);
+                const bool eraDrag = d->trascinaInCorso;
+                if (eraDrag) d->terminaDrag(false);
+                else { d->trascinaDa = -1; d->trascinaInCorso = false; }
+                if (GetCapture() == h) ReleaseCapture();
                 if (d->statoPremuto >= 0) {
                     const int i = d->statoInPunto(x, y);
                     if (i == d->statoPremuto) d->azioneStato(i);
-                } else {
+                } else if (!eraDrag) {
                     const int i = d->iconaInPunto(x, y);
                     if (i >= 0 && i == d->premuta) d->clic(i);
                 }
                 d->premuta = -1; d->statoPremuto = -1; d->dirty = true;
                 return 0;
             }
+            case WM_CAPTURECHANGED:
+                if (d->trascinaDa >= 0 && (HWND)l != h) {
+                    if (d->trascinaInCorso) d->terminaDrag(false);
+                    else { d->trascinaDa = -1; d->trascinaInCorso = false; }
+                    d->premuta = -1; d->dirty = true;
+                }
+                return 0;
             case WM_MOUSEWHEEL: {   // rotella sul volume: +-2% per scatto
                 POINT pt{GET_X_LPARAM(l), GET_Y_LPARAM(l)}; ScreenToClient(h, &pt);
                 // (sull'icona del centro di controllo, come prima sulla pillola dell'isola)
