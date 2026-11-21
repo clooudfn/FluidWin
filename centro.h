@@ -2510,7 +2510,7 @@ inline auto Motore::suTimerDopo() -> void {
     if (!pronto && adesso() - dopoT0 < 1.0) return;   // (al massimo un secondo: poi si apre comunque)
     KillTimer(icone, TIMER_DOPO);
     const int cosa = dopo; dopo = 0;
-    if (cosa == 1) apriLauncher();
+    if (cosa == 1) apriLauncher(dopoTipo != 0);
     else if (cosa == 2) apriCentro(dopoTipo);
 }
 
