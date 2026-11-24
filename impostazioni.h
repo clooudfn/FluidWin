@@ -30,6 +30,7 @@ struct Valori {
     bool tastoWin = true;         // il tasto Win da solo apre il launcher delle app (al posto dello Start)
     bool winTab = true;           // Alt+Tab apre la panoramica di FluidWin (fino alla 1.2.0 era Win+Tab: il nome e' rimasto)
     bool winS = true;             // Win+Tab apre la ricerca di FluidWin (il nome nel registro e' rimasto WinS)
+    bool winV = true;             // Win+V apre gli appunti in vetro di FluidWin
     bool banner = false;          // banner delle notifiche di FluidWin (spegne quelli di Windows, app per app)
     bool menuDestro = true;       // menu del tasto destro di FluidWin su desktop ed Esplora file (destro.h)
     bool notch = true;            // il notch in alto al centro sempre visibile (spento: a scomparsa, scende solo per volume, notifiche e avvisi; musica e timer nel dock)
@@ -122,7 +123,7 @@ inline void carica() {
     v.riduzione = leggiDword(L"Riduzione", 0) == 1 ? 1 : 0;
     { const DWORD a = leggiDword(L"Angoli", 0); v.angoli = a <= 2 ? (int)a : 0; }
     v.volume = leggiDword(L"Volume", 1); v.angolo = leggiDword(L"AngoloPanoramica", 1); v.winTab = leggiDword(L"WinTab", 1);
-    v.winS = leggiDword(L"WinS", 1); v.tastoWin = leggiDword(L"TastoWin", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
+    v.winS = leggiDword(L"WinS", 1); v.winV = leggiDword(L"WinV", 1); v.tastoWin = leggiDword(L"TastoWin", 1); v.banner = leggiDword(L"Banner", 0); v.menuDestro = leggiDword(L"MenuDestro", 1);
     v.notch = leggiDword(L"Notch", 1); v.oraDock = leggiDword(L"OraDock", 0);
     v.dockAuto = leggiDword(L"DockAutoNascosto", 1);
     { const DWORD l = leggiDword(L"DockLato", 0); v.dockLato = l <= 3 ? (int)l : 0; }
@@ -149,7 +150,7 @@ inline void salva() {
     scriviDword(L"Gelatina", v.gelatina); scriviDword(L"Genio", v.genio); scriviDword(L"Chiusura", v.chiusura);
     scriviDword(L"Apertura", v.apertura); scriviDword(L"OndaRicerca", v.onda); scriviDword(L"Riduzione", (DWORD)v.riduzione); scriviDword(L"Angoli", (DWORD)v.angoli);
     scriviDword(L"Volume", v.volume); scriviDword(L"AngoloPanoramica", v.angolo); scriviDword(L"WinTab", v.winTab);
-    scriviDword(L"WinS", v.winS); scriviDword(L"TastoWin", v.tastoWin); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
+    scriviDword(L"WinS", v.winS); scriviDword(L"WinV", v.winV); scriviDword(L"TastoWin", v.tastoWin); scriviDword(L"Banner", v.banner); scriviDword(L"MenuDestro", v.menuDestro); scriviDword(L"Lingua", (DWORD)v.lingua);
     scriviDword(L"Notch", v.notch); scriviDword(L"OraDock", v.oraDock);
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
@@ -465,6 +466,8 @@ private:
          L"Tieni Alt e premi Tab per scegliere la finestra, come prima", L"Hold Alt and press Tab to pick a window, as always", &Valori::winTab, S_TASTIERA},
         {L"Win+Tab apre la ricerca", L"Win+Tab opens search",
          L"App, file, impostazioni e calcoli (al posto della Visualizzazione attività)", L"Apps, files, settings and math (instead of Task View)", &Valori::winS, S_TASTIERA},
+        {L"Win+V apre gli appunti", L"Win+V opens Clipboard",
+         L"Cronologia appunti in vetro (al posto di Windows)", L"Liquid Glass clipboard history (instead of Windows)", &Valori::winV, S_TASTIERA},
         {L"Panoramica dall'angolo", L"Overview from the corner",
          L"Mouse nell'angolo in alto a sinistra", L"Move the mouse to the top-left corner", &Valori::angolo, S_TASTIERA},
         {L"Menu del tasto destro", L"Right-click menu",

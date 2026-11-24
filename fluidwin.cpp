@@ -41,6 +41,7 @@
 #include "destro.h"
 #include "aggiorna.h"
 #include "affianca.h"
+#include "appunti.h"
 
 // ---------------------------------------------------------------------------------------------
 // Parametri
@@ -3573,9 +3574,9 @@ static DWORD gThreadTasti = 0;
 static bool gWinGiu = false, gWinConAltro = false, gWinMaschera = false, gAltMaschera = false, gF4Preso = false;
 static const ULONG_PTR FIRMA_PROVA_TASTI = 0x464C5054;   // "FLPT": tasti delle prove automatiche (solo con --log)
 static DWORD gFrecciaPresa = 0;   // Win+Su/Giu trattenuto: ripetizioni e rilascio di quella freccia restano qui
-static const UINT WM_VOLUME = WM_APP + 6, WM_PANORAMICA = WM_APP + 7, WM_RICERCA = WM_APP + 8, WM_IMPOSTAZIONI = WM_APP + 9, WM_PANNELLO = WM_APP + 10, WM_CHIUDI_FG = WM_APP + 11;
-// scorciatoie di FluidWin (dalle impostazioni): tasti del volume, Alt+Tab (panoramica), Win+Tab (ricerca)
-static std::atomic<bool> gTastiVolume{false}, gTastoPanoramica{false}, gTastoRicerca{false}, gTastoWin{true};
+static const UINT WM_VOLUME = WM_APP + 6, WM_PANORAMICA = WM_APP + 7, WM_RICERCA = WM_APP + 8, WM_IMPOSTAZIONI = WM_APP + 9, WM_PANNELLO = WM_APP + 10, WM_CHIUDI_FG = WM_APP + 11, WM_APPUNTI = WM_APP + 46;
+// scorciatoie di FluidWin (dalle impostazioni): tasti del volume, Alt+Tab (panoramica), Win+Tab (ricerca), Win+V (appunti)
+static std::atomic<bool> gTastiVolume{false}, gTastoPanoramica{false}, gTastoRicerca{false}, gTastoWin{true}, gTastoAppunti{true};
 
 // Battito del thread principale: lo aggiorna un timer ogni 250 ms (e ogni fotogramma). Se e' fermo da piu' di un
 // secondo (FluidWin bloccato) l'hook non si tiene piu' i tasti: volume, Win, Alt+Tab e Alt+F4 tornano a Windows,
@@ -3806,6 +3807,11 @@ static LRESULT CALLBACK suTasto(int code, WPARAM w, LPARAM l) {
                 gWinConAltro = true; gWinMaschera = true;
                 return 1;
             }
+            if (gWinGiu && gLauncherTasto && k->vkCode == 'V' && gTastoAppunti && viva) {
+                if (giu) PostMessageW(gMessaggi, WM_APPUNTI, 0, 0);
+                gWinConAltro = true; gWinMaschera = true;
+                return 1;
+            }
             // Alt+Tab: la panoramica di FluidWin al posto del selettore di Windows, e si usa come lui: aperta con la
             // finestra di prima gia' scelta, ogni altro Tab (con Alt sempre premuto) va avanti, Maiusc+Tab indietro,
             // lasciando Alt si va sulla finestra scelta. Al rilascio di Alt va anche la maschera: Alt premuto e
@@ -3942,6 +3948,7 @@ static void altTabVeloce() {
     logf("alt+tab veloce (%d): %p %ls", gAltTabPassi, h, c);
 }
 static ricerca::Ricerca gRicerca;
+static appunti::Appunti gAppunti;
 static banner::Banner gBanner;
 static impostazioni::Finestra gImpostazioni;
 
@@ -4006,8 +4013,8 @@ static std::wstring diagnostica() {
     riga(L"Angoli: impostazione %d (0 tondi, 1 poco, 2 squadrati), Windhawk %d px", raggio::stile(), raggio::windhawk());
     riga(L"Giochi riconosciuti: %zu", giochiNoti().size());
     const impostazioni::Valori& v = impostazioni::valori();
-    riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, tasto Win %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
-         v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
+    riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, tasto Win %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, winV %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
+         v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.winV, v.angolo, v.menuDestro, v.notch, v.oraDock);
     riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra)", v.dockAuto, v.dockOpacita, v.dockSpazio,
          v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockLato);
     // icone fissate del dock (solo conteggi, niente nomi di app): per le segnalazioni di icone doppie, vuote o mancanti
@@ -4052,6 +4059,7 @@ static void applicaImpostazioni() {
     gTastiVolume = v.volume && gOsdOk;
     gTastoPanoramica = v.winTab;
     gTastoRicerca = v.winS;
+    gTastoAppunti = v.winV;
     gTastoWin = v.tastoWin;
     gBanner.accendi(v.banner);
     gMenuDestro = v.menuDestro;
@@ -4230,7 +4238,8 @@ static LRESULT CALLBACK procMessaggi(HWND h, UINT m, WPARAM w, LPARAM l) {
             return 0;
         case WM_APRI_LAUNCHER: if (gDockOk) gDock.apriLauncher(); return 0;
         case WM_HOTKEY: if (w == TASTO_PRIMO_PIANO) primoPiano(); return 0;
-        case WM_CLIPBOARDUPDATE: appunti::Cronologia::io().cambiato(); return 0;   // cronologia degli appunti
+        case WM_CLIPBOARDUPDATE: gAppunti.cattura(); return 0;   // cronologia degli appunti
+        case WM_APPUNTI: logf("appunti"); gAppunti.alterna(); return 0;
         case WM_APP + 14: {
             const POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)}; HWND h = WindowFromPoint(pt);
             wchar_t c[64] = L"", p[64] = L"", r[64] = L"";
@@ -4886,6 +4895,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (gDockOk) gDock.chiudi();
     gBanner.chiudiLettore();
     togliPrimoPiano();
+    gAppunti.distruggi();
     appunti::Cronologia::io().ferma();
     if (gOsdOk) gOsd.chiudi();
     // finestre appena create che un thread sta rendendo trasparenti: si aspetta che finisca (poco: con un'app

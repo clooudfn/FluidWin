@@ -615,14 +615,47 @@ inline auto Motore::disegnaAppunti(bool scuro, D2D1_COLOR_F ink) -> void {
                 else { riga.push_back(c); spazio = false; }
             }
         }
-        const bool sopra = pMouseDentro && (pSopra == e || pSopra == e + 1);
+        const bool sopra = pMouseDentro && (pSopra == e || pSopra == e + 1 || pSopra == e + 2);
+        const float bordoTesto = (sopra || v.fissata) ? (r.right - 62 * dpi) : (r.right - 12 * dpi);
         pennello->SetColor(ink);
-        scrivi(riga, fmtVoce, {tx, y + 6 * dpi, r.right - 34 * dpi, y + 26 * dpi});
+        scrivi(riga, fmtVoce, {tx, y + 6 * dpi, bordoTesto, y + 26 * dpi});
         pennello->SetColor(tenue);
-        scrivi(sotto, fmtSotto, {tx, y + 26 * dpi, r.right - 34 * dpi, y + 44 * dpi});
-        // x per toglierla, solo col mouse sopra
+        scrivi(sotto, fmtSotto, {tx, y + 26 * dpi, bordoTesto, y + 44 * dpi});
         const D2D1_RECT_F rx = {r.right - 30 * dpi, r.top + 13 * dpi, r.right - 6 * dpi, r.top + 37 * dpi};
+        const D2D1_RECT_F rf = {rx.left - 26 * dpi, rx.top, rx.left - 2 * dpi, rx.bottom};
+        const int ef = aggiungi(rf, A_APPUNTI_FISSA, (int)v.id);
         const int ex = aggiungi(rx, A_APPUNTI_TOGLI, (int)v.id);
+        if (sopra || v.fissata) {
+            const double hf = evidenzia(ef, rf, scuro, 12 * dpi);
+            pennello->SetColor(v.fissata
+                ? (scuro ? D2D1::ColorF(1.0f, 0.78f, 0.20f, 0.18f + 0.12f * (float)hf)
+                         : D2D1::ColorF(0.85f, 0.55f, 0.0f, 0.12f + 0.08f * (float)hf))
+                : (scuro ? D2D1::ColorF(1, 1, 1, 0.14f + 0.1f * (float)hf)
+                         : D2D1::ColorF(0, 0, 0, 0.08f + 0.06f * (float)hf)));
+            const float fcx = (rf.left + rf.right) / 2, fcy = (rf.top + rf.bottom) / 2;
+            dc->FillEllipse({{fcx, fcy}, 10 * dpi, 10 * dpi}, pennello);
+            ID2D1PathGeometry* geo = nullptr;
+            if (f2d && SUCCEEDED(f2d->CreatePathGeometry(&geo)) && geo) {
+                ID2D1GeometrySink* sink = nullptr;
+                if (SUCCEEDED(geo->Open(&sink)) && sink) {
+                    sink->BeginFigure({fcx - 1.5f * dpi, fcy - 4.5f * dpi}, v.fissata ? D2D1_FIGURE_BEGIN_FILLED : D2D1_FIGURE_BEGIN_HOLLOW);
+                    sink->AddLine({fcx + 4.0f * dpi, fcy + 1.0f * dpi});
+                    sink->AddLine({fcx + 1.5f * dpi, fcy + 2.5f * dpi});
+                    sink->AddLine({fcx - 0.5f * dpi, fcy + 0.5f * dpi});
+                    sink->AddLine({fcx - 3.0f * dpi, fcy - 2.0f * dpi});
+                    sink->EndFigure(D2D1_FIGURE_END_CLOSED);
+                    sink->Close();
+                    sink->Release();
+                    pennello->SetColor(v.fissata
+                        ? (scuro ? D2D1::ColorF(1.0f, 0.78f, 0.20f, 1.0f) : D2D1::ColorF(0.85f, 0.55f, 0.0f, 1.0f))
+                        : (pSopra == ef ? ink : tenue));
+                    if (v.fissata) dc->FillGeometry(geo, pennello);
+                    else dc->DrawGeometry(geo, pennello, 1.25f * dpi, tratto);
+                    dc->DrawLine({fcx - 1.0f * dpi, fcy + 1.0f * dpi}, {fcx - 4.0f * dpi, fcy + 4.0f * dpi}, pennello, 1.35f * dpi, tratto);
+                }
+                geo->Release();
+            }
+        }
         if (sopra) {
             const double hh = evidenzia(ex, rx, scuro, 12 * dpi);
             pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.14f + 0.1f * (float)hh) : D2D1::ColorF(0, 0, 0, 0.08f + 0.06f * (float)hh));
@@ -640,7 +673,8 @@ inline auto Motore::disegnaAppunti(bool scuro, D2D1_COLOR_F ink) -> void {
     dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
     const D2D1_RECT_F rp = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
     evidenzia(aggiungi(rp, A_APPUNTI_SVUOTA, 0), rp, scuro, 6 * dpi);
-    pennello->SetColor(voci.empty() ? tenue : D2D1::ColorF(1.0f, 0.27f, 0.23f, 1));
+    const bool haNonFissate = std::any_of(voci.begin(), voci.end(), [](const appunti::Voce& v) { return !v.fissata; });
+    pennello->SetColor(haNonFissate ? D2D1::ColorF(1.0f, 0.27f, 0.23f, 1) : tenue);
     scrivi(testi::t(L"Cancella tutto", L"Clear all"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
 }
 
@@ -2295,8 +2329,9 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
         case A_ALTRE_USCITE: menuUscite(e.r); break;
         case A_APPUNTI:      cambiaVista(P_APPUNTI, {(e.r.left + e.r.right) / 2, e.r.top + 30 * dpi}); break;
         case A_APPUNTI_VOCE: if (appunti::Cronologia::io().ricopia((UINT)e.indice)) chiudiPannello(); break;   // di nuovo negli appunti
+        case A_APPUNTI_FISSA: appunti::Cronologia::io().fissa((UINT)e.indice); break;
         case A_APPUNTI_TOGLI: appunti::Cronologia::io().togli((UINT)e.indice); break;
-        case A_APPUNTI_SVUOTA: appunti::Cronologia::io().svuota(); break;
+        case A_APPUNTI_SVUOTA: appunti::Cronologia::io().svuotaNonFissate(); break;
         case A_MIXER_MUTO:   mix.muto(e.indice / 1000, e.indice % 1000 - 1); leggiVolume(); pDirty = true; dirty = true; break;
         case A_MIXER_PRED: {
             const size_t u = e.indice / 1000;
