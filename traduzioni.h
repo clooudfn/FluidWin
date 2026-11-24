@@ -293,6 +293,8 @@ inline constexpr const wchar_t* RIGHE[][6] = {
     {L"Hills", L"Colinas", L"Collines", L"Hügel", L"Colinas", L"تلال"},
     {L"Pastel", L"Pastel", L"Pastel", L"Pastell", L"Pastel", L"باستيل"},
     {L"Silk", L"Seda", L"Soie", L"Seide", L"Seda", L"حرير"},
+    {L"Game awareness", L"Detección de juegos", L"Détection des jeux", L"Spielerkennung", L"Detecção de jogos", L"اكتشاف الألعاب"},
+    {L"Keeps the dock completely hidden while playing games", L"Mantiene el dock completamente oculto mientras juegas", L"Garde le dock complètement masqué pendant que vous jouez", L"Hält das Dock beim Spielen vollständig ausgeblendet", L"Mantém o dock completamente oculto enquanto você joga", L"يُبقي شريط الإرساء مخفيًا تمامًا أثناء اللعب"},
     // errori del pacchetto di cursori (cursori.h, "italiano|inglese")
     {L"file not found", L"archivo no encontrado", L"fichier introuvable", L"Datei nicht gefunden", L"arquivo não encontrado", L"الملف غير موجود"},
     {L"a .zip, .rar or .7z file is needed", L"se necesita un archivo .zip, .rar o .7z", L"un fichier .zip, .rar ou .7z est nécessaire", L"eine .zip-, .rar- oder .7z-Datei ist nötig", L"é preciso um arquivo .zip, .rar ou .7z", L"يلزم ملف ‎.zip‎ أو ‎.rar‎ أو ‎.7z‎"},

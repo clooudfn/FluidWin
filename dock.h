@@ -782,12 +782,17 @@ public:
         const bool si = tipo == 2;
         if (si == nascostoSchermoIntero) return;
         nascostoSchermoIntero = si;
-        for (HWND h : {icone, vetro}) {
-            if (!si && h == vetro && GetPropW(h, VETRO_FUORI)) continue;   // (fuori dallo schermo: lo rimette aggiornaVetro)
-            ShowWindow(h, si ? SW_HIDE : SW_SHOWNOACTIVATE);
+        if (si) {
+            for (HWND h : {icone, vetro, vetroStato, vetroOra}) if (h) ShowWindow(h, SW_HIDE);
+            rivelato = false; rivelatoI = false; fuoriDal = -1; fuoriDalI = -1;
+            nascondiSchede(); nascondiLauncher(); ant.chiudi();
+        } else {
+            for (HWND h : {icone, vetro}) {
+                if (!h || (h == vetro && GetPropW(h, VETRO_FUORI))) continue;   // (fuori dallo schermo: lo rimette aggiornaVetro)
+                ShowWindow(h, SW_SHOWNOACTIVATE);
+            }
+            dirty = true;
         }
-        if (si) { nascondiSchede(); nascondiLauncher(); }
-        if (!si) dirty = true;
     }
 
     notch::Notch& ilNotch() { return notch; }
@@ -1861,6 +1866,7 @@ private:
     }
 
     void controllaBordo() {
+        if (nascostoSchermoIntero) return;
         controllaClicFuori();
         POINT pt; GetCursorPos(&pt);
         // un altro schermo: col mouse fermo sul suo bordo dal lato del dock (e nessun tasto premuto, per non spostarlo
