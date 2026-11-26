@@ -141,7 +141,10 @@ inline auto Motore::apriPannello(int tipo) -> void {
 
 // i dati che servono a una vista, letti quando ci si entra
 inline auto Motore::preparaVista(int tipo) -> void {
-    if (tipo == P_SFONDO) leggiAppSfondo();   // l'elenco nuovo arriva dal thread e l'altezza si adatta
+    if (tipo == P_SFONDO) {
+        sfondoPag = 0; sfondoPagVis = 0.0f; sfondoPagMs = 0; sfondoWheelAcc = 0;
+        leggiAppSfondo();   // l'elenco nuovo arriva dal thread e l'altezza si adatta
+    }
     else if (tipo == P_WIDGET) {   // (la ricerca della citta' lasciata aperta non si ritrova riaprendo)
         widD.aggiorna(); wid = widD.copia();
         wCitta = false; wK = 0; wUnitaPos = -1; wTesto.clear(); wCercato.clear(); wLuoghi.clear(); wStato = widget::R_VUOTA; wSel = 0;
@@ -393,6 +396,17 @@ inline auto Motore::renderPannello() -> bool {
         const double x = std::clamp((ora - tVista) / DURATA_VISTA, 0.0, 1.0);
         e = 1 - std::pow(1 - x, 3);
         if (x >= 1) { tVista = -1; vistaPrima = P_NESSUNO; } else pAnimazione = true;
+    }
+
+    if (pannelloTipo == P_SFONDO && std::abs(sfondoPagVis - (float)sfondoPag) > 0.001f) {
+        const ULONGLONG oraMs = vetro::ms();
+        const float rawDt = sfondoPagMs ? (oraMs > sfondoPagMs ? (float)(oraMs - sfondoPagMs) / 1000.0f : 0.001f) : 0.016f;
+        const float dt = std::clamp(rawDt, 0.001f, 0.05f);
+        sfondoPagMs = oraMs;
+        sfondoPagVis += ((float)sfondoPag - sfondoPagVis) * (1.0f - std::exp(-dt * 15.0f));
+        if (std::abs(sfondoPagVis - (float)sfondoPag) < 0.002f) sfondoPagVis = (float)sfondoPag;
+        else pAnimazione = true;
+        pDirty = true;
     }
 
     const bool scuro = temaScuro();
@@ -917,22 +931,13 @@ inline auto Motore::disegnaSfondo(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(ink);
     // (il titolo e' nella testata della vista)
     const float tw = (PW - 2 * m) / 4, th = 86 * dpi, top = 10 * dpi;
-    if (appSfondo.empty()) {
-        pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.6f});
-        scrivi(testi::t(L"Nessuna app in background", L"No apps in the background"), fmtSotto, {m, top, PW - m, top + 40 * dpi});
-    }
-    for (size_t i = 0; i < appSfondo.size() && i < 24; i++) {
-        const float x = m + (i % 4) * tw, y = top + (i / 4) * th;
-        const D2D1_RECT_F r = {x + 2 * dpi, y, x + tw - 2 * dpi, y + th - 6 * dpi};
-        const int e = aggiungi(r, A_APP, (int)i);
-        evidenzia(e, r, scuro, 6 * dpi);
-        const float s = (e == pPremuto) ? 0.9f : 1.0f;   // si "schiaccia" alla pressione
-        const float cx = (r.left + r.right) / 2, cy = r.top + 30 * dpi, l = 22 * dpi * s;
-        if (appSfondo[i].icona) dc->DrawBitmap(appSfondo[i].icona, D2D1::RectF(cx - l, cy - l, cx + l, cy + l), 1.0f, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
-        else { pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f)); dc->FillRoundedRectangle({{cx - l, cy - l, cx + l, cy + l}, 10 * dpi, 10 * dpi}, pennello); }
-        pennello->SetColor(ink);
-        scrivi(appSfondo[i].nome, fmtNome, {r.left + 3 * dpi, cy + 26 * dpi, r.right - 3 * dpi, cy + 44 * dpi});
-    }
+    const int righeMax = sfondoRighePagina();
+    const int perPag = righeMax * 4;
+    const int nPag = sfondoPagine();
+    sfondoPag = std::clamp(sfondoPag, 0, nPag - 1);
+    sfondoPagVis = std::clamp(sfondoPagVis, 0.0f, (float)(nPag - 1));
+    const int righeVis = (nPag > 1) ? righeMax : std::max(1, std::min(righeMax, (int)((appSfondo.size() + 3) / 4)));
+
     // piede: il pannello di Windows, per i menu col tasto destro delle singole app
     const float py = PH - 46 * dpi;
     pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
@@ -942,6 +947,96 @@ inline auto Motore::disegnaSfondo(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(ink);
     scrivi(testi::t(L"Pannello di Windows", L"Windows panel"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
     chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
+
+    if (nPag > 1) {
+        const float pagerY = top + righeMax * th + 2 * dpi;
+        const float pagerCy = pagerY + 12 * dpi;
+        const float dotH = 6.0f * dpi, dotMin = 6.0f * dpi, dotMax = 16.0f * dpi, dotGap = 8.0f * dpi;
+        const std::wstring pagTxt = std::to_wstring(sfondoPag + 1) + L" / " + std::to_wstring(nPag);
+        const std::wstring maxPagTxt = std::to_wstring(nPag) + L" / " + std::to_wstring(nPag);
+        const float pillW = std::max(46.0f * dpi, larghezzaTesto(maxPagTxt, fmtNome) + 18 * dpi);
+        const float centerW = (nPag <= 7) ? ((nPag * 6.0f + 10.0f) * dpi + (nPag - 1) * dotGap) : pillW;
+        const float lx = PW / 2 - centerW / 2 - 18 * dpi;
+        const float rx = PW / 2 + centerW / 2 + 18 * dpi;
+
+        auto freccia = [&](float cx, bool destra, bool attiva, int dest) {
+            double h = 0.0;
+            if (attiva) {
+                const D2D1_RECT_F hr = {cx - 12 * dpi, pagerCy - 12 * dpi, cx + 12 * dpi, pagerCy + 12 * dpi};
+                h = evidenzia(aggiungi(hr, A_SFONDO_PAGINA, dest), {0, 0, 0, 0}, scuro, 0);
+                if (h > 0.01) {
+                    pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * (float)h) : D2D1::ColorF(0, 0, 0, 0.07f * (float)h));
+                    dc->FillEllipse({{cx, pagerCy}, 10 * dpi, 10 * dpi}, pennello);
+                }
+            }
+            const float ca = attiva ? (0.72f + 0.28f * std::min(1.0f, (float)h)) : 0.22f;
+            pennello->SetColor({ink.r, ink.g, ink.b, ink.a * ca});
+            if (destra) chevronDestra(cx, pagerCy);
+            else { linea(2, -4, -2, 0, cx, pagerCy, 1.8f); linea(-2, 0, 2, 4, cx, pagerCy, 1.8f); }
+        };
+        freccia(lx, false, sfondoPag > 0, sfondoPag - 1);
+
+        if (nPag <= 7) {
+            float curX = PW / 2 - centerW / 2;
+            for (int pg = 0; pg < nPag; pg++) {
+                const float w = std::max(0.0f, 1.0f - std::abs((float)pg - sfondoPagVis));
+                const float dotW = dotMin + (dotMax - dotMin) * w;
+                const float dotCx = curX + dotW * 0.5f;
+                const float halfHitW = std::max(7.0f * dpi, dotW * 0.5f);
+                const D2D1_RECT_F hr = {dotCx - halfHitW, pagerCy - 10 * dpi, dotCx + halfHitW, pagerCy + 10 * dpi};
+                const double hov = evidenzia(aggiungi(hr, A_SFONDO_PAGINA, pg), {0, 0, 0, 0}, scuro, 0);
+                const float baseAlfa = 0.25f + 0.30f * std::min(1.0f, (float)hov);
+                const float dotAlfa = baseAlfa + (ink.a - baseAlfa) * w;
+                pennello->SetColor({ink.r, ink.g, ink.b, dotAlfa});
+                dc->FillRoundedRectangle({{curX, pagerCy - dotH * 0.5f, curX + dotW, pagerCy + dotH * 0.5f}, dotH * 0.5f, dotH * 0.5f}, pennello);
+                curX += dotW + dotGap;
+            }
+        } else {
+            const D2D1_RECT_F pr = {PW / 2 - pillW * 0.5f, pagerCy - 9 * dpi, PW / 2 + pillW * 0.5f, pagerCy + 9 * dpi};
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+            dc->FillRoundedRectangle({pr, 9 * dpi, 9 * dpi}, pennello);
+            pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.85f});
+            scrivi(pagTxt, fmtNome, pr);
+        }
+
+        freccia(rx, true, sfondoPag < nPag - 1, sfondoPag + 1);
+    }
+
+    if (appSfondo.empty()) {
+        pennello->SetColor({ink.r, ink.g, ink.b, ink.a * 0.6f});
+        scrivi(testi::t(L"Nessuna app in background", L"No apps in the background"), fmtSotto, {m, top, PW - m, top + 40 * dpi});
+        return;
+    }
+
+    dc->PushAxisAlignedClip({0, top, PW, top + righeVis * th}, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+    const int p0 = std::clamp((int)std::floor(sfondoPagVis), 0, nPag - 1);
+    const int p1 = std::clamp((int)std::ceil(sfondoPagVis), 0, nPag - 1);
+    for (int pg = p0; pg <= p1; pg++) {
+        const float dx = ((float)pg - sfondoPagVis) * PW;
+        const float dist = std::min(1.0f, std::abs((float)pg - sfondoPagVis));
+        const float pagAlfa = 1.0f - 0.45f * dist;
+        const bool interattiva = (pg == sfondoPag && dist < 0.15f);
+        const size_t start = (size_t)pg * (size_t)perPag;
+        const size_t end = std::min(appSfondo.size(), start + (size_t)perPag);
+        for (size_t i = start; i < end; i++) {
+            const size_t localIdx = i - start;
+            const float x = m + (localIdx % 4) * tw + dx, y = top + (localIdx / 4) * th;
+            const D2D1_RECT_F r = {x + 2 * dpi, y, x + tw - 2 * dpi, y + th - 6 * dpi};
+            const int e = interattiva ? aggiungi(r, A_APP, (int)i) : -1;
+            if (e >= 0) evidenzia(e, r, scuro, 6 * dpi);
+            const float s = (e >= 0 && e == pPremuto) ? 0.9f : 1.0f;   // si "schiaccia" alla pressione
+            const float cx = (r.left + r.right) / 2, cy = r.top + 30 * dpi, l = 22 * dpi * s;
+            if (appSfondo[i].icona)
+                dc->DrawBitmap(appSfondo[i].icona, D2D1::RectF(cx - l, cy - l, cx + l, cy + l), pagAlfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
+            else {
+                pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f * pagAlfa));
+                dc->FillRoundedRectangle({{cx - l, cy - l, cx + l, cy + l}, 10 * dpi, 10 * dpi}, pennello);
+            }
+            pennello->SetColor({ink.r, ink.g, ink.b, ink.a * pagAlfa});
+            scrivi(appSfondo[i].nome, fmtNome, {r.left + 3 * dpi, cy + 26 * dpi, r.right - 3 * dpi, cy + 44 * dpi});
+        }
+    }
+    dc->PopAxisAlignedClip();
 }
 
 // ---- notifiche e calendario (clic sull'ora) ----
@@ -2047,20 +2142,47 @@ inline auto Motore::leggiAppSfondo() -> void {
         // pannello aperto: si allunga o si accorcia con le righe di icone (il bordo in basso resta fermo)
         const int s = slotCorrente;
         usa(0);
+        const int maxPag = std::max(0, sfondoPagine() - 1);
+        sfondoPag = std::clamp(sfondoPag, 0, maxPag);
+        sfondoPagVis = std::clamp(sfondoPagVis, 0.0f, (float)maxPag);
         if (pannelloTipo == P_SFONDO && !pChiusura) {
             const float nuova = altezzaVista(P_SFONDO);
             if (nuova != PH) { PH = nuova; pAnimazione = true; }   // con la molla, dal bordo in basso
+            if (std::abs(sfondoPagVis - (float)sfondoPag) > 0.001f) { sfondoPagMs = vetro::ms(); pAnimazione = true; }
             pSopra = pPremuto = -1; evidP.clear(); pDirty = true;
         }
         usa(s);
     });
 }
 
+inline auto Motore::sfondoRighePagina() const -> int {
+    const int entrano = std::max(1, (int)((altezzaMassimaP() / dpi - TESTA - 10 - 52 - 28) / 86));
+    return std::max(1, std::min(5, entrano));
+}
+
+inline auto Motore::sfondoPagine() const -> int {
+    const int perPag = sfondoRighePagina() * 4;
+    return std::max(1, (int)(((int)appSfondo.size() + perPag - 1) / perPag));
+}
+
+inline auto Motore::vaiPaginaSfondo(int p) -> void {
+    const int nPag = sfondoPagine();
+    const int target = std::clamp(p, 0, nPag - 1);
+    if (target == sfondoPag) return;
+    sfondoPag = target;
+    sfondoPagMs = vetro::ms();
+    pSopra = pPremuto = -1;
+    evidP.clear();
+    pDirty = true;
+    pAnimazione = true;
+}
+
 inline auto Motore::altezzaSfondo() const -> float {
-    // righe di app: quante ce ne sono (massimo 6) e quante ne entrano nello spazio sopra l'isola
-    const int entrano = std::max(1, (int)((altezzaMassimaP() / dpi - TESTA - 10 - 52) / 86));
-    const int righe = std::max(1, std::min({(int)std::min<size_t>(6, (appSfondo.size() + 3) / 4), entrano}));
-    return std::round((10 + righe * 86 + 52) * dpi);
+    const int nPag = sfondoPagine();
+    const int righeMax = sfondoRighePagina();
+    const int righe = (nPag > 1) ? righeMax : std::max(1, std::min(righeMax, (int)((appSfondo.size() + 3) / 4)));
+    const int pagerH = (nPag > 1) ? 28 : 0;
+    return std::round((10 + righe * 86 + pagerH + 52) * dpi);
 }
 
 inline auto Motore::elencaAppSfondo() -> std::vector<AppSfondo> {
@@ -2175,8 +2297,9 @@ inline auto Motore::apriAppSfondo(const AppSfondo& a) -> void {
 
 inline auto Motore::eseguiPannello(const Elemento& e) -> void {
     switch (e.azione) {
-        case A_APP:          chiudiPannello(); if (e.indice < (int)appSfondo.size()) apriAppSfondo(appSfondo[e.indice]); break;
-        case A_TUTTE:        chiudiPannello(); pannelloWindows(); break;
+        case A_APP:           chiudiPannello(); if (e.indice < (int)appSfondo.size()) apriAppSfondo(appSfondo[e.indice]); break;
+        case A_TUTTE:         chiudiPannello(); pannelloWindows(); break;
+        case A_SFONDO_PAGINA: vaiPaginaSfondo(e.indice); break;
         // Wi-Fi e Bluetooth: interruttori (se la scheda c'e'); il tasto destro apre comunque le impostazioni
         case A_RETE:
             if (sis.wifi >= 0) { sis.impostaRadio(1, sis.wifi != 1); pDirty = true; }
@@ -2398,7 +2521,15 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
             return 0;
         }
         case WM_MOUSEWHEEL:
-            if (d->pannelloTipo == P_CONTROLLO) d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f), d->pDirty = true;
+        case WM_MOUSEHWHEEL:
+            if (m == WM_MOUSEWHEEL && d->pannelloTipo == P_CONTROLLO)
+                d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f), d->pDirty = true;
+            else if (d->pannelloTipo == P_SFONDO && !d->pChiusura && d->sfondoPagine() > 1) {
+                const int dir = (m == WM_MOUSEHWHEEL) ? 1 : -1;
+                d->sfondoWheelAcc += dir * GET_WHEEL_DELTA_WPARAM(w);
+                if (d->sfondoWheelAcc >= WHEEL_DELTA) { d->sfondoWheelAcc = 0; d->vaiPaginaSfondo(d->sfondoPag + 1); }
+                else if (d->sfondoWheelAcc <= -WHEEL_DELTA) { d->sfondoWheelAcc = 0; d->vaiPaginaSfondo(d->sfondoPag - 1); }
+            }
             return 0;
         // Esc chiude tutto; Backspace (o Alt+freccia sinistra) torna al centro di controllo da una vista interna
         case WM_APP + 4: if (d->pannelloTipo != P_NESSUNO && !d->pChiusura) prendiFuoco(h); return 0;

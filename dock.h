@@ -2950,7 +2950,7 @@ private:
     widget::Istantanea wid;              // l'ultima copia, per il disegno
     jumplist::Indice jumpList;           // comandi delle app (tasto destro sulle icone), letti dai file di Windows
     IDWriteTextFormat* fmtNotizia = nullptr;
-    enum Azione { A_APP, A_TUTTE, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
+    enum Azione { A_APP, A_TUTTE, A_SFONDO_PAGINA, A_RETE, A_BLUETOOTH, A_VOLUME, A_MUTO, A_AUDIO, A_SCHERMO, A_ENERGIA, A_IMPOSTAZIONI,
                   A_NOTIFICA, A_RIMUOVI, A_CANCELLA, A_IMPOST_NOTIFICHE, A_TEMA, A_FLUIDWIN, A_LUMINOSITA,
                   A_WIDGET, A_SFONDO, A_NOTIZIA, A_NOTIFICHE, A_INDIETRO, A_SVEGLIO, A_SILENZIO, A_TIMER, A_MICROFONO,
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
@@ -3331,8 +3331,15 @@ private:
     // millisecondi (tutti i processi del sistema, il registro, l'elenco delle app dello Store): lo fa un thread a
     // parte, e intanto il pannello mostra l'elenco di prima
     bool lavoroSfondo = false;
+    int sfondoPag = 0;            // current target page (0 .. nPagine - 1)
+    float sfondoPagVis = 0.0f;    // smoothly animated visual page position
+    ULONGLONG sfondoPagMs = 0;    // last animation tick ms
+    int sfondoWheelAcc = 0;       // wheel delta accumulator for trackpad smoothness
     void leggiAppSfondo();
 
+    int sfondoRighePagina() const;
+    int sfondoPagine() const;
+    void vaiPaginaSfondo(int p);
     float altezzaSfondo() const;
 
     static std::vector<AppSfondo> elencaAppSfondo();
