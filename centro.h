@@ -111,7 +111,7 @@ inline auto Motore::apriPannello(int tipo) -> void {
     // spazio vero accanto all'icona del centro di controllo (schermi bassi, scala al 150%: 1080 px sono 720 punti):
     // nessuna vista lo supera. Il pannello sta dal lato interno del dock: sopra l'icona (dock in basso), sotto (in alto),
     // alla sua destra o alla sua sinistra (ai lati, col fondo all'altezza del fondo dell'icona)
-    const RECT ic = aSchermo(rettCentro());
+    const RECT ic = aSchermo(tipo == P_AI ? rettAI() : tipo == P_LOGI ? rettLogi() : tipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
     const int stacco = (int)std::round(PAD + 10 * dpi);
     int y1 = ic.top - stacco;   // (bordo in basso del pannello; col dock in alto e' quello in alto)
     if (lato == 1) y1 = ic.bottom + stacco;
@@ -151,6 +151,9 @@ inline auto Motore::preparaVista(int tipo) -> void {
     else if (tipo == P_MIXER) mix.leggi();
     else if (tipo == P_APPUNTI) versioneAppunti = appunti::Cronologia::io().versione;
     else if (tipo == P_WIFI) { wlan.avvia(); wlan.cerca(); wlCercataT = adesso(); copiaWifi(); }   // (il thread parte alla prima apertura)
+    else if (tipo == P_AI) { aiStato = aiMon.copia(); aiVer = aiMon.versione.load(); aiLetto = true; aiScroll = 0; dirty = true; }
+    else if (tipo == P_LOGI) { logiStato = logiMon.copia(); logiVer = logiMon.versione.load(); logiScroll = 0; logiMon.aggiornaOra(); dirty = true; }
+    else if (tipo == P_WPLUGIN) { wplugStato = wplugMon.copia(); wplugVer = wplugMon.versione.load(); wplugScroll = 0; dirty = true; }
 }
 
 // altezza di tutta la vista (con la testata per quelle interne), mai oltre lo spazio sopra il dock
@@ -163,6 +166,9 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
     else if (tipo == P_MIXER) h = altezzaMixer() + testa;
     else if (tipo == P_APPUNTI) h = altezzaAppunti() + testa;
     else if (tipo == P_WIFI) h = altezzaWifi() + testa;
+    else if (tipo == P_AI) h = altezzaAI();
+    else if (tipo == P_LOGI) h = altezzaLogi();
+    else if (tipo == P_WPLUGIN) h = altezzaWPlugin();
     else h = altezzaControllo();
     return std::min(h, altezzaMassimaP());
 }
@@ -172,7 +178,7 @@ inline auto Motore::altezzaVista(int tipo) const -> float {
 inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     if (pannelloTipo == P_NESSUNO || pChiusura || tipo == pannelloTipo) return;
     vistaPrima = pannelloTipo; phPrima = PH;
-    vistaAvanti = tipo != P_CONTROLLO;
+    vistaAvanti = tipo != P_CONTROLLO && tipo != P_AI && tipo != P_LOGI && tipo != P_WPLUGIN;
     if (vistaAvanti) origineVista = origineRitorno = origine;
     preparaVista(tipo);
     pannelloTipo = tipo;
@@ -183,7 +189,7 @@ inline auto Motore::cambiaVista(int tipo, D2D1_POINT_2F origine) -> void {
     pAnimazione = true; pDirty = true;
 }
 
-inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
+inline auto Motore::tornaIndietro() -> void { if (pannelloTipo != P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN && pannelloTipo != P_NESSUNO) cambiaVista(P_CONTROLLO, origineRitorno); }
 
 inline auto Motore::inTransizione() const -> bool { return tVista >= 0; }
 
@@ -334,7 +340,7 @@ inline auto Motore::posizionaPannello(double k) -> void {
     {   // nasce piccolo sopra l'icona del centro di controllo nel dock e cresce (senza piegarsi)
     {   // nasce piccolo accanto all'icona del centro di controllo nel dock e cresce (senza piegarsi), dal bordo verso il dock
         const float s = (float)(0.10 + 0.90 * k);
-        const RECT ic = aSchermo(rettCentro());
+        const RECT ic = aSchermo(pannelloTipo == P_AI ? rettAI() : pannelloTipo == P_LOGI ? rettLogi() : pannelloTipo == P_WPLUGIN ? rettWPlugin(wplugIdAperto) : rettCentro());
         const float ax = std::clamp((ic.left + ic.right) / 2.0f - (float)r.left, 0.0f, pw), ay = std::clamp((ic.top + ic.bottom) / 2.0f - (float)r.top, 0.0f, ph);
         const D2D1_POINT_2F p = lato == 1 ? D2D1_POINT_2F{ax, 0} : lato == 2 ? D2D1_POINT_2F{0, ay} : lato == 3 ? D2D1_POINT_2F{pw, ay} : D2D1_POINT_2F{ax, ph};
         m = D2D1::Matrix3x2F::Scale(s, s, p);
@@ -480,6 +486,9 @@ inline auto Motore::disegnaVista(int tipo, float h, bool scuro, D2D1_COLOR_F ink
     const float phSalvato = PH;
     PH = h; baseVista = t; dc->SetTransform(t);
     if (tipo == P_CONTROLLO) disegnaControllo(scuro, ink);
+    else if (tipo == P_AI) disegnaAI(scuro, ink);
+    else if (tipo == P_LOGI) disegnaLogi(scuro, ink);
+    else if (tipo == P_WPLUGIN) disegnaWPlugin(scuro, ink);
     else {
         const float testa = std::round(TESTA * dpi);
         disegnaTesta(tipo, scuro, ink);
@@ -1194,6 +1203,879 @@ inline auto Motore::disegnaNotifiche(bool scuro, D2D1_COLOR_F ink) -> void {
     pennello->SetColor(ink);
     scrivi(testi::t(L"Impostazioni notifiche", L"Notification settings"), fmtVoce, {m, rp.top, PW - m - 20 * dpi, rp.bottom});
     chevronDestra(PW - m - 4 * dpi, (rp.top + rp.bottom) / 2);
+}
+
+// ---- Monitor AI ----
+static constexpr float AI_TESTA = 62, AI_SCHEDA = 66, AI_PIEDE = 48;
+
+inline auto Motore::sincronizzaAI() -> void {
+    const uint64_t v = aiMon.versione.load(std::memory_order_relaxed);
+    if (v == aiVer) return;
+    ai::Riepilogo nuovo = aiMon.copia();
+    const int s = slotCorrente;
+    usa(0);
+    const bool aiAperto = (pannelloTipo == P_AI && !pChiusura);
+    if (aiAperto) {
+        aiLetto = true;
+    } else {
+        for (const auto& a : nuovo.agenti) {
+            if (a.stato != ai::Stato::Completato && a.stato != ai::Stato::InAttesa) continue;
+            bool giaNotato = false;
+            for (const auto& old : aiStato.agenti) {
+                if (old.id == a.id && old.stato == a.stato && old.aggiornatoT == a.aggiornatoT) {
+                    giaNotato = true;
+                    break;
+                }
+            }
+            if (!giaNotato) { aiLetto = false; break; }
+        }
+    }
+    bool haAvviso = false;
+    int avvisoCode = 0;
+    std::wstring avvisoMsg;
+    if (aiVer > 0 && aiAvvisi && !comodita::silenzio()) {
+        const ai::Agente* scelto = nullptr;
+        int sceltoCode = -1;
+        const wchar_t* sceltoSuf = nullptr;
+        for (const auto& a : nuovo.agenti) {
+            ai::Stato prev = ai::Stato::Inattivo;
+            for (const auto& old : aiStato.agenti) {
+                if (old.id == a.id) { prev = old.stato; break; }
+            }
+            int code = -1;
+            const wchar_t* suf = nullptr;
+            if (a.stato == ai::Stato::InAttesa && prev != ai::Stato::InAttesa) {
+                code = 1;
+                suf = testi::t(L"In attesa", L"Needs input");
+            } else if (a.stato == ai::Stato::Errore && prev == ai::Stato::Occupato) {
+                code = 2;
+                suf = testi::t(L"Errore", L"Error");
+            } else if (a.stato == ai::Stato::Completato && prev == ai::Stato::Occupato) {
+                code = 0;
+                suf = testi::t(L"Fatto", L"Done");
+            }
+            if (code < 0) continue;
+            if (!scelto || (sceltoCode == 0 && code != 0)) {
+                scelto = &a;
+                sceltoCode = code;
+                sceltoSuf = suf;
+                if (sceltoCode != 0) break;
+            }
+        }
+        if (scelto) {
+            std::wstring label = !scelto->titolo.empty()
+                ? scelto->titolo
+                : (!scelto->nome.empty() ? scelto->nome : ai::dettagli::nomeFonte(scelto->fonte));
+            if (label.size() > 28) {
+                label.resize(27);
+                if (!label.empty() && label.back() >= 0xD800 && label.back() <= 0xDBFF) label.pop_back();
+                while (!label.empty() && label.back() == L' ') label.pop_back();
+                label += L"…";
+            }
+            haAvviso = true;
+            avvisoCode = sceltoCode;
+            avvisoMsg = label + L" · " + sceltoSuf;
+        }
+    }
+    aiStato = std::move(nuovo);
+    aiVer = v;
+    dirty = true;
+    if (haAvviso) ilNotch().avviso(avvisoMsg, sensori::S_AI, avvisoCode, true);
+    if (aiAperto) {
+        const float nuova = altezzaVista(P_AI);
+        if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        pSopra = pPremuto = -1;
+        evidP.clear();
+        pDirty = true;
+    }
+    usa(s);
+}
+
+inline auto Motore::altezzaAI() const -> float {
+    const float corpo = aiStato.agenti.empty() ? 72.0f : (float)aiStato.agenti.size() * AI_SCHEDA + 6.0f;
+    return std::min(altezzaMassimaP(), std::round((AI_TESTA + corpo + AI_PIEDE) * dpi));
+}
+
+inline auto Motore::focusAgente(const ai::Agente& a) -> void {
+    HWND target = ai::trovaEAttivaFinestraAgente(a);
+    if (target) {
+        chiudiPannello();
+        if (IsIconic(target)) ShowWindow(target, SW_RESTORE);
+        portaDavanti(target);
+        return;
+    }
+    if (!a.cwd.empty() && GetFileAttributesW(a.cwd.c_str()) != INVALID_FILE_ATTRIBUTES) {
+        chiudiPannello();
+        ShellExecuteW(nullptr, L"open", a.cwd.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
+
+inline auto Motore::disegnaAI(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi;
+    const float rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F scheda = scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(1, 1, 1, 0.52f);
+    const D2D1_COLOR_F blu = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1);
+
+    auto coloreStato = [&](ai::Stato st) -> D2D1_COLOR_F {
+        switch (st) {
+            case ai::Stato::Occupato:   return D2D1::ColorF(0.20f, 0.76f, 1.0f, 1.0f);
+            case ai::Stato::InAttesa:   return D2D1::ColorF(0.98f, 0.65f, 0.12f, 1.0f);
+            case ai::Stato::Errore:     return D2D1::ColorF(0.95f, 0.28f, 0.25f, 1.0f);
+            case ai::Stato::Completato: return D2D1::ColorF(0.20f, 0.78f, 0.35f, 1.0f);
+            case ai::Stato::Inattivo:   return scuro ? D2D1::ColorF(1, 1, 1, 0.38f) : D2D1::ColorF(0, 0, 0, 0.32f);
+        }
+        return tenue;
+    };
+    auto testoStato = [&](ai::Stato st) -> std::wstring {
+        switch (st) {
+            case ai::Stato::Occupato:   return testi::t(L"Occupato", L"Busy");
+            case ai::Stato::InAttesa:   return testi::t(L"In attesa", L"Waiting");
+            case ai::Stato::Errore:     return testi::t(L"Errore", L"Error");
+            case ai::Stato::Completato: return testi::t(L"Fatto", L"Done");
+            case ai::Stato::Inattivo:   return testi::t(L"Inattivo", L"Idle");
+        }
+        return L"";
+    };
+
+    // Testata interna: titolo, pillola stato, pulsante Pulisci, pulsante Nuova chat, totale token
+    const std::wstring titolo = testi::t(L"Monitor AI", L"AI Monitor");
+    const float lt = larghezzaTesto(titolo, fmtTitolo);
+    pennello->SetColor(ink);
+    scrivi(titolo, fmtTitolo, {m, 10 * dpi, m + lt + 8 * dpi, 34 * dpi});
+
+    const D2D1_RECT_F rPlus = {PW - m - 24 * dpi, 10 * dpi, PW - m, 34 * dpi};
+    pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+    dc->FillRoundedRectangle({rPlus, 12 * dpi, 12 * dpi}, pennello);
+    evidenzia(aggiungi(rPlus, A_AI_NUOVA_CHAT, 0), rPlus, scuro, 12 * dpi);
+    {
+        const float cxP = (rPlus.left + rPlus.right) / 2, cyP = (rPlus.top + rPlus.bottom) / 2, arm = 4.5f * dpi;
+        pennello->SetColor(ink);
+        dc->DrawLine({cxP - arm, cyP}, {cxP + arm, cyP}, pennello, 1.6f * dpi, tratto);
+        dc->DrawLine({cxP, cyP - arm}, {cxP, cyP + arm}, pennello, 1.6f * dpi, tratto);
+    }
+
+    const bool haCompletati = std::any_of(aiStato.agenti.begin(), aiStato.agenti.end(), [](const ai::Agente& a) {
+        return a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore;
+    });
+    float limPill = rPlus.left - 8 * dpi;
+    if (haCompletati) {
+        const std::wstring cl = testi::t(L"Pulisci", L"Clear");
+        const float cw = larghezzaTesto(cl, fmtSotto) + 18 * dpi;
+        const D2D1_RECT_F rc = {rPlus.left - 6 * dpi - cw, 11 * dpi, rPlus.left - 6 * dpi, 33 * dpi};
+        evidenzia(aggiungi(rc, A_AI_PULISCI, 0), rc, scuro, 11 * dpi);
+        pennello->SetColor(blu);
+        scrivi(cl, fmtNome, rc);
+        limPill = rc.left - 8 * dpi;
+    }
+
+    std::wstring pillTxt;
+    if (aiStato.occupati > 0) pillTxt = std::to_wstring(aiStato.occupati) + testi::t(L" attivi", L" Busy");
+    else if (aiStato.inAttesa > 0) pillTxt = testi::t(L"In attesa", L"Waiting");
+    else if (aiStato.statoGlobale == ai::Stato::Errore) pillTxt = testi::t(L"Errore", L"Error");
+    else if (aiStato.completati > 0) pillTxt = testi::t(L"Fatto", L"Done");
+    else pillTxt = testi::t(L"Inattivo", L"Idle");
+
+    const float px0 = m + lt + 12 * dpi;
+    const float pw = std::min(larghezzaTesto(pillTxt, fmtNome) + 16 * dpi, std::max(0.0f, limPill - px0));
+    if (pw >= 24 * dpi) {
+        const D2D1_RECT_F rpPill = {px0, 13 * dpi, px0 + pw, 31 * dpi};
+        const D2D1_COLOR_F scCol = coloreStato(aiStato.statoGlobale);
+        pennello->SetColor(aiStato.statoGlobale == ai::Stato::Inattivo
+                           ? (scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f))
+                           : D2D1::ColorF(scCol.r, scCol.g, scCol.b, 0.18f));
+        dc->FillRoundedRectangle({rpPill, 9 * dpi, 9 * dpi}, pennello);
+        pennello->SetColor(aiStato.statoGlobale == ai::Stato::Inattivo ? tenue : scCol);
+        scrivi(pillTxt, fmtNome, rpPill);
+    }
+
+    std::wstring sommario;
+    if (aiStato.agenti.empty()) {
+        sommario = testi::t(L"Nessuna sessione attiva", L"No active sessions");
+    } else {
+        const int nSess = (int)aiStato.agenti.size();
+        if (nSess == 1) {
+            sommario = testi::t(L"1 sessione", L"1 session");
+        } else {
+            wchar_t b[48];
+            swprintf(b, 48, testi::t(L"%d sessioni", L"%d sessions"), nSess);
+            sommario = b;
+        }
+        const uint64_t tokTot = aiStato.tokInTot + aiStato.tokOutTot;
+        if (tokTot > 0) {
+            sommario += L" · " + ai::formattaToken(tokTot) + L" " + testi::t(L"token", L"tokens");
+        }
+    }
+    pennello->SetColor(tenue);
+    scrivi(sommario, fmtSotto, {m, 36 * dpi, PW - m, 54 * dpi});
+
+    const float listTop = AI_TESTA * dpi;
+    const float listBottom = PH - AI_PIEDE * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, listTop - 2 * dpi}, {PW - m, listTop - 2 * dpi}, pennello, 1.0f);
+
+    if (aiStato.agenti.empty()) {
+        aiScroll = 0;
+        aiScrollMax = 0;
+        const D2D1_RECT_F re = {m, listTop + 8 * dpi, PW - m, listTop + 66 * dpi};
+        pennello->SetColor(scheda);
+        dc->FillRoundedRectangle({re, rp, rp}, pennello);
+        pennello->SetColor(ink);
+        scrivi(testi::t(L"Nessun agente AI attivo", L"No active AI agents"), fmtVoce, {re.left + 14 * dpi, re.top + 10 * dpi, re.right - 14 * dpi, re.top + 30 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(testi::t(L"Avvia Antigravity, Claude Code o Ollama, o abilita gli hook CLI", L"Start Antigravity, Claude Code or Ollama, or enable CLI hooks"), fmtSotto, {re.left + 14 * dpi, re.top + 30 * dpi, re.right - 14 * dpi, re.bottom - 8 * dpi});
+    } else {
+        const double nowEpoch = ai::dettagli::adessoEpoch();
+        const float contentH = (float)aiStato.agenti.size() * AI_SCHEDA * dpi;
+        const float viewH = std::max(0.0f, listBottom - listTop - 6 * dpi);
+        aiScrollMax = std::max(0.0f, contentH - viewH);
+        aiScroll = std::clamp(aiScroll, 0.0f, aiScrollMax);
+
+        dc->PushAxisAlignedClip({0, listTop, PW, listBottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+        const size_t zona0 = elementi.size();
+        for (size_t i = 0; i < aiStato.agenti.size(); i++) {
+            const float cy0 = listTop + 6 * dpi + (float)i * AI_SCHEDA * dpi - aiScroll;
+            if (cy0 + (AI_SCHEDA - 6) * dpi < listTop || cy0 > listBottom) continue;
+            const ai::Agente& a = aiStato.agenti[i];
+            const D2D1_RECT_F r = {m, cy0, PW - m, cy0 + (AI_SCHEDA - 6) * dpi};
+            pennello->SetColor(scheda);
+            dc->FillRoundedRectangle({r, rp, rp}, pennello);
+            evidenzia(aggiungi(r, A_AI_AGENTE, (int)i), r, scuro, rp);
+
+            const D2D1_COLOR_F dotCol = coloreStato(a.stato);
+            const D2D1_POINT_2F dotC = {r.left + 16 * dpi, r.top + 20 * dpi};
+            if (a.stato == ai::Stato::Occupato) {
+                const float pulse = 0.5f + 0.5f * std::sin((float)adesso() * 3.8f);
+                const float haloR = (6.5f + 2.5f * pulse) * dpi;
+                const float haloA = 0.15f + 0.23f * pulse;
+                pennello->SetColor(D2D1::ColorF(dotCol.r, dotCol.g, dotCol.b, haloA));
+                dc->FillEllipse({dotC, haloR, haloR}, pennello);
+                const float coreR = (3.6f + 0.7f * pulse) * dpi;
+                pennello->SetColor(dotCol);
+                dc->FillEllipse({dotC, coreR, coreR}, pennello);
+                pAnimazione = true;
+            } else {
+                pennello->SetColor(dotCol);
+                dc->FillEllipse({dotC, 4.0f * dpi, 4.0f * dpi}, pennello);
+            }
+
+            float limTit = r.right - 12 * dpi;
+            std::wstring pill;
+            D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
+            D2D1_COLOR_F pillFg = tenue;
+            if (a.ctxTok > 0 && a.ctxMax > 0) {
+                const int pct = std::clamp((int)std::lround(100.0 * (double)a.ctxTok / (double)a.ctxMax), 1, 100);
+                wchar_t b[32];
+                swprintf(b, 32, L"%d%% ctx", pct);
+                pill = b;
+                if (pct >= 85) {
+                    const D2D1_COLOR_F rosso = scuro ? D2D1::ColorF(1.0f, 0.42f, 0.38f, 1.0f) : D2D1::ColorF(0.86f, 0.22f, 0.20f, 1.0f);
+                    pillBg = D2D1::ColorF(rosso.r, rosso.g, rosso.b, scuro ? 0.20f : 0.14f);
+                    pillFg = rosso;
+                } else if (pct >= 65) {
+                    const D2D1_COLOR_F ambra = scuro ? D2D1::ColorF(0.98f, 0.72f, 0.25f, 1.0f) : D2D1::ColorF(0.82f, 0.50f, 0.04f, 1.0f);
+                    pillBg = D2D1::ColorF(ambra.r, ambra.g, ambra.b, scuro ? 0.20f : 0.14f);
+                    pillFg = ambra;
+                }
+            } else if (a.tokIn + a.tokOut > 0) {
+                pill = ai::formattaToken(a.tokIn + a.tokOut) + L" tok";
+            }
+            if (!pill.empty()) {
+                const float tw = std::max(34 * dpi, larghezzaTesto(pill, fmtNome) + 14 * dpi);
+                const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
+                pennello->SetColor(pillBg);
+                dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
+                pennello->SetColor(pillFg);
+                scrivi(pill, fmtNome, rt);
+                limTit = rt.left - 8 * dpi;
+            }
+
+            const std::wstring src = a.fonte == ai::Fonte::Processo ? a.nome : ai::dettagli::nomeFonte(a.fonte);
+            const std::wstring riga1 = !a.titolo.empty() ? a.titolo : src;
+            pennello->SetColor(ink);
+            scrivi(riga1, fmtVoce, {r.left + 28 * dpi, r.top + 10 * dpi, limTit, r.top + 30 * dpi});
+
+            std::wstring riga2 = src;
+            const std::wstring modPretty = ai::formattaModello(a.modello);
+            if (!modPretty.empty()) riga2 += (riga2.empty() ? L"" : L" · ") + modPretty;
+            std::wstring det;
+            if (!a.strumento.empty()) {
+                det = a.strumento;
+            } else {
+                det = testoStato(a.stato);
+                if (a.stato != ai::Stato::Occupato && a.aggiornatoT > 0) {
+                    const std::wstring tempoFa = ai::formattaTempoFa(a.aggiornatoT, nowEpoch);
+                    if (!tempoFa.empty()) {
+                        if (a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore) {
+                            wchar_t b[64];
+                            swprintf(b, 64, testi::t(L"%ls %ls fa", L"%ls %ls ago"), det.c_str(), tempoFa.c_str());
+                            det = b;
+                        } else {
+                            det += L" " + tempoFa;
+                        }
+                    }
+                }
+            }
+            if (!det.empty()) riga2 += (riga2.empty() ? L"" : L" · ") + det;
+            pennello->SetColor(tenue);
+            scrivi(riga2, fmtSotto, {r.left + 28 * dpi, r.top + 32 * dpi, r.right - 12 * dpi, r.bottom - 8 * dpi});
+        }
+        dc->PopAxisAlignedClip();
+
+        for (size_t k = zona0; k < elementi.size();) {
+            D2D1_RECT_F& zr = elementi[k].r;
+            zr.top = std::max(zr.top, listTop);
+            zr.bottom = std::min(zr.bottom, listBottom);
+            if (zr.bottom <= zr.top) elementi.erase(elementi.begin() + (std::ptrdiff_t)k);
+            else k++;
+        }
+
+        if (aiScrollMax > 0) {
+            const float hb = std::max(18 * dpi, viewH * viewH / contentH);
+            const float yb = listTop + 4 * dpi + (viewH - hb) * (aiScroll / aiScrollMax);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(0, 0, 0, 0.16f));
+            dc->FillRoundedRectangle({{PW - 7 * dpi, yb, PW - 4 * dpi, yb + hb}, 1.5f * dpi, 1.5f * dpi}, pennello);
+        }
+    }
+
+    // Piede: stato hook CLI
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rPiede = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rPiede, A_AI_HOOK_MENU, 0), rPiede, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    scrivi(testi::t(L"Hook CLI", L"CLI Hooks"), fmtVoce, {m, rPiede.top, PW * 0.55f, rPiede.bottom});
+
+    const bool hAg = ai::hookAntigravityInstallati(), hCl = ai::hookClaudeInstallati();
+    const std::wstring hSum = (hAg && hCl) ? L"Antigravity · Claude"
+                            : hAg ? L"Antigravity"
+                            : hCl ? L"Claude"
+                            : std::wstring(testi::t(L"Spenti", L"Off"));
+    pennello->SetColor(tenue);
+    const float sw = larghezzaTesto(hSum, fmtSotto);
+    scrivi(hSum, fmtSotto, {PW - m - sw - 16 * dpi, rPiede.top, PW - m - 14 * dpi, rPiede.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
+}
+
+// ---- Logitech G HUB ----
+static constexpr float LOGI_TESTA = 56, LOGI_SCHEDA = 72, LOGI_PIEDE = 48;
+
+inline auto Motore::sincronizzaLogi() -> void {
+    const uint64_t v = logiMon.versione.load(std::memory_order_relaxed);
+    if (v == logiVer) return;
+    logiStato = logiMon.copia();
+    logiVer = v;
+    dirty = true;
+    const int s = slotCorrente;
+    usa(0);
+    if (pannelloTipo == P_LOGI && !pChiusura) {
+        const float nuova = altezzaVista(P_LOGI);
+        if (nuova != PH) { PH = nuova; pAnimazione = true; }
+        pSopra = pPremuto = -1;
+        evidP.clear();
+        pDirty = true;
+    }
+    usa(s);
+}
+
+inline auto Motore::altezzaLogi() const -> float {
+    const float corpo = logiStato.dispositivi.empty() ? 76.0f : (float)logiStato.dispositivi.size() * LOGI_SCHEDA + 6.0f;
+    return std::min(altezzaMassimaP(), std::round((LOGI_TESTA + corpo + LOGI_PIEDE) * dpi));
+}
+
+inline auto Motore::disegnaLogi(bool scuro, D2D1_COLOR_F ink) -> void {
+    const float m = 16 * dpi;
+    const float rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F scheda = scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(1, 1, 1, 0.52f);
+
+    const std::wstring titolo = L"Logitech";
+    const float lt = larghezzaTesto(titolo, fmtTitolo);
+    pennello->SetColor(ink);
+    scrivi(titolo, fmtTitolo, {m, 14 * dpi, m + lt + 8 * dpi, 38 * dpi});
+
+    const D2D1_RECT_F rRef = {PW - m - 26 * dpi, 13 * dpi, PW - m, 39 * dpi};
+    pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f));
+    dc->FillRoundedRectangle({rRef, 13 * dpi, 13 * dpi}, pennello);
+    evidenzia(aggiungi(rRef, A_LOGI_AGGIORNA, 0), rRef, scuro, 13 * dpi);
+    {
+        const float cxR = (rRef.left + rRef.right) / 2, cyR = (rRef.top + rRef.bottom) / 2;
+        const float rr = 5.2f * dpi, a0 = 0.20f * (float)M_PI, a1 = 1.75f * (float)M_PI;
+        pennello->SetColor(ink);
+        ID2D1PathGeometry* gR = nullptr;
+        ID2D1GeometrySink* sR = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&gR)) && SUCCEEDED(gR->Open(&sR))) {
+            sR->BeginFigure({cxR + rr * std::cos(a0), cyR + rr * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
+            sR->AddArc(D2D1::ArcSegment({cxR + rr * std::cos(a1), cyR + rr * std::sin(a1)}, {rr, rr}, 0,
+                                        D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_LARGE));
+            sR->EndFigure(D2D1_FIGURE_END_OPEN);
+            if (SUCCEEDED(sR->Close())) dc->DrawGeometry(gR, pennello, 1.5f * dpi, tratto);
+        }
+        if (sR) sR->Release();
+        if (gR) gR->Release();
+        const float tx = cxR + rr * std::cos(a1), ty = cyR + rr * std::sin(a1);
+        const float ux = -std::sin(a1), uy = std::cos(a1);
+        const float nx = std::cos(a1), ny = std::sin(a1);
+        dc->DrawLine({tx, ty}, {tx - 3.0f * dpi * ux + 2.2f * dpi * nx, ty - 3.0f * dpi * uy + 2.2f * dpi * ny}, pennello, 1.5f * dpi, tratto);
+        dc->DrawLine({tx, ty}, {tx - 3.0f * dpi * ux - 2.2f * dpi * nx, ty - 3.0f * dpi * uy - 2.2f * dpi * ny}, pennello, 1.5f * dpi, tratto);
+    }
+
+    std::wstring pillTxt;
+    D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
+    D2D1_COLOR_F pillFg = tenue;
+    if (!logiStato.ghubAttivo) {
+        pillTxt = testi::t(L"G HUB spento", L"G HUB off");
+    } else {
+        if (logiStato.connessi == 1) {
+            pillTxt = testi::t(L"1 connesso", L"1 connected");
+        } else {
+            wchar_t b[48];
+            swprintf(b, 48, testi::t(L"%d connessi", L"%d connected"), logiStato.connessi);
+            pillTxt = b;
+        }
+        if (logiStato.connessi > 0) {
+            const D2D1_COLOR_F verde = scuro ? D2D1::ColorF(0.24f, 0.84f, 0.44f, 1.0f) : D2D1::ColorF(0.10f, 0.62f, 0.28f, 1.0f);
+            pillBg = D2D1::ColorF(verde.r, verde.g, verde.b, scuro ? 0.18f : 0.14f);
+            pillFg = verde;
+        }
+    }
+    const float px0 = m + lt + 12 * dpi;
+    const float limPill = rRef.left - 8 * dpi;
+    const float pw = std::min(larghezzaTesto(pillTxt, fmtNome) + 16 * dpi, std::max(0.0f, limPill - px0));
+    if (pw >= 24 * dpi) {
+        const D2D1_RECT_F rpPill = {px0, 17 * dpi, px0 + pw, 35 * dpi};
+        pennello->SetColor(pillBg);
+        dc->FillRoundedRectangle({rpPill, 9 * dpi, 9 * dpi}, pennello);
+        pennello->SetColor(pillFg);
+        scrivi(pillTxt, fmtNome, rpPill);
+    }
+
+    const float listTop = LOGI_TESTA * dpi;
+    const float listBottom = PH - LOGI_PIEDE * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, listTop - 2 * dpi}, {PW - m, listTop - 2 * dpi}, pennello, 1.0f);
+
+    auto coloreBatteria = [&](int bat, bool chg, bool testo) -> D2D1_COLOR_F {
+        if (chg) return testo && !scuro ? D2D1::ColorF(0.04f, 0.54f, 0.80f, 1.0f) : D2D1::ColorF(0.20f, 0.76f, 1.0f, 1.0f);
+        if (bat > 30) return testo && !scuro ? D2D1::ColorF(0.10f, 0.62f, 0.28f, 1.0f) : D2D1::ColorF(0.20f, 0.80f, 0.38f, 1.0f);
+        if (bat >= 16) return testo && !scuro ? D2D1::ColorF(0.82f, 0.50f, 0.04f, 1.0f) : D2D1::ColorF(0.98f, 0.65f, 0.12f, 1.0f);
+        return testo && !scuro ? D2D1::ColorF(0.86f, 0.22f, 0.20f, 1.0f) : D2D1::ColorF(0.95f, 0.28f, 0.25f, 1.0f);
+    };
+
+    auto disegnaTipo = [&](logitech::Tipo tipo, float cx, float cy, D2D1_COLOR_F col) {
+        const float d = dpi;
+        pennello->SetColor(col);
+        switch (tipo) {
+            case logitech::Tipo::Mouse: {
+                dc->DrawRoundedRectangle({{cx - 5.5f * d, cy - 8.5f * d, cx + 5.5f * d, cy + 8.5f * d}, 5.5f * d, 5.5f * d}, pennello, 1.5f * d);
+                dc->DrawLine({cx, cy - 5.0f * d}, {cx, cy - 1.5f * d}, pennello, 1.5f * d, tratto);
+                break;
+            }
+            case logitech::Tipo::Cuffie: {
+                ID2D1PathGeometry* g = nullptr;
+                ID2D1GeometrySink* s = nullptr;
+                if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+                    s->BeginFigure({cx - 7.5f * d, cy + 1.0f * d}, D2D1_FIGURE_BEGIN_HOLLOW);
+                    s->AddArc(D2D1::ArcSegment({cx + 7.5f * d, cy + 1.0f * d}, {7.5f * d, 7.5f * d}, 0,
+                                               D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                    s->EndFigure(D2D1_FIGURE_END_OPEN);
+                    if (SUCCEEDED(s->Close())) dc->DrawGeometry(g, pennello, 1.5f * d, tratto);
+                }
+                if (s) s->Release();
+                if (g) g->Release();
+                dc->FillRoundedRectangle({{cx - 9.0f * d, cy + 0.5f * d, cx - 5.5f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pennello);
+                dc->FillRoundedRectangle({{cx + 5.5f * d, cy + 0.5f * d, cx + 9.0f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pennello);
+                break;
+            }
+            case logitech::Tipo::Tastiera: {
+                dc->DrawRoundedRectangle({{cx - 9.5f * d, cy - 5.5f * d, cx + 9.5f * d, cy + 5.5f * d}, 2.0f * d, 2.0f * d}, pennello, 1.5f * d);
+                for (int k = -1; k <= 1; k++) {
+                    dc->FillEllipse({{cx + k * 4.2f * d, cy - 1.6f * d}, 1.0f * d, 1.0f * d}, pennello);
+                }
+                dc->DrawLine({cx - 4.2f * d, cy + 2.2f * d}, {cx + 4.2f * d, cy + 2.2f * d}, pennello, 1.4f * d, tratto);
+                break;
+            }
+            case logitech::Tipo::Altro: {
+                dc->DrawRoundedRectangle({{cx - 7.5f * d, cy - 7.5f * d, cx + 7.5f * d, cy + 7.5f * d}, 3.0f * d, 3.0f * d}, pennello, 1.5f * d);
+                dc->FillEllipse({{cx, cy}, 2.0f * d, 2.0f * d}, pennello);
+                break;
+            }
+        }
+    };
+
+    if (!logiStato.ghubAttivo || logiStato.dispositivi.empty()) {
+        logiScroll = 0;
+        logiScrollMax = 0;
+        const D2D1_RECT_F re = {m, listTop + 8 * dpi, PW - m, listTop + 70 * dpi};
+        pennello->SetColor(scheda);
+        dc->FillRoundedRectangle({re, rp, rp}, pennello);
+        pennello->SetColor(ink);
+        scrivi(!logiStato.ghubAttivo
+                   ? testi::t(L"Logitech G HUB non attivo", L"Logitech G HUB is not running")
+                   : testi::t(L"Nessun dispositivo trovato", L"No devices found"),
+               fmtVoce, {re.left + 14 * dpi, re.top + 10 * dpi, re.right - 14 * dpi, re.top + 30 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(!logiStato.ghubAttivo
+                   ? testi::t(L"Avvia G HUB per vedere batteria e stato", L"Open G HUB to see battery and gear status")
+                   : testi::t(L"Collega un dispositivo Logitech G per monitorarlo", L"Connect a Logitech G device to monitor it"),
+               fmtSotto, {re.left + 14 * dpi, re.top + 32 * dpi, re.right - 14 * dpi, re.bottom - 8 * dpi});
+    } else {
+        const float contentH = (float)logiStato.dispositivi.size() * LOGI_SCHEDA * dpi;
+        const float viewH = std::max(0.0f, listBottom - listTop - 6 * dpi);
+        logiScrollMax = std::max(0.0f, contentH - viewH);
+        logiScroll = std::clamp(logiScroll, 0.0f, logiScrollMax);
+
+        dc->PushAxisAlignedClip({0, listTop, PW, listBottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+        for (size_t i = 0; i < logiStato.dispositivi.size(); i++) {
+            const float cy0 = listTop + 6 * dpi + (float)i * LOGI_SCHEDA * dpi - logiScroll;
+            if (cy0 + (LOGI_SCHEDA - 6) * dpi < listTop || cy0 > listBottom) continue;
+            const logitech::Dispositivo& dv = logiStato.dispositivi[i];
+            const D2D1_RECT_F r = {m, cy0, PW - m, cy0 + (LOGI_SCHEDA - 6) * dpi};
+            pennello->SetColor(scheda);
+            dc->FillRoundedRectangle({r, rp, rp}, pennello);
+
+            const bool offline = dv.stato == logitech::Stato::Disconnesso;
+            const D2D1_COLOR_F icCol = offline ? D2D1_COLOR_F{ink.r, ink.g, ink.b, ink.a * 0.38f}
+                                               : dv.stato == logitech::Stato::Riposo ? tenue : ink;
+            disegnaTipo(dv.tipo, r.left + 23 * dpi, r.top + (dv.batteria >= 0 ? 27.0f : 31.0f) * dpi, icCol);
+
+            float limTit = r.right - 12 * dpi;
+            if (dv.batteria >= 0) {
+                wchar_t pb[24];
+                swprintf(pb, 24, dv.inCarica ? L"%d%% \u26a1" : L"%d%%", dv.batteria);
+                const float tw = std::max(38 * dpi, larghezzaTesto(pb, fmtNome) + 14 * dpi);
+                const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
+                const D2D1_COLOR_F colFg = coloreBatteria(dv.batteria, dv.inCarica, true);
+                const D2D1_COLOR_F colBar = coloreBatteria(dv.batteria, dv.inCarica, false);
+                pennello->SetColor(D2D1::ColorF(colBar.r, colBar.g, colBar.b, scuro ? 0.20f : 0.14f));
+                dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
+                pennello->SetColor(colFg);
+                scrivi(pb, fmtNome, rt);
+                limTit = rt.left - 8 * dpi;
+
+                const D2D1_RECT_F track = {r.left + 12 * dpi, r.bottom - 7.5f * dpi, r.right - 12 * dpi, r.bottom - 4.5f * dpi};
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
+                dc->FillRoundedRectangle({track, 1.5f * dpi, 1.5f * dpi}, pennello);
+                if (dv.batteria > 0) {
+                    const float fw = std::max(3.0f * dpi, (track.right - track.left) * (dv.batteria / 100.0f));
+                    pennello->SetColor(colBar);
+                    dc->FillRoundedRectangle({{track.left, track.top, track.left + fw, track.bottom}, 1.5f * dpi, 1.5f * dpi}, pennello);
+                }
+            }
+
+            pennello->SetColor(offline ? tenue : ink);
+            scrivi(dv.nome, fmtVoce, {r.left + 44 * dpi, r.top + 10 * dpi, limTit, r.top + 30 * dpi});
+
+            std::wstring riga2;
+            if (offline) {
+                riga2 = testi::t(L"Non connesso", L"Offline");
+            } else if (dv.stato == logitech::Stato::Riposo) {
+                if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
+                riga2 += testi::t(L"In riposo", L"Asleep");
+                if (dv.oreRestanti > 0.0) {
+                    wchar_t ob[32];
+                    swprintf(ob, 32, testi::t(L" \u00b7 %.1fh rimaste", L" \u00b7 %.1fh left"), dv.oreRestanti);
+                    riga2 += ob;
+                }
+            } else if (dv.inCarica) {
+                if (dv.batteria >= 0) {
+                    wchar_t cb[48];
+                    swprintf(cb, 48, testi::t(L"In carica \u00b7 %d%%", L"Charging \u00b7 %d%%"), dv.batteria);
+                    riga2 = cb;
+                } else {
+                    riga2 = testi::t(L"In carica", L"Charging");
+                }
+            } else {
+                if (!dv.connessione.empty()) riga2 = dv.connessione + L" \u00b7 ";
+                if (dv.oreRestanti > 0.0) {
+                    wchar_t ob[32];
+                    swprintf(ob, 32, testi::t(L"%.1fh rimaste", L"%.1fh left"), dv.oreRestanti);
+                    riga2 += ob;
+                } else {
+                    riga2 += testi::t(L"Connesso", L"Connected");
+                }
+            }
+            pennello->SetColor(tenue);
+            scrivi(riga2, fmtSotto, {r.left + 44 * dpi, r.top + 31 * dpi, r.right - 12 * dpi, r.top + 50 * dpi});
+        }
+        dc->PopAxisAlignedClip();
+
+        if (logiScrollMax > 0) {
+            const float hb = std::max(18 * dpi, viewH * viewH / contentH);
+            const float yb = listTop + 4 * dpi + (viewH - hb) * (logiScroll / logiScrollMax);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(0, 0, 0, 0.16f));
+            dc->FillRoundedRectangle({{PW - 7 * dpi, yb, PW - 4 * dpi, yb + hb}, 1.5f * dpi, 1.5f * dpi}, pennello);
+        }
+    }
+
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rPiede = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rPiede, A_LOGI_GHUB, 0), rPiede, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    scrivi(testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), fmtVoce, {m, rPiede.top, PW - m - 20 * dpi, rPiede.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
+}
+
+// ---- Widget personalizzati (JSON) ----
+static constexpr float WP_TESTA = 62, WP_TESTA_COMP = 52, WP_SCHEDA = 70, WP_PIEDE = 48;
+
+inline auto Motore::sincronizzaWPlugin() -> void {
+    const uint64_t v = wplugMon.versione.load(std::memory_order_relaxed);
+    if (v == wplugVer) return;
+    wplugin::Riepilogo nuovo = wplugMon.copia();
+    auto attivaFirma = [](const wplugin::Riepilogo& r) {
+        std::vector<std::pair<std::wstring, std::wstring>> out;
+        for (const auto& w : r.widgets) if (w.abilitato) out.emplace_back(w.id, w.nome);
+        return out;
+    };
+    const bool listaCambiata = attivaFirma(nuovo) != attivaFirma(wplugStato);
+    wplugStato = std::move(nuovo);
+    wplugVer = v;
+    if (listaCambiata && attivo) aggiornaApp();
+    dirty = true;
+    const int s = slotCorrente;
+    usa(0);
+    if (pannelloTipo == P_WPLUGIN && !pChiusura) {
+        const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+        if (!pw || !pw->abilitato) {
+            chiudiPannello();
+        } else {
+            const float nuova = altezzaVista(P_WPLUGIN);
+            if (nuova != PH) { PH = nuova; pAnimazione = true; }
+            pSopra = pPremuto = -1;
+            evidP.clear();
+            pDirty = true;
+        }
+    }
+    usa(s);
+}
+
+inline auto Motore::apriWPlugin(const std::wstring& id) -> void {
+    if (!attivo || nascostoSchermoIntero || id.empty()) return;
+    if (lAperto) {
+        wplugIdAperto = id;
+        if (!lChiusura) chiudiLauncher();
+        if (dopo != 2) apriDopo(2, P_WPLUGIN);
+        return;
+    }
+    usa(0);
+    if (pannelloTipo == P_WPLUGIN && !pChiusura && wplugIdAperto == id) {
+        chiudiPannello();
+        return;
+    }
+    if (pannelloTipo != P_NESSUNO && !(pannelloTipo == P_WPLUGIN && pChiusura && wplugIdAperto == id)) {
+        nascondiPannello();
+    }
+    wplugIdAperto = id;
+    wplugScroll = 0;
+    apriPannello(P_WPLUGIN);
+}
+
+inline auto Motore::altezzaWPlugin() const -> float {
+    const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+    const float testa = (pw && !pw->sottotitolo.empty()) ? WP_TESTA : WP_TESTA_COMP;
+    const float corpo = (!pw || pw->elementi.empty()) ? 74.0f : (float)pw->elementi.size() * WP_SCHEDA + 6.0f;
+    return std::min(altezzaMassimaP(), std::round((testa + corpo + WP_PIEDE) * dpi));
+}
+
+inline auto Motore::disegnaWPlugin(bool scuro, D2D1_COLOR_F ink) -> void {
+    const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+    if (!pw) return;
+    const wplugin::Widget& w = *pw;
+    const float m = 16 * dpi;
+    const float rp = std::max(6.0f, raggio::vetro() - 10.0f) * dpi;
+    const D2D1_COLOR_F tenue = {ink.r, ink.g, ink.b, ink.a * 0.6f};
+    const D2D1_COLOR_F scheda = scuro ? D2D1::ColorF(1, 1, 1, 0.08f) : D2D1::ColorF(1, 1, 1, 0.52f);
+    const float testaH = w.sottotitolo.empty() ? WP_TESTA_COMP : WP_TESTA;
+
+    const float togW = 40 * dpi, togH = 22 * dpi;
+    const float togX = PW - m - togW;
+    const float togY = w.sottotitolo.empty() ? 15 * dpi : 11 * dpi;
+    const float rightLimit = w.haToggle ? (togX - 10 * dpi) : (PW - m);
+
+    float pwPill = 0;
+    D2D1_COLOR_F pillBg = scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f);
+    D2D1_COLOR_F pillFg = tenue;
+    if (!w.stato.empty()) {
+        pwPill = std::min(larghezzaTesto(w.stato, fmtNome) + 16 * dpi, (rightLimit - m) * 0.45f);
+        if (w.statoColore.valido) {
+            pillFg = D2D1::ColorF(w.statoColore.r, w.statoColore.g, w.statoColore.b, 1.0f);
+            pillBg = D2D1::ColorF(pillFg.r, pillFg.g, pillFg.b, scuro ? 0.20f : 0.14f);
+        } else {
+            pillFg = scuro ? D2D1::ColorF(0.40f, 0.68f, 1.0f, 1.0f) : D2D1::ColorF(0.0f, 0.42f, 0.95f, 1.0f);
+            pillBg = D2D1::ColorF(pillFg.r, pillFg.g, pillFg.b, scuro ? 0.20f : 0.14f);
+        }
+    }
+
+    const float titleTop = w.sottotitolo.empty() ? 14 * dpi : 10 * dpi;
+    const float titleBot = titleTop + 24 * dpi;
+    const float maxTitleW = std::max(40 * dpi, rightLimit - m - (pwPill >= 24 * dpi ? pwPill + 12 * dpi : 0));
+    const float lt = std::min(larghezzaTesto(w.nome, fmtTitolo), maxTitleW);
+    pennello->SetColor(ink);
+    scrivi(w.nome, fmtTitolo, {m, titleTop, std::min(rightLimit, m + lt + 6 * dpi), titleBot});
+
+    if (pwPill >= 24 * dpi) {
+        const float px0 = m + lt + 12 * dpi;
+        const float pTop = w.sottotitolo.empty() ? 17 * dpi : 13 * dpi;
+        const D2D1_RECT_F rpPill = {px0, pTop, std::min(rightLimit, px0 + pwPill), pTop + 18 * dpi};
+        if (rpPill.right - rpPill.left >= 20 * dpi) {
+            pennello->SetColor(pillBg);
+            dc->FillRoundedRectangle({rpPill, 9 * dpi, 9 * dpi}, pennello);
+            pennello->SetColor(pillFg);
+            scrivi(w.stato, fmtNome, rpPill);
+        }
+    }
+
+    if (w.haToggle) {
+        const D2D1_RECT_F togRect = {togX, togY, togX + togW, togY + togH};
+        const D2D1_RECT_F togHit = {togX - 4 * dpi, togY - 4 * dpi, togX + togW + 4 * dpi, togY + togH + 4 * dpi};
+        const int eTog = aggiungi(togHit, A_WPLUGIN_TOGGLE, 0);
+        const bool hover = (eTog == pSopra && pMouseDentro);
+        D2D1_COLOR_F trackCol;
+        if (w.toggleStato) {
+            if (w.statoColore.valido) {
+                trackCol = D2D1::ColorF(w.statoColore.r, w.statoColore.g, w.statoColore.b, 1.0f);
+            } else if (w.iconaColore.valido) {
+                trackCol = D2D1::ColorF(w.iconaColore.r, w.iconaColore.g, w.iconaColore.b, 1.0f);
+            } else {
+                trackCol = D2D1::ColorF(0.19f, 0.82f, 0.35f, 1.0f);
+            }
+            if (hover) {
+                trackCol.r += (1.0f - trackCol.r) * 0.14f;
+                trackCol.g += (1.0f - trackCol.g) * 0.14f;
+                trackCol.b += (1.0f - trackCol.b) * 0.14f;
+            }
+        } else {
+            trackCol = scuro
+                ? D2D1::ColorF(1, 1, 1, hover ? 0.24f : 0.16f)
+                : D2D1::ColorF(0, 0, 0, hover ? 0.20f : 0.14f);
+        }
+        pennello->SetColor(trackCol);
+        dc->FillRoundedRectangle({togRect, togH * 0.5f, togH * 0.5f}, pennello);
+
+        const float knobR = togH * 0.5f - 2.5f * dpi;
+        const float knobX = w.toggleStato ? (togX + togW - togH * 0.5f) : (togX + togH * 0.5f);
+        const float knobY = togY + togH * 0.5f;
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, 0.14f));
+        dc->FillEllipse({{knobX, knobY + 0.8f * dpi}, knobR, knobR}, pennello);
+        pennello->SetColor(D2D1::ColorF(1, 1, 1, (eTog == pPremuto) ? 0.92f : 1.0f));
+        dc->FillEllipse({{knobX, knobY}, knobR, knobR}, pennello);
+    }
+
+    if (!w.sottotitolo.empty()) {
+        pennello->SetColor(tenue);
+        scrivi(w.sottotitolo, fmtSotto, {m, 36 * dpi, PW - m, 54 * dpi});
+    }
+
+    const float listTop = testaH * dpi;
+    const float listBottom = PH - WP_PIEDE * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.08f));
+    dc->DrawLine({m, listTop - 2 * dpi}, {PW - m, listTop - 2 * dpi}, pennello, 1.0f);
+
+    if (w.elementi.empty()) {
+        wplugScroll = 0;
+        wplugScrollMax = 0;
+        const D2D1_RECT_F re = {m, listTop + 8 * dpi, PW - m, listTop + 68 * dpi};
+        pennello->SetColor(scheda);
+        dc->FillRoundedRectangle({re, rp, rp}, pennello);
+        pennello->SetColor(ink);
+        scrivi(testi::t(L"Nessun elemento", L"No items"), fmtVoce, {re.left + 14 * dpi, re.top + 10 * dpi, re.right - 14 * dpi, re.top + 30 * dpi});
+        pennello->SetColor(tenue);
+        scrivi(testi::t(L"Aggiorna il file JSON per mostrare dati", L"Update the JSON file to display items"),
+               fmtSotto, {re.left + 14 * dpi, re.top + 31 * dpi, re.right - 14 * dpi, re.bottom - 8 * dpi});
+    } else {
+        const float contentH = (float)w.elementi.size() * WP_SCHEDA * dpi;
+        const float viewH = std::max(0.0f, listBottom - listTop - 6 * dpi);
+        wplugScrollMax = std::max(0.0f, contentH - viewH);
+        wplugScroll = std::clamp(wplugScroll, 0.0f, wplugScrollMax);
+
+        dc->PushAxisAlignedClip({0, listTop, PW, listBottom}, D2D1_ANTIALIAS_MODE_ALIASED);
+        const size_t zona0 = elementi.size();
+        for (size_t i = 0; i < w.elementi.size(); i++) {
+            const float cy0 = listTop + 6 * dpi + (float)i * WP_SCHEDA * dpi - wplugScroll;
+            if (cy0 + (WP_SCHEDA - 6) * dpi < listTop || cy0 > listBottom) continue;
+            const wplugin::Elemento& el = w.elementi[i];
+            const D2D1_RECT_F r = {m, cy0, PW - m, cy0 + (WP_SCHEDA - 6) * dpi};
+            pennello->SetColor(scheda);
+            dc->FillRoundedRectangle({r, rp, rp}, pennello);
+            if (!el.url.empty() || !el.copia.empty()) {
+                evidenzia(aggiungi(r, A_WPLUGIN_ITEM, (int)i), r, scuro, rp);
+            }
+
+            float tx = r.left + 14 * dpi;
+            if (el.colore.valido) {
+                pennello->SetColor(D2D1::ColorF(el.colore.r, el.colore.g, el.colore.b, 1.0f));
+                dc->FillEllipse({{r.left + 16 * dpi, r.top + 20 * dpi}, 4.0f * dpi, 4.0f * dpi}, pennello);
+                tx = r.left + 28 * dpi;
+            }
+
+            float limTit = r.right - 12 * dpi;
+            if (!el.badge.empty()) {
+                const float tw = std::clamp(larghezzaTesto(el.badge, fmtNome) + 14 * dpi, 34 * dpi, 120 * dpi);
+                const D2D1_RECT_F rt = {r.right - tw - 10 * dpi, r.top + 10 * dpi, r.right - 10 * dpi, r.top + 28 * dpi};
+                const D2D1_COLOR_F bc = el.colore.valido ? D2D1::ColorF(el.colore.r, el.colore.g, el.colore.b, 1.0f) : tenue;
+                pennello->SetColor(el.colore.valido
+                                   ? D2D1::ColorF(bc.r, bc.g, bc.b, scuro ? 0.20f : 0.14f)
+                                   : (scuro ? D2D1::ColorF(1, 1, 1, 0.10f) : D2D1::ColorF(0, 0, 0, 0.06f)));
+                dc->FillRoundedRectangle({rt, 9 * dpi, 9 * dpi}, pennello);
+                pennello->SetColor(bc);
+                scrivi(el.badge, fmtNome, rt);
+                limTit = rt.left - 8 * dpi;
+            }
+
+            if (!el.titolo.empty()) {
+                pennello->SetColor(ink);
+                scrivi(el.titolo, fmtVoce, {tx, r.top + 10 * dpi, limTit, r.top + 30 * dpi});
+            }
+            if (!el.sotto.empty()) {
+                pennello->SetColor(tenue);
+                scrivi(el.sotto, fmtSotto, {tx, r.top + 31 * dpi, r.right - 12 * dpi, r.top + 49 * dpi});
+            }
+
+            if (el.progresso >= 0) {
+                const D2D1_RECT_F track = {r.left + 12 * dpi, r.bottom - 7.5f * dpi, r.right - 12 * dpi, r.bottom - 4.5f * dpi};
+                pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f) : D2D1::ColorF(0, 0, 0, 0.08f));
+                dc->FillRoundedRectangle({track, 1.5f * dpi, 1.5f * dpi}, pennello);
+                if (el.progresso > 0) {
+                    const float fw = std::max(3.0f * dpi, (track.right - track.left) * (std::clamp(el.progresso, 0, 100) / 100.0f));
+                    const D2D1_COLOR_F barCol = el.colore.valido
+                        ? D2D1::ColorF(el.colore.r, el.colore.g, el.colore.b, 1.0f)
+                        : D2D1::ColorF(0.04f, 0.52f, 1.0f, 1.0f);
+                    pennello->SetColor(barCol);
+                    dc->FillRoundedRectangle({{track.left, track.top, track.left + fw, track.bottom}, 1.5f * dpi, 1.5f * dpi}, pennello);
+                }
+            }
+        }
+        dc->PopAxisAlignedClip();
+
+        for (size_t k = zona0; k < elementi.size();) {
+            D2D1_RECT_F& zr = elementi[k].r;
+            zr.top = std::max(zr.top, listTop);
+            zr.bottom = std::min(zr.bottom, listBottom);
+            if (zr.bottom <= zr.top) elementi.erase(elementi.begin() + (std::ptrdiff_t)k);
+            else k++;
+        }
+
+        if (wplugScrollMax > 0) {
+            const float hb = std::max(18 * dpi, viewH * viewH / contentH);
+            const float yb = listTop + 4 * dpi + (viewH - hb) * (wplugScroll / wplugScrollMax);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.22f) : D2D1::ColorF(0, 0, 0, 0.16f));
+            dc->FillRoundedRectangle({{PW - 7 * dpi, yb, PW - 4 * dpi, yb + hb}, 1.5f * dpi, 1.5f * dpi}, pennello);
+        }
+    }
+
+    const float py = PH - 46 * dpi;
+    pennello->SetColor(D2D1::ColorF(scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, scuro ? 1.f : 0.f, 0.10f));
+    dc->DrawLine({m, py}, {PW - m, py}, pennello, 1.0f);
+    const D2D1_RECT_F rPiede = {m - 8 * dpi, py + 6 * dpi, PW - m + 8 * dpi, PH - 8 * dpi};
+    evidenzia(aggiungi(rPiede, A_WPLUGIN_FOOTER, 0), rPiede, scuro, 6 * dpi);
+    pennello->SetColor(ink);
+    const std::wstring lbl = !w.piedeTesto.empty() ? w.piedeTesto : std::wstring(testi::t(L"Apri cartella widget", L"Open widgets folder"));
+    scrivi(lbl, fmtVoce, {m, rPiede.top, PW - m - 20 * dpi, rPiede.bottom});
+    chevronDestra(PW - m - 4 * dpi, (rPiede.top + rPiede.bottom) / 2);
 }
 
 // "Centro di controllo": rete, Bluetooth, volume a capsula, uscita audio, scorciatoie
@@ -2331,6 +3213,113 @@ inline auto Motore::eseguiPannello(const Elemento& e) -> void {
             break;
         }
         case A_VOLUME: break;
+        case A_AI_AGENTE:
+            if (e.indice >= 0 && e.indice < (int)aiStato.agenti.size()) focusAgente(aiStato.agenti[e.indice]);
+            break;
+        case A_AI_PULISCI:
+            aiMon.pulisciCompletati();
+            sincronizzaAI();
+            break;
+        case A_AI_NUOVA_CHAT: {
+            const auto lista = ai::elencoAvviabili();
+            const ai::Avviabile* primoCli = ai::primoTerminale(lista);
+            std::vector<menu::Voce> vv = {menu::titolo(testi::t(L"Nuova chat AI", L"New AI chat"))};
+            if (lista.empty()) {
+                auto nv = menu::voce(testi::t(L"Nessun agente trovato", L"No agents found"), 0);
+                nv.disattivata = true;
+                vv.push_back(nv);
+            } else {
+                for (size_t i = 0; i < lista.size(); i++) {
+                    vv.push_back(menu::voce(lista[i].nome, (UINT)(i + 1)));
+                }
+                if (primoCli) {
+                    vv.push_back(menu::separatore());
+                    vv.push_back(menu::voce(testi::t(L"Scegli cartella…", L"Choose folder…"), 1000));
+                }
+            }
+            POINT pt = {(LONG)e.r.left, (LONG)e.r.bottom};
+            ClientToScreen(pannello, &pt);
+            const UINT s = menuScheda(vv, pt, pannello);
+            if (s >= 1 && s <= (UINT)lista.size()) {
+                const std::wstring defCwd = ai::cartellaPredefinita(aiStato);
+                chiudiPannello();
+                ai::avviaNuovaChat(lista[s - 1], defCwd);
+            } else if (s == 1000 && primoCli) {
+                const std::wstring defCwd = ai::cartellaPredefinita(aiStato);
+                chiudiPannello();
+                const std::wstring dir = ai::scegliCartella(icone, defCwd);
+                if (!dir.empty()) ai::avviaNuovaChat(*primoCli, dir);
+            }
+            pDirty = true;
+            break;
+        }
+        case A_AI_HOOK_MENU: {
+            std::vector<menu::Voce> vv = {menu::titolo(testi::t(L"Hook CLI", L"CLI Hooks"))};
+            auto ha = menu::voce(L"Antigravity CLI", 1);
+            ha.spuntata = ai::hookAntigravityInstallati();
+            vv.push_back(ha);
+            auto hc = menu::voce(L"Claude Code", 2);
+            hc.spuntata = ai::hookClaudeInstallati();
+            vv.push_back(hc);
+            vv.push_back(menu::separatore());
+            auto av = menu::voce(testi::t(L"Avvisi nel notch", L"Notch alerts"), 4);
+            av.spuntata = aiAvvisi;
+            vv.push_back(av);
+            vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Apri cartella hook", L"Open hooks folder"), 3));
+            POINT pt = {(LONG)e.r.left, (LONG)e.r.top};
+            ClientToScreen(pannello, &pt);
+            const UINT s = menuScheda(vv, pt, pannello);
+            if (s == 1) ai::installaHookAntigravity(!ai::hookAntigravityInstallati());
+            else if (s == 2) ai::installaHookClaude(!ai::hookClaudeInstallati());
+            else if (s == 3) {
+                const std::wstring dir = ai::cartellaHook();
+                if (!dir.empty()) {
+                    ai::dettagli::creaCartelle(dir);
+                    ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            } else if (s == 4) {
+                impostaAIAvvisi(!aiAvvisi);
+            }
+            pDirty = true;
+            break;
+        }
+        case A_LOGI_AGGIORNA:
+            logiMon.aggiornaOra();
+            pDirty = true;
+            break;
+        case A_LOGI_GHUB:
+            chiudiPannello();
+            logitech::apriGHub();
+            break;
+        case A_WPLUGIN_TOGGLE:
+            for (auto& w : wplugStato.widgets) {
+                if (w.id == wplugIdAperto && w.haToggle) {
+                    w.toggleStato = !w.toggleStato;
+                    wplugin::scriviAzioneToggle(w.id, w.toggleChiave, w.toggleStato);
+                    pDirty = true;
+                    break;
+                }
+            }
+            break;
+        case A_WPLUGIN_ITEM:
+            if (const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto)) {
+                if (e.indice >= 0 && e.indice < (int)pw->elementi.size()) {
+                    const std::wstring url = pw->elementi[e.indice].url;
+                    const std::wstring copia = pw->elementi[e.indice].copia;
+                    chiudiPannello();
+                    wplugin::eseguiAzione(url, copia, icone);
+                }
+            }
+            break;
+        case A_WPLUGIN_FOOTER: {
+            const wplugin::Widget* pw = trovaWPlugin(wplugIdAperto);
+            const std::wstring url = pw ? pw->piedeUrl : std::wstring();
+            chiudiPannello();
+            if (!url.empty()) wplugin::eseguiAzione(url, L"", icone);
+            else wplugin::apriCartellaWidget();
+            break;
+        }
     }
 }
 
@@ -2399,6 +3388,18 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         case WM_MOUSEWHEEL:
             if (d->pannelloTipo == P_CONTROLLO) d->cambiaVolume(GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 0.02f), d->pDirty = true;
+            else if (d->pannelloTipo == P_AI) {
+                d->aiScroll = std::clamp(d->aiScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->aiScrollMax);
+                d->pDirty = true;
+            }
+            else if (d->pannelloTipo == P_LOGI) {
+                d->logiScroll = std::clamp(d->logiScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->logiScrollMax);
+                d->pDirty = true;
+            }
+            else if (d->pannelloTipo == P_WPLUGIN) {
+                d->wplugScroll = std::clamp(d->wplugScroll - GET_WHEEL_DELTA_WPARAM(w) / (float)WHEEL_DELTA * 44.0f * d->dpi, 0.0f, d->wplugScrollMax);
+                d->pDirty = true;
+            }
             return 0;
         // Esc chiude tutto; Backspace (o Alt+freccia sinistra) torna al centro di controllo da una vista interna
         case WM_APP + 4: if (d->pannelloTipo != P_NESSUNO && !d->pChiusura) prendiFuoco(h); return 0;
@@ -2441,8 +3442,8 @@ inline LRESULT CALLBACK Motore::procPannello(HWND h, UINT m, WPARAM w, LPARAM l)
                 }
                 // il fuoco va via perche' si e' cliccata l'isola: decide quel clic (apre, chiude o cambia pannello).
                 // Chiudendo qui, il clic subito dopo riaprirebbe quello appena chiuso
-                POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo();
-                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && PtInRect(&is, pt)) return 0;
+                POINT pt; GetCursorPos(&pt); const RECT is = d->rettIsolaSchermo(), ia = d->rettAISchermo(), il = d->rettLogiSchermo();
+                if ((GetAsyncKeyState(VK_LBUTTON) & 0x8000) && (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || d->suIconaWPluginSchermo(pt))) return 0;
                 d->chiudiTutte();
             }
             return 0;
@@ -2477,16 +3478,69 @@ inline auto Motore::rettCentro() const -> D2D1_RECT_F {
     return {x, yb - S, x + S, yb};
 }
 
+inline auto Motore::rettAI() const -> D2D1_RECT_F {
+    const auto pos = posizioniRiposo();
+    float x = W - S * 2 - GAP - 12 * dpi;
+    for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == AVVIO_AI) x = pos[i];
+    const float yb = yBaseRiposo();
+    return {x, yb - S, x + S, yb};
+}
+
+inline auto Motore::rettLogi() const -> D2D1_RECT_F {
+    const auto pos = posizioniRiposo();
+    float x = W - S * 2 - GAP - 12 * dpi;
+    for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == AVVIO_LOGI) x = pos[i];
+    const float yb = yBaseRiposo();
+    return {x, yb - S, x + S, yb};
+}
+
+inline auto Motore::rettWPlugin(const std::wstring& id) const -> D2D1_RECT_F {
+    const auto pos = posizioniRiposo();
+    float x = W - S * 2 - GAP - 12 * dpi;
+    const std::wstring av = AVVIO_WPLUGIN_PREF + id;
+    for (size_t i = 0; i < voci.size() && i < pos.size(); i++) if (voci[i].avvio == av) { x = pos[i]; break; }
+    const float yb = yBaseRiposo();
+    return {x, yb - S, x + S, yb};
+}
+
 // ... sullo schermo (per i banner delle notifiche, che escono da li', e per i clic sull'icona a pannello aperto)
 inline auto Motore::rettIsolaSchermo() const -> RECT {
     const D2D1_RECT_F r = rettCentro();
     return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});   // (sul lato del dock)
 }
 
+inline auto Motore::rettAISchermo() const -> RECT {
+    if (!mostraAI) return RECT{};
+    const D2D1_RECT_F r = rettAI();
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
+}
+
+inline auto Motore::rettLogiSchermo() const -> RECT {
+    if (!mostraLogi) return RECT{};
+    const D2D1_RECT_F r = rettLogi();
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
+}
+
+inline auto Motore::rettWPluginSchermo(const std::wstring& id) const -> RECT {
+    const wplugin::Widget* pw = trovaWPlugin(id);
+    if (!pw || !pw->abilitato) return RECT{};
+    const D2D1_RECT_F r = rettWPlugin(id);
+    return aSchermo({r.left, r.top - PAD, r.right, r.bottom + PAD});
+}
+
+inline auto Motore::suIconaWPluginSchermo(POINT pt) const -> bool {
+    for (const auto& w : wplugStato.widgets) {
+        if (!w.abilitato) continue;
+        const RECT r = rettWPluginSchermo(w.id);
+        if (PtInRect(&r, pt)) return true;
+    }
+    return false;
+}
+
 inline auto Motore::isolaVisibile() const -> bool { return attivo && !nascostoSchermoIntero; }
 
 // apre il centro di controllo da fuori (1 app in background, 2 centro di controllo, 3 notifiche, 4 widget)
-inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_APPUNTI) apriCentro(tipo); }
+inline auto Motore::apriPannelloIsola(int tipo) -> void { if (attivo && tipo >= P_SFONDO && tipo <= P_LOGI) apriCentro(tipo); }
 
 // Il centro di controllo (icona a destra nel dock, notch, Win+N...): si apre sulla vista chiesta. Gia' aperto: la
 // stessa vista lo chiude, un'altra ci passa dentro la stessa finestra. Col launcher aperto prima si chiude lui
@@ -2496,7 +3550,8 @@ inline auto Motore::apriCentro(int tipo) -> void {
     if (lAperto) { if (!lChiusura) chiudiLauncher(); if (dopo != 2) apriDopo(2, tipo); return; }
     usa(0);
     if (pannelloTipo != P_NESSUNO && !pChiusura) {
-        if (pannelloTipo == tipo || tipo == P_CONTROLLO) { chiudiPannello(); return; }
+        if (pannelloTipo == tipo || (tipo == P_CONTROLLO && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN)) { chiudiPannello(); return; }
+        if (tipo == P_AI || pannelloTipo == P_AI || tipo == P_LOGI || pannelloTipo == P_LOGI || tipo == P_WPLUGIN || pannelloTipo == P_WPLUGIN) { nascondiPannello(); apriPannello(tipo); return; }
         cambiaVista(tipo, {PW / 2, PH / 2});   // (da fuori: la vista nuova si apre dal centro)
         return;
     }

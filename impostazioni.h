@@ -6,6 +6,7 @@
 #include "cursori.h"
 #include "pool.h"
 #include "sfondi.h"
+#include "widget_plugin.h"
 #include <shellapi.h>   // DragAcceptFiles: il pacchetto di cursori si trascina nella finestra
 #include <windowsx.h>
 #include <commdlg.h>   // ChooseColorW: il colore del dock scelto a piacere
@@ -43,6 +44,10 @@ struct Valori {
     bool dockSpazio = false;      // le finestre ingrandite si fermano sopra il dock (spazio riservato, come la barra di Windows)
     bool dockSchermi = true;      // il dock segue il mouse sul bordo in basso degli altri schermi (spento: resta sul principale)
     bool dockAnteprime = true;    // anteprime delle finestre col mouse fermo su un'icona del dock (issue #24)
+    bool dockAI = false;          // icona Monitor AI nel dock
+    bool dockLogi = false;        // widget Logitech G HUB nel dock
+    bool logiAnimCarica = true;   // animazione di ricarica sull'anello Logitech
+    DWORD logiGlowColore = 0;     // colore bagliore ricarica Logitech: 0 automatico (ciano), altrimenti 0x00RRGGBB
     bool aggiornamenti = true;    // all'avvio chiede a GitHub se c'e' una versione nuova (aggiorna.h)
     bool affianca = true;         // affiancamento di FluidWin al posto dello Snap di Windows (affianca.h)
     int lingua = 0;               // lingua dell'interfaccia (testi::Lingua, 0..N_LINGUE-1)
@@ -133,6 +138,10 @@ inline void carica() {
     v.dockSpazio = leggiDword(L"DockSpazio", 0);
     v.dockSchermi = leggiDword(L"DockAltriSchermi", 1);
     v.dockAnteprime = leggiDword(L"DockAnteprime", 1);
+    v.dockAI = leggiDword(L"DockAI", 0);
+    v.dockLogi = leggiDword(L"DockLogi", 0);
+    v.logiAnimCarica = leggiDword(L"LogiAnimCarica", 1);
+    v.logiGlowColore = leggiDword(L"LogiGlowColore", 0) & 0xFFFFFFu;
     v.aggiornamenti = leggiDword(L"Aggiornamenti", 1);
     v.affianca = leggiDword(L"Affiancamento", 1);
     { const DWORD l = leggiDword(L"Lingua", (DWORD)testi::predefinita()); v.lingua = l < (DWORD)testi::N_LINGUE ? (int)l : testi::INGLESE; }
@@ -154,7 +163,7 @@ inline void salva() {
     scriviDword(L"DockAutoNascosto", v.dockAuto); scriviDword(L"DockLato", (DWORD)v.dockLato); scriviDword(L"DockOpacita", (DWORD)v.dockOpacita);
     scriviDword(L"DockIcone", (DWORD)v.dockIcone); scriviDword(L"DockColore", v.dockColore);
     scriviDword(L"DockDistanza", (DWORD)v.dockDistanza);
-    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
+    scriviDword(L"DockSpazio", v.dockSpazio); scriviDword(L"DockAltriSchermi", v.dockSchermi); scriviDword(L"DockAnteprime", v.dockAnteprime); scriviDword(L"DockAI", v.dockAI); scriviDword(L"DockLogi", v.dockLogi); scriviDword(L"LogiAnimCarica", v.logiAnimCarica); scriviDword(L"LogiGlowColore", v.logiGlowColore & 0xFFFFFFu); scriviDword(L"Aggiornamenti", v.aggiornamenti); scriviDword(L"Affiancamento", v.affianca);
     scriviTesto(L"Cursore", v.cursore);
 }
 
@@ -172,6 +181,22 @@ public:
     std::function<RECT()> iconaCentro;        // icona del centro di controllo nel dock, sullo schermo (clic altrove)
     std::function<std::vector<std::pair<std::wstring, std::wstring>>()> elencoNascoste;
     std::function<void(const std::wstring&)> mostraNascosta;
+    std::function<std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>()> elencoWPlugin;
+    std::function<void(const std::wstring&, bool)> impostaWPlugin;
+    std::function<void()> apriCartellaWPlugin;
+    std::function<void()> creaEsempioWPlugin;
+    std::function<bool()> leggiAIAvvisi;
+    std::function<void(bool)> impostaAIAvvisi;
+    std::function<bool()> hookAgyStato;
+    std::function<void(bool)> hookAgyImposta;
+    std::function<bool()> hookClaudeStato;
+    std::function<void(bool)> hookClaudeImposta;
+    std::function<void()> apriCartellaHookAI;
+    std::function<void()> apriGHub;
+    std::function<bool(const std::wstring&, wplugin::Widget&)> dettagliWPlugin;
+    std::function<void(const std::wstring&, const std::wstring&, bool)> impostaConfigWPluginBool;
+    std::function<void(const std::wstring&, const std::wstring&, const std::wstring&)> impostaConfigWPluginStr;
+    std::function<void(const std::wstring&, const std::wstring&, double)> impostaConfigWPluginNum;
 
     // da: rettangolo sullo schermo del vetro del centro di controllo. Le impostazioni non compaiono a parte: il vetro
     // del centro sale e si allarga fino a diventare la loro finestra, al centro dello schermo (dove sono sempre state),
@@ -230,6 +255,8 @@ public:
         DragAcceptFiles(v.fin, TRUE);
         rileggiPacchetti();
         anim.clear();
+        widgetAperto.clear();
+        sliderWPlugDrag = -1;
         aperta = true; sopra = -1; t0 = vetro::ms(); k = 0; kSez = 1;
         // (lo sfondo puo' essere cambiato da fuori: si rilegge, e la miniatura del tuo si rifa')
         sfondoAttuale = -2; sfondoErrore = false; provataMini[0] = false; if (miniSfondi[0]) { miniSfondi[0]->Release(); miniSfondi[0] = nullptr; }
@@ -247,6 +274,7 @@ public:
             if (morph == 0) { GetWindowRect(v.fin, &rA); giraMorph(-1); }   // (spostata trascinandola: rientra da li')
             else if (morph > 0) giraMorph(-1);
             if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); }
+            if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; ReleaseCapture(); }
             vetro::battito(v.fin, 1);
             return;
         }
@@ -256,6 +284,7 @@ public:
             if (morph == 0) { GetWindowRect(v.fin, &rA); giraMorph(-1); }
             else if (morph > 0) giraMorph(-1);
             if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); }
+            if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; ReleaseCapture(); }
             vetro::battito(v.fin, 1);
             return;
         }
@@ -332,26 +361,37 @@ public:
             case WM_MOUSEMOVE: {
                 if (morph) return true;   // mentre cresce o rientra non si tocca niente
                 if (trascina >= 0) { valoreDa(trascina, (float)GET_X_LPARAM(l)); return true; }
+                if (sliderWPlugDrag >= 0) { aggiornaSliderWPlug(sliderWPlugDrag, (float)GET_X_LPARAM(l)); return true; }
                 if (!dentro) { TRACKMOUSEEVENT tm{sizeof(tm), TME_LEAVE, v.fin, 0}; TrackMouseEvent(&tm); dentro = true; }
                 const int s = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (s != sopra) { sopra = s; disegna(); }
                 return true;
             }
-            case WM_MOUSELEAVE: dentro = false; if (trascina < 0) sopra = -1; disegna(); return true;
+            case WM_MOUSELEAVE: dentro = false; if (trascina < 0 && sliderWPlugDrag < 0) sopra = -1; disegna(); return true;
             case WM_LBUTTONDOWN: {   // su un cursore: si trascina (anche fuori dal binario, finche' non si lascia)
                 if (morph) return true;
                 const int z = zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l));
                 if (z >= Z_CURSORE && z < Z_CURSORE + (int)cursori.size()) {
                     trascina = z - Z_CURSORE; SetCapture(v.fin); valoreDa(trascina, (float)GET_X_LPARAM(l));
+                } else if (z >= Z_W_CFG_SLIDER && z < Z_W_CFG_SLIDER + (int)wplugin::MAX_CONFIG) {
+                    sliderWPlugDrag = z - Z_W_CFG_SLIDER;
+                    SetCapture(v.fin);
+                    aggiornaSliderWPlug(sliderWPlugDrag, (float)GET_X_LPARAM(l));
+                    vetro::battito(v.fin, 1);
+                    disegna();
                 }
                 return true;
             }
             case WM_LBUTTONUP:
                 if (trascina >= 0) { trascina = -1; ReleaseCapture(); salva(); disegna(); return true; }
+                if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; ReleaseCapture(); disegna(); return true; }
                 if (morph) return true;
                 clic(zonaIn((float)GET_X_LPARAM(l), (float)GET_Y_LPARAM(l)));
                 return true;
-            case WM_CAPTURECHANGED: if (trascina >= 0) { trascina = -1; salva(); disegna(); } return true;
+            case WM_CAPTURECHANGED:
+                if (trascina >= 0) { trascina = -1; salva(); disegna(); }
+                if (sliderWPlugDrag >= 0) { sliderWPlugDrag = -1; disegna(); }
+                return true;
             case WM_KEYDOWN:
                 if (w == VK_ESCAPE) chiudi();
                 else if (w == VK_DOWN || w == VK_UP) vaiASezione((sezione + (w == VK_DOWN ? 1 : SEZIONI - 1)) % SEZIONI);   // frecce: sezioni
@@ -422,7 +462,7 @@ public:
 
 private:
     static constexpr float LARGO = 780, ALTO = 500, BARRA = 240;
-    enum { S_GENERALE, S_DOCK, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, S_CURSORE, SEZIONI };
+    enum { S_GENERALE, S_DOCK, S_WIDGET, S_ANIMAZIONI, S_NOTCH, S_TASTIERA, S_CURSORE, SEZIONI };
     // nome e spiegazione in italiano e in inglese, sezione
     struct Voce { const wchar_t *nome, *name, *spiega, *explain; bool Valori::*campo; int sezione; };
     const std::vector<Voce> voci = {
@@ -435,6 +475,10 @@ private:
          L"Mouse on the bottom edge of another screen. Off: main only", &Valori::dockSchermi, S_DOCK},
         {L"Anteprime delle finestre", L"Window previews",
          L"Mouse fermo su un'icona: le sue finestre dal vivo", L"Hover an icon: its windows, live", &Valori::dockAnteprime, S_DOCK},
+        {L"Monitor AI", L"AI Monitor",
+         L"Widget nel dock per stato, contesto e avvio rapido degli agenti AI", L"Dock widget for live AI agent status, context usage and quick launch", &Valori::dockAI, S_WIDGET},
+        {L"Logitech", L"Logitech",
+         L"Widget nel dock per batteria e stato dei dispositivi Logitech G HUB", L"Dock widget for Logitech G HUB battery levels and connected gear", &Valori::dockLogi, S_WIDGET},
         {L"Finestre di gelatina", L"Jelly windows",
          L"Le finestre si deformano mentre le trascini", L"Windows wobble while you drag them", &Valori::gelatina, S_ANIMAZIONI},
         {L"Avvia con Windows", L"Start with Windows",
@@ -485,6 +529,7 @@ private:
     RECT rDa{}, rA{};
     static constexpr double DURATA_CRESCE = 340, DURATA_RIENTRA = 260;   // ms
     int sopra = -1, sezione = S_GENERALE;
+    std::wstring widgetAperto;
     ULONGLONG t0 = 0, tSez = 0, copiataAlle = 0;
     double k = 0, kSez = 1;
     std::vector<double> anim;
@@ -540,7 +585,44 @@ private:
 
     // app nascoste dal dock (PR #20): "Mostra tutte", poi una riga per app da Z_MOSTRA_APP in su, senza limite (prima 651..699,
     // e dalla cinquantesima le righe non c'erano: R20261120-022133-S4)
-    static constexpr int Z_MOSTRA_TUTTE = 650, Z_MOSTRA_APP = 10000;
+    static constexpr int Z_MOSTRA_TUTTE = 650, Z_WPLUG_CARTELLA = 800, Z_WPLUG_ESEMPIO = 801, Z_MOSTRA_APP = 10000, Z_WPLUG_APP = 20000;
+    static constexpr int Z_W_INDIETRO = 900, Z_W_APRI_AI = 901, Z_W_APRI_LOGI = 902, Z_W_MOSTRA_DOCK = 903,
+                         Z_W_AI_AVVISI = 904, Z_W_AI_HOOK_AGY = 905, Z_W_AI_HOOK_CLAUDE = 906, Z_W_AI_CARTELLA = 907,
+                         Z_W_LOGI_ANIM = 908, Z_W_LOGI_GHUB = 909, Z_W_WPLUG_CARTELLA = 910, Z_W_WPLUG_JSON = 911,
+                         Z_W_LOGI_GLOW = 912,
+                         Z_W_APRI_WPLUG = 920, Z_W_CFG_TOGGLE = 960, Z_W_CFG_OPT = 1000, Z_W_CFG_SLIDER = 1160;
+    struct GlowSwatch { DWORD rgb; const wchar_t* nome; };
+    static constexpr GlowSwatch LOGI_GLOW_PALETTE[] = {
+        {0x000000, L"Auto"},
+        {0x30D158, L"Emerald"},
+        {0x32D2FF, L"Cyan"},
+        {0x0A84FF, L"Blue"},
+        {0xBF5AF2, L"Purple"},
+        {0xFF9F0A, L"Amber"},
+        {0xFF453A, L"Coral"},
+    };
+    static constexpr int N_LOGI_GLOW = (int)(sizeof(LOGI_GLOW_PALETTE) / sizeof(LOGI_GLOW_PALETTE[0]));
+    int sliderWPlugDrag = -1;
+    D2D1_RECT_F sliderWPlugTrack[wplugin::MAX_CONFIG]{};
+    void aggiornaSliderWPlug(int idx, float mouseX) {
+        if (idx < 0 || idx >= (int)wplugin::MAX_CONFIG) return;
+        if (widgetAperto.rfind(L"wplugin:", 0) != 0 || !dettagliWPlugin) return;
+        const std::wstring wid = widgetAperto.substr(8);
+        wplugin::Widget w;
+        if (!dettagliWPlugin(wid, w) || (size_t)idx >= w.config.size()) return;
+        const wplugin::ConfigVoce& cfg = w.config[(size_t)idx];
+        if (cfg.tipo != L"slider") return;
+        const D2D1_RECT_F& tr = sliderWPlugTrack[idx];
+        const float width = tr.right - tr.left;
+        if (width <= 1.0f) return;
+        const double frac = std::clamp((double)(mouseX - tr.left) / (double)width, 0.0, 1.0);
+        const double rawVal = cfg.minNum + frac * (cfg.maxNum - cfg.minNum);
+        const double val = wplugin::dettagli::snapSlider(rawVal, cfg.minNum, cfg.maxNum, cfg.stepNum);
+        if (std::abs(val - cfg.valNum) > 1e-6 && impostaConfigWPluginNum) {
+            impostaConfigWPluginNum(wid, cfg.chiave, val);
+            disegna();
+        }
+    }
     // ---- cursori (sezione Cursore): 700 la zona del pacchetto, 710 quelli di Windows, 720+i i pacchetti, 760+i rimuovi
     static constexpr UINT WM_CURSORI_INSTALLATI = WM_APP + 50;
     // ---- sfondi (Generale, Fase 3): Z_SFONDO "Il tuo sfondo", Z_SFONDO + 1 + i gli sfondi di FluidWin (sfondi.h)
@@ -699,9 +781,17 @@ private:
         return -1;
     }
 
+    void apriPaginaWidget(std::wstring id) {
+        widgetAperto = std::move(id);
+        sliderWPlugDrag = -1;
+        kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0;
+        vetro::battito(v.fin, 1);
+        disegna();
+    }
+
     void vaiASezione(int s) {
-        if (s == sezione) return;
-        sezione = s; kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0;
+        if (s == sezione && widgetAperto.empty()) return;
+        sezione = s; widgetAperto.clear(); sliderWPlugDrag = -1; kSez = 0; tSez = vetro::ms(); scorriSez = 0; massimoSez = 0;
         vetro::battito(v.fin, 1);
         disegna();
     }
@@ -710,10 +800,141 @@ private:
         if (id < 0) return;
         if (id == 200) { chiudi(); return; }
         if (id >= Z_CURSORE && id < Z_COLORE) return;   // (i cursori si usano trascinando: WM_LBUTTONDOWN)
+        if (id >= Z_W_CFG_SLIDER && id < Z_W_CFG_SLIDER + (int)wplugin::MAX_CONFIG) return;
         if (id >= Z_COLORE && id <= Z_COLORE_MIO) {
             scegliColore(id);
             salva();
             if (cambiato) cambiato();
+            disegna();
+            return;
+        }
+        if (id == Z_W_INDIETRO) { apriPaginaWidget(L""); return; }
+        if (id == Z_W_APRI_AI) { apriPaginaWidget(L"ai"); return; }
+        if (id == Z_W_APRI_LOGI) { apriPaginaWidget(L"logitech"); return; }
+        if (id >= Z_W_APRI_WPLUG && id < Z_W_APRI_WPLUG + 30) {
+            const auto wp = elencoWPlugin ? elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{};
+            const size_t k = (size_t)(id - Z_W_APRI_WPLUG);
+            if (k < wp.size()) apriPaginaWidget(L"wplugin:" + wp[k].first);
+            return;
+        }
+        if (id == Z_W_MOSTRA_DOCK) {
+            if (widgetAperto == L"ai") {
+                valori().dockAI = !valori().dockAI;
+                salva();
+                if (cambiato) cambiato();
+            } else if (widgetAperto == L"logitech") {
+                valori().dockLogi = !valori().dockLogi;
+                salva();
+                if (cambiato) cambiato();
+            } else if (widgetAperto.rfind(L"wplugin:", 0) == 0) {
+                const std::wstring wid = widgetAperto.substr(8);
+                wplugin::Widget w;
+                if (dettagliWPlugin && dettagliWPlugin(wid, w) && impostaWPlugin) impostaWPlugin(wid, !w.abilitato);
+            }
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_W_AI_AVVISI) {
+            if (leggiAIAvvisi && impostaAIAvvisi) impostaAIAvvisi(!leggiAIAvvisi());
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_W_AI_HOOK_AGY) {
+            if (hookAgyStato && hookAgyImposta) hookAgyImposta(!hookAgyStato());
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_W_AI_HOOK_CLAUDE) {
+            if (hookClaudeStato && hookClaudeImposta) hookClaudeImposta(!hookClaudeStato());
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_W_AI_CARTELLA) {
+            if (apriCartellaHookAI) apriCartellaHookAI();
+            return;
+        }
+        if (id == Z_W_LOGI_ANIM) {
+            valori().logiAnimCarica = !valori().logiAnimCarica;
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id >= Z_W_LOGI_GLOW && id < Z_W_LOGI_GLOW + N_LOGI_GLOW) {
+            valori().logiGlowColore = LOGI_GLOW_PALETTE[id - Z_W_LOGI_GLOW].rgb;
+            salva();
+            if (cambiato) cambiato();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_W_LOGI_GHUB) {
+            if (apriGHub) apriGHub();
+            return;
+        }
+        if (id == Z_W_WPLUG_CARTELLA) {
+            if (apriCartellaWPlugin) apriCartellaWPlugin();
+            return;
+        }
+        if (id == Z_W_WPLUG_JSON) {
+            if (widgetAperto.rfind(L"wplugin:", 0) == 0 && dettagliWPlugin) {
+                wplugin::Widget w;
+                if (dettagliWPlugin(widgetAperto.substr(8), w) && !w.filePath.empty()) {
+                    ShellExecuteW(nullptr, L"open", w.filePath.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
+            return;
+        }
+        if (id >= Z_W_CFG_TOGGLE && id < Z_W_CFG_TOGGLE + (int)wplugin::MAX_CONFIG) {
+            if (widgetAperto.rfind(L"wplugin:", 0) == 0 && dettagliWPlugin && impostaConfigWPluginBool) {
+                const std::wstring wid = widgetAperto.substr(8);
+                wplugin::Widget w;
+                const size_t idx = (size_t)(id - Z_W_CFG_TOGGLE);
+                if (dettagliWPlugin(wid, w) && idx < w.config.size() && w.config[idx].tipo == L"toggle") {
+                    impostaConfigWPluginBool(wid, w.config[idx].chiave, !w.config[idx].valBool);
+                }
+            }
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id >= Z_W_CFG_OPT && id < Z_W_CFG_OPT + (int)wplugin::MAX_CONFIG * 8) {
+            if (widgetAperto.rfind(L"wplugin:", 0) == 0 && dettagliWPlugin && impostaConfigWPluginStr) {
+                const std::wstring wid = widgetAperto.substr(8);
+                wplugin::Widget w;
+                const int rel = id - Z_W_CFG_OPT;
+                const size_t idx = (size_t)(rel / 8);
+                const size_t j = (size_t)(rel % 8);
+                if (dettagliWPlugin(wid, w) && idx < w.config.size() &&
+                    (w.config[idx].tipo == L"choice" || w.config[idx].tipo == L"color") &&
+                    j < w.config[idx].opzioni.size()) {
+                    impostaConfigWPluginStr(wid, w.config[idx].chiave, w.config[idx].opzioni[j]);
+                }
+            }
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id == Z_WPLUG_CARTELLA) {
+            if (apriCartellaWPlugin) apriCartellaWPlugin();
+            return;
+        }
+        if (id == Z_WPLUG_ESEMPIO) {
+            if (creaEsempioWPlugin) creaEsempioWPlugin();
+            vetro::battito(v.fin, 1);
+            disegna();
+            return;
+        }
+        if (id >= Z_WPLUG_APP) {
+            const auto wp = elencoWPlugin ? elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{};
+            const size_t k = (size_t)(id - Z_WPLUG_APP);
+            if (k < wp.size() && impostaWPlugin) impostaWPlugin(wp[k].first, !wp[k].second.second);
+            vetro::battito(v.fin, 1);
             disegna();
             return;
         }
@@ -723,7 +944,7 @@ private:
             disegna();
             return;
         }
-        if (id >= Z_MOSTRA_APP) {
+        if (id >= Z_MOSTRA_APP && id < Z_WPLUG_APP) {
             const auto nasc = elencoNascoste ? elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{};
             const size_t k = (size_t)(id - Z_MOSTRA_APP);
             if (k < nasc.size() && mostraNascosta) mostraNascosta(nasc[k].first);
@@ -793,6 +1014,7 @@ private:
         switch (s) {
             case S_GENERALE: return testi::t(L"Generale", L"General");
             case S_DOCK: return testi::t(L"Dock", L"Dock");
+            case S_WIDGET: return testi::t(L"Widget", L"Widgets");
             case S_ANIMAZIONI: return testi::t(L"Animazioni", L"Animations");
             case S_NOTCH: return testi::t(L"Notch e notifiche", L"Notch & notifications");
             case S_TASTIERA: return testi::t(L"Tastiera e mouse", L"Keyboard and mouse");
@@ -815,6 +1037,12 @@ private:
                 v.rt->DrawRoundedRectangle({{cx - 9 * d, cy + 1 * d, cx + 9 * d, cy + 7 * d}, 2.5f * d, 2.5f * d}, v.pen, sp);
                 for (int i = 0; i < 3; i++) v.rt->FillRoundedRectangle({{cx + (-6.5f + i * 5) * d, cy + 2.5f * d, cx + (-3.5f + i * 5) * d, cy + 5.5f * d}, 0.8f * d, 0.8f * d}, v.pen);
                 l(-7, -6, 7, -6); break;
+            case S_WIDGET:     // griglia 2x2 di widget
+                v.rt->DrawRoundedRectangle({{cx - 8 * d, cy - 8 * d, cx - 1.5f * d, cy - 1.5f * d}, 2 * d, 2 * d}, v.pen, sp);
+                v.rt->DrawRoundedRectangle({{cx + 1.5f * d, cy - 8 * d, cx + 8 * d, cy - 1.5f * d}, 2 * d, 2 * d}, v.pen, sp);
+                v.rt->DrawRoundedRectangle({{cx - 8 * d, cy + 1.5f * d, cx - 1.5f * d, cy + 8 * d}, 2 * d, 2 * d}, v.pen, sp);
+                v.rt->DrawRoundedRectangle({{cx + 1.5f * d, cy + 1.5f * d, cx + 8 * d, cy + 8 * d}, 2 * d, 2 * d}, v.pen, sp);
+                break;
             case S_ANIMAZIONI: // scintilla e una piccola
                 l(-2, -8, -2, 4); l(-8, -2, 4, -2); l(-5.5f, -5.5f, 1.5f, 1.5f); l(1.5f, -5.5f, -5.5f, 1.5f);
                 l(5, 3, 5, 8); l(2.5f, 5.5f, 7.5f, 5.5f); break;
@@ -836,7 +1064,7 @@ private:
         if (v.fin) { vetro::fermaBattito(v.fin, 1); ShowWindow(v.fin, SW_HIDE); }
         if (v.fin && fuori) SetWindowPos(v.fin, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
         if (daCentro && dockSu) dockSu(false);   // (dopo tornaAlCentro: col pannello gia' aperto il dock non scende)
-        aperta = false; daCentro = false; daPunto = false; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false;
+        aperta = false; daCentro = false; daPunto = false; morph = 0; mx = 1; rientra = false; fuori = false; fuoriDopo = false; sliderWPlugDrag = -1;
     }
 
     // forma del vetro 0..1 (0 = rettangolo del centro di controllo, 1 = impostazioni). Tutte e due le direzioni
@@ -920,11 +1148,49 @@ private:
         const float sx = (float)((1 - e) * 14 * d);
         const D2D1_COLOR_F inkS = {ink.r, ink.g, ink.b, ink.a * (float)e}, tenueS = {tenue.r, tenue.g, tenue.b, tenue.a * (float)e};
         const float L = B + 28 * d + sx, R = W - 28 * d + sx;
-        v.testo(nomeSezione(sezione), fTitolo, {L, 20 * d, R - 50 * d, 54 * d}, inkS);
+        wplugin::Widget wpSub;
+        bool widgetSubAperto = false;
+        if (sezione == S_WIDGET && !widgetAperto.empty()) {
+            if (widgetAperto == L"ai" || widgetAperto == L"logitech") {
+                widgetSubAperto = true;
+            } else if (widgetAperto.rfind(L"wplugin:", 0) == 0) {
+                const std::wstring wid = widgetAperto.substr(8);
+                if (dettagliWPlugin && dettagliWPlugin(wid, wpSub)) widgetSubAperto = true;
+                else { widgetAperto.clear(); sliderWPlugDrag = -1; }
+            } else {
+                widgetAperto.clear();
+            }
+        }
+        if (widgetSubAperto) {
+            const std::wstring tbBack = L"\u2039 " + std::wstring(testi::t(L"Widget", L"Widgets"));
+            const float lwBack = v.larghezza(tbBack, fCentro) + 22 * d;
+            const D2D1_RECT_F rBack = {L, 21 * d, L + lwBack, 49 * d};
+            zone.push_back({rBack, Z_W_INDIETRO});
+            v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == Z_W_INDIETRO ? 0.16f : 0.08f) * (float)e)
+                                    : D2D1::ColorF(0, 0, 0, (sopra == Z_W_INDIETRO ? 0.10f : 0.05f) * (float)e));
+            v.rt->FillRoundedRectangle({rBack, 14 * d, 14 * d}, v.pen);
+            v.testo(tbBack, fCentro, rBack, inkS);
+
+            std::wstring subTit, subSotto;
+            if (widgetAperto == L"ai") {
+                subTit = testi::t(L"Monitor AI", L"AI Monitor");
+                subSotto = testi::t(L"Stato, notifiche e hook degli agenti AI", L"AI agent status, notifications and CLI hooks");
+            } else if (widgetAperto == L"logitech") {
+                subTit = L"Logitech";
+                subSotto = testi::t(L"Dispositivi Logitech G HUB nel dock", L"Logitech G HUB devices in the dock");
+            } else {
+                subTit = wpSub.nome;
+                subSotto = !wpSub.sottotitolo.empty() ? wpSub.sottotitolo : (wpSub.id + L".json");
+            }
+            v.testo(subTit, fTitolo, {rBack.right + 12 * d, 18 * d, R - 50 * d, 50 * d}, inkS);
+            v.testo(subSotto, fSotto, {L, 52 * d, R - 16 * d, 70 * d}, tenueS);
+        } else {
+            v.testo(nomeSezione(sezione), fTitolo, {L, 20 * d, R - 50 * d, 54 * d}, inkS);
+        }
         // le righe scorrono sotto il titolo: ritaglio da qui in giu', e le zone tagliate allo stesso modo (piu' sotto).
         // (la sezione Cursore ha il suo scorrimento, a righe dell'elenco dei pacchetti)
         const bool scorre = sezione != S_CURSORE;
-        const float cimaSez = 62 * d, y0 = 72 * d;
+        const float cimaSez = widgetSubAperto ? 74 * d : 62 * d, y0 = widgetSubAperto ? 82 * d : 72 * d;
         const size_t zona0 = zone.size();
         if (scorre) v.rt->PushAxisAlignedClip({B, cimaSez, W, H}, D2D1_ANTIALIAS_MODE_ALIASED);
         float y = y0 - (scorre ? scorriSez : 0);
@@ -936,6 +1202,31 @@ private:
             v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (evid ? 0.10f : 0.06f) * (float)e) : D2D1::ColorF(1, 1, 1, (evid ? 0.75f : 0.55f) * (float)e));
             v.rt->FillRoundedRectangle({r, rr, rr}, v.pen);
         };
+        auto frecciaWidget = [&](float cx, float cy, bool evid) {
+            v.pen->SetColor(evid ? inkS : tenueS);
+            v.rt->DrawLine({cx - 2.5f * d, cy - 4.5f * d}, {cx + 2.0f * d, cy}, v.pen, 1.5f * d);
+            v.rt->DrawLine({cx + 2.0f * d, cy}, {cx - 2.5f * d, cy + 4.5f * d}, v.pen, 1.5f * d);
+        };
+        auto pulsantePill = [&](const D2D1_RECT_F& rb, int zid, const std::wstring& testo, bool primario) {
+            aggiungiZona(rb, zid);
+            if (primario) {
+                v.pen->SetColor(D2D1::ColorF(blu.r, blu.g, blu.b, (sopra == zid ? 1.0f : 0.88f) * (float)e));
+            } else {
+                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, (sopra == zid ? 0.16f : 0.08f) * (float)e)
+                                        : D2D1::ColorF(0, 0, 0, (sopra == zid ? 0.10f : 0.05f) * (float)e));
+            }
+            v.rt->FillRoundedRectangle({rb, 15 * d, 15 * d}, v.pen);
+            v.testo(testo, fCentro, rb, primario ? D2D1::ColorF(1, 1, 1, (float)e) : inkS);
+        };
+        auto rigaLevetta = [&](int zid, const std::wstring& tit, const std::wstring& sub, float kAnim) {
+            const D2D1_RECT_F r = {L, y, R, y + 54 * d};
+            aggiungiZona(r, zid);
+            riquadro(r, sopra == zid);
+            v.testo(tit, fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 74 * d, r.top + 29 * d}, inkS);
+            v.testo(sub, fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 74 * d, r.top + 48 * d}, tenueS);
+            levetta(r.right - 58 * d, (r.top + r.bottom) / 2, kAnim, (float)e);
+            y += 60 * d;
+        };
         // riga informativa (senza interruttore); spazio: quanto lasciare libero a destra per un pulsante
         auto riga = [&](const std::wstring& titolo, const std::wstring& testo, float spazio = 0) {
             const D2D1_RECT_F r = {L, y, R, y + 54 * d};
@@ -944,15 +1235,44 @@ private:
             v.testo(testo, fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 16 * d - spazio, r.top + 48 * d}, tenueS);
             y += 60 * d;
         };
-        for (size_t i = 0; i < voci.size(); i++) {
-            if (voci[i].sezione != sezione) continue;
-            const D2D1_RECT_F r = {L, y, R, y + 54 * d};
-            aggiungiZona(r, (int)i);
-            riquadro(r, sopra == (int)i);
-            v.testo(testi::t(voci[i].nome, voci[i].name), fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 74 * d, r.top + 29 * d}, inkS);
-            v.testo(testi::t(voci[i].spiega, voci[i].explain), fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 74 * d, r.top + 48 * d}, tenueS);
-            levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i], (float)e);
-            y += 60 * d;
+        auto rigaConPulsante = [&](int zid, const std::wstring& tit, const std::wstring& sub, const std::wstring& btnTesto, bool primario) {
+            const float yr = y;
+            const float lw = v.larghezza(btnTesto, fCentro) + 26 * d;
+            riga(tit, sub, lw + 12 * d);
+            const D2D1_RECT_F rb = {R - 16 * d - lw, yr + 12 * d, R - 16 * d, yr + 42 * d};
+            pulsantePill(rb, zid, btnTesto, primario);
+        };
+        auto animCampo = [&](bool Valori::*campo) -> float {
+            for (size_t i = 0; i < voci.size(); i++) {
+                if (voci[i].campo == campo && i < anim.size()) return (float)anim[i];
+            }
+            return (valori().*campo) ? 1.0f : 0.0f;
+        };
+        if (!widgetSubAperto) {
+            for (size_t i = 0; i < voci.size(); i++) {
+                if (voci[i].sezione != sezione) continue;
+                const D2D1_RECT_F r = {L, y, R, y + 54 * d};
+                if (sezione == S_WIDGET) {
+                    const int openId = (voci[i].campo == &Valori::dockAI) ? Z_W_APRI_AI
+                                     : (voci[i].campo == &Valori::dockLogi) ? Z_W_APRI_LOGI : -1;
+                    const float toggleL = r.right - 66 * d;
+                    if (openId >= 0) aggiungiZona({r.left, r.top, toggleL, r.bottom}, openId);
+                    aggiungiZona({openId >= 0 ? toggleL : r.left, r.top, r.right, r.bottom}, (int)i);
+                    riquadro(r, sopra == (int)i || (openId >= 0 && sopra == openId));
+                    const float textR = openId >= 0 ? (r.right - 94 * d) : (r.right - 74 * d);
+                    v.testo(testi::t(voci[i].nome, voci[i].name), fVoce, {r.left + 16 * d, r.top + 7 * d, textR, r.top + 29 * d}, inkS);
+                    v.testo(testi::t(voci[i].spiega, voci[i].explain), fSotto, {r.left + 16 * d, r.top + 28 * d, textR, r.top + 48 * d}, tenueS);
+                    if (openId >= 0) frecciaWidget(r.right - 76 * d, (r.top + r.bottom) / 2, sopra == openId);
+                    levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i], (float)e);
+                } else {
+                    aggiungiZona(r, (int)i);
+                    riquadro(r, sopra == (int)i);
+                    v.testo(testi::t(voci[i].nome, voci[i].name), fVoce, {r.left + 16 * d, r.top + 7 * d, r.right - 74 * d, r.top + 29 * d}, inkS);
+                    v.testo(testi::t(voci[i].spiega, voci[i].explain), fSotto, {r.left + 16 * d, r.top + 28 * d, r.right - 74 * d, r.top + 48 * d}, tenueS);
+                    levetta(r.right - 58 * d, (r.top + r.bottom) / 2, (float)anim[i], (float)e);
+                }
+                y += 60 * d;
+            }
         }
         if (sezione == S_ANIMAZIONI) {
             // stile della riduzione a icona (1.3.0): il genio, o il riquadro che cade dietro le icone del dock. Con la
@@ -1241,6 +1561,283 @@ private:
                     v.testo(tb, fCentro, rb, inkS);
                     v.testo(nascDock[k].second, fVoce, {ra.left + 16 * d, ra.top + 7 * d, rb.left - 12 * d, ra.top + 29 * d}, inkS);
                     v.testo(testi::t(L"Nascosta nel dock", L"Hidden in dock"), fSotto, {ra.left + 16 * d, ra.top + 28 * d, rb.left - 12 * d, ra.top + 48 * d}, tenueS);
+                    y += 60 * d;
+                }
+            }
+        }
+        if (sezione == S_WIDGET && widgetSubAperto) {
+            struct SwatchVoce {
+                int zid = -1;
+                bool isAuto = false;
+                bool attivo = false;
+                D2D1_COLOR_F col{};
+            };
+            auto rigaSwatch = [&](const std::wstring& titolo, const std::wstring& sub, const std::vector<SwatchVoce>& swatches) {
+                if (swatches.empty()) return;
+                const float fe = (float)e;
+                const float cardH = (!sub.empty() ? 78.0f : 68.0f) * d;
+                const D2D1_RECT_F ra = {L, y, R, y + cardH};
+                bool anyHover = false;
+                for (const auto& sw : swatches) if (sopra == sw.zid) { anyHover = true; break; }
+                riquadro(ra, anyHover);
+
+                if (!sub.empty()) {
+                    v.testo(titolo, fVoce, {ra.left + 16 * d, ra.top + 8 * d, ra.right - 16 * d, ra.top + 28 * d}, inkS);
+                    v.testo(sub, fSotto, {ra.left + 16 * d, ra.top + 27 * d, ra.right - 16 * d, ra.top + 45 * d}, tenueS);
+                } else {
+                    v.testo(titolo, fVoce, {ra.left + 16 * d, ra.top + 9 * d, ra.right - 16 * d, ra.top + 31 * d}, inkS);
+                }
+
+                const float rBase = 10.0f * d;
+                const float passo = 28.0f * d;
+                const float xStart = ra.left + 16.0f * d + rBase;
+                const float cy = ra.bottom - 18.0f * d;
+                const float zTop = std::max(ra.top, cy - 16.0f * d);
+                const float zBot = std::min(ra.bottom, cy + 16.0f * d);
+
+                for (size_t j = 0; j < swatches.size(); j++) {
+                    const SwatchVoce& sw = swatches[j];
+                    const float cx = xStart + passo * (float)j;
+                    aggiungiZona({cx - passo * 0.5f, zTop, cx + passo * 0.5f, zBot}, sw.zid);
+
+                    const bool hovered = (sopra == sw.zid);
+                    const float r = hovered ? (rBase + 1.0f * d) : rBase;
+                    if (hovered) {
+                        const D2D1_COLOR_F halo = sw.isAuto
+                            ? D2D1::ColorF(0.20f, 0.85f, 0.90f, 0.24f * fe)
+                            : D2D1::ColorF(sw.col.r, sw.col.g, sw.col.b, 0.26f * fe);
+                        v.pen->SetColor(halo);
+                        v.rt->FillEllipse({{cx, cy}, r + 4.5f * d, r + 4.5f * d}, v.pen);
+                    }
+
+                    const D2D1_ELLIPSE el = {{cx, cy}, r, r};
+                    if (sw.isAuto) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.14f * fe) : D2D1::ColorF(0, 0, 0, 0.08f * fe));
+                        v.rt->FillEllipse(el, v.pen);
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.32f * fe) : D2D1::ColorF(0, 0, 0, 0.24f * fe));
+                        v.rt->DrawEllipse(el, v.pen, 1.0f);
+                        v.pen->SetColor(D2D1::ColorF(0.20f, 0.85f, 1.0f, 0.82f * fe));
+                        v.rt->DrawEllipse({{cx, cy}, r * 0.62f, r * 0.62f}, v.pen, 1.5f * d);
+                        v.pen->SetColor(D2D1::ColorF(0.19f, 0.82f, 0.35f, 0.92f * fe));
+                        v.rt->FillEllipse({{cx, cy}, r * 0.30f, r * 0.30f}, v.pen);
+                    } else {
+                        v.pen->SetColor(D2D1::ColorF(sw.col.r, sw.col.g, sw.col.b, fe));
+                        v.rt->FillEllipse(el, v.pen);
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * fe) : D2D1::ColorF(0, 0, 0, 0.16f * fe));
+                        v.rt->DrawEllipse(el, v.pen, 1.0f);
+                    }
+
+                    if (sw.attivo) {
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.96f * fe) : D2D1::ColorF(0.10f, 0.12f, 0.16f, 0.90f * fe));
+                        v.rt->DrawEllipse({{cx, cy}, r + 3.0f * d, r + 3.0f * d}, v.pen, 2.0f * d);
+                    }
+                }
+                y += cardH + 6 * d;
+            };
+            if (widgetAperto == L"ai") {
+                rigaLevetta(Z_W_MOSTRA_DOCK, testi::t(L"Mostra nel dock", L"Show in dock"),
+                            testi::t(L"Aggiunge l'icona di Monitor AI al dock", L"Add the AI Monitor icon to the dock"), animCampo(&Valori::dockAI));
+                rigaLevetta(Z_W_AI_AVVISI, testi::t(L"Avvisi nel notch", L"Notch alerts"),
+                            testi::t(L"Mostra gli avvisi degli agenti AI nel notch", L"Show AI agent status alerts in the notch"),
+                            (leggiAIAvvisi ? leggiAIAvvisi() : true) ? 1.0f : 0.0f);
+                rigaLevetta(Z_W_AI_HOOK_AGY, testi::t(L"Hook Antigravity CLI", L"Antigravity CLI hooks"),
+                            testi::t(L"Registra gli hook in ~/.gemini/config/hooks.json", L"Register lifecycle hooks in ~/.gemini/config/hooks.json"),
+                            (hookAgyStato && hookAgyStato()) ? 1.0f : 0.0f);
+                rigaLevetta(Z_W_AI_HOOK_CLAUDE, testi::t(L"Hook Claude Code", L"Claude Code hooks"),
+                            testi::t(L"Registra gli hook in ~/.claude/settings.json", L"Register lifecycle hooks in ~/.claude/settings.json"),
+                            (hookClaudeStato && hookClaudeStato()) ? 1.0f : 0.0f);
+                rigaConPulsante(Z_W_AI_CARTELLA, testi::t(L"Cartella hook", L"Hooks folder"),
+                                L"%LOCALAPPDATA%\\FluidWin\\ai-agents",
+                                testi::t(L"Apri cartella hook", L"Open hooks folder"), false);
+            } else if (widgetAperto == L"logitech") {
+                rigaLevetta(Z_W_MOSTRA_DOCK, testi::t(L"Mostra nel dock", L"Show in dock"),
+                            testi::t(L"Aggiunge il widget batteria Logitech G HUB al dock", L"Add the Logitech G HUB battery widget to the dock"), animCampo(&Valori::dockLogi));
+                rigaLevetta(Z_W_LOGI_ANIM, testi::t(L"Animazione di ricarica", L"Charging animation"),
+                            testi::t(L"Bagliore animato e impulso sull'anello della batteria durante la ricarica",
+                                     L"Animated glow and pulse on the battery ring while charging"),
+                            valori().logiAnimCarica ? 1.0f : 0.0f);
+                {
+                    std::vector<SwatchVoce> logiSwatches;
+                    logiSwatches.reserve(N_LOGI_GLOW);
+                    for (int j = 0; j < N_LOGI_GLOW; j++) {
+                        const DWORD rgb = LOGI_GLOW_PALETTE[j].rgb;
+                        logiSwatches.push_back({Z_W_LOGI_GLOW + j, rgb == 0, valori().logiGlowColore == rgb, colore(rgb)});
+                    }
+                    rigaSwatch(testi::t(L"Colore del bagliore", L"Glow color"),
+                               testi::t(L"Colore dell'anello e del bagliore durante la ricarica",
+                                        L"Accent color for the charging glow and shimmer"),
+                               logiSwatches);
+                }
+                rigaConPulsante(Z_W_LOGI_GHUB, L"Logitech G HUB",
+                                testi::t(L"Avvia o porta in primo piano Logitech G HUB", L"Launch or focus Logitech G HUB"),
+                                testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), false);
+            } else {
+                rigaLevetta(Z_W_MOSTRA_DOCK, testi::t(L"Mostra nel dock", L"Show in dock"),
+                            testi::t(L"Mostra questo widget personalizzato nel dock", L"Show this custom widget in the dock"),
+                            wpSub.abilitato ? 1.0f : 0.0f);
+                for (size_t i = 0; i < wpSub.config.size() && i < wplugin::MAX_CONFIG; i++) {
+                    const wplugin::ConfigVoce& cv = wpSub.config[i];
+                    if (cv.tipo == L"toggle") {
+                        rigaLevetta(Z_W_CFG_TOGGLE + (int)i, cv.titolo, !cv.spiega.empty() ? cv.spiega : cv.chiave, cv.valBool ? 1.0f : 0.0f);
+                    } else if (cv.tipo == L"choice" && !cv.opzioni.empty()) {
+                        const D2D1_RECT_F ra = {L, y, R, y + 64 * d};
+                        riquadro(ra, false);
+                        if (!cv.spiega.empty()) {
+                            v.testo(cv.titolo, fVoce, {ra.left + 16 * d, ra.top + 10 * d, ra.left + 168 * d, ra.top + 32 * d}, inkS);
+                            v.testo(cv.spiega, fSotto, {ra.left + 16 * d, ra.top + 32 * d, ra.left + 168 * d, ra.top + 54 * d}, tenueS);
+                        } else {
+                            v.testo(cv.titolo, fVoce, {ra.left + 16 * d, ra.top, ra.left + 168 * d, ra.bottom}, inkS);
+                        }
+                        const float x0 = ra.left + 176 * d, larg = ra.right - 16 * d - x0, h = 34 * d, yl = ra.top + 15 * d;
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.08f * (float)e) : D2D1::ColorF(0, 0, 0, 0.06f * (float)e));
+                        v.rt->FillRoundedRectangle({{x0, yl, x0 + larg, yl + h}, h / 2, h / 2}, v.pen);
+                        const int nOpt = std::min<int>((int)cv.opzioni.size(), (int)wplugin::MAX_CONFIG_OPTIONS);
+                        for (int j = 0; j < nOpt; j++) {
+                            const int zid = Z_W_CFG_OPT + (int)i * 8 + j;
+                            const D2D1_RECT_F rOpt = {x0 + larg * j / nOpt + 3 * d, yl + 3 * d, x0 + larg * (j + 1) / nOpt - 3 * d, yl + h - 3 * d};
+                            aggiungiZona(rOpt, zid);
+                            if (cv.valStr == cv.opzioni[j]) {
+                                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.22f * (float)e) : D2D1::ColorF(1, 1, 1, 0.95f * (float)e));
+                                v.rt->FillRoundedRectangle({rOpt, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                            } else if (sopra == zid) {
+                                v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.06f) : D2D1::ColorF(0, 0, 0, 0.04f));
+                                v.rt->FillRoundedRectangle({rOpt, (h - 6 * d) / 2, (h - 6 * d) / 2}, v.pen);
+                            }
+                            v.testo(cv.opzioni[j], fCentro, rOpt, inkS);
+                        }
+                        y += 70 * d;
+                    } else if (cv.tipo == L"color" && !cv.opzioni.empty()) {
+                        const int nOpt = std::min<int>((int)cv.opzioni.size(), (int)wplugin::MAX_CONFIG_COLOR_OPTIONS);
+                        std::vector<SwatchVoce> cfgSwatches;
+                        cfgSwatches.reserve((size_t)nOpt);
+                        for (int j = 0; j < nOpt; j++) {
+                            const std::wstring& opt = cv.opzioni[(size_t)j];
+                            const bool isAuto = (opt == L"auto");
+                            float cr = 0, cg = 0, cb = 0;
+                            if (!isAuto) wplugin::parseColore(wplugin::dettagli::inUtf8(opt), &cr, &cg, &cb);
+                            cfgSwatches.push_back({Z_W_CFG_OPT + (int)i * 8 + j, isAuto, cv.valStr == opt, D2D1::ColorF(cr, cg, cb, 1.0f)});
+                        }
+                        rigaSwatch(cv.titolo, cv.spiega, cfgSwatches);
+                    } else if (cv.tipo == L"slider") {
+                        const int zid = Z_W_CFG_SLIDER + (int)i;
+                        const bool dragging = (sliderWPlugDrag == (int)i);
+                        const bool hovered = (sopra == zid);
+                        const float cardH = (!cv.spiega.empty() ? 78.0f : 68.0f) * d;
+                        const D2D1_RECT_F ra = {L, y, R, y + cardH};
+                        riquadro(ra, dragging || hovered);
+
+                        wchar_t buf[64]{};
+                        const double rVal = std::round(cv.valNum);
+                        std::wstring valText;
+                        if (std::abs(cv.valNum - rVal) < 1e-4) {
+                            swprintf(buf, 64, L"%.0f", rVal == 0.0 ? 0.0 : rVal);
+                            valText = buf;
+                        } else {
+                            swprintf(buf, 64, L"%.2f", cv.valNum);
+                            valText = buf;
+                            while (!valText.empty() && valText.back() == L'0') valText.pop_back();
+                            if (!valText.empty() && valText.back() == L'.') valText.pop_back();
+                            if (valText == L"-0") valText = L"0";
+                        }
+                        valText += cv.unita;
+                        const std::wstring valDisp = testi::isola(valText);
+                        const float valW = v.larghezza(valDisp, fVoce);
+                        const float valLeft = std::max(ra.left + 16 * d, ra.right - 16 * d - valW - 2 * d);
+                        const D2D1_COLOR_F iosBlu = v.scuro
+                            ? D2D1::ColorF(0.04f, 0.52f, 1.0f, 1.0f)
+                            : D2D1::ColorF(0.0f, 0.48f, 1.0f, 1.0f);
+                        const D2D1_COLOR_F valCol = (dragging || hovered)
+                            ? D2D1::ColorF(iosBlu.r, iosBlu.g, iosBlu.b, (float)e)
+                            : D2D1::ColorF(ink.r, ink.g, ink.b, 0.78f * (float)e);
+
+                        v.testo(cv.titolo, fVoce, {ra.left + 16 * d, ra.top + 10 * d, std::max(ra.left + 16 * d, valLeft - 10 * d), ra.top + 32 * d}, inkS);
+                        v.testo(valDisp, fVoce, {valLeft, ra.top + 10 * d, ra.right - 14 * d, ra.top + 32 * d}, valCol);
+                        if (!cv.spiega.empty()) {
+                            v.testo(cv.spiega, fSotto, {ra.left + 16 * d, ra.top + 30 * d, ra.right - 16 * d, ra.top + 48 * d}, tenueS);
+                        }
+
+                        const float trackL = ra.left + 16 * d, trackR = ra.right - 16 * d;
+                        const float trackH = 4.5f * d;
+                        const float trackCy = ra.bottom - 17.0f * d;
+                        const float trackTop = trackCy - trackH * 0.5f, trackBot = trackCy + trackH * 0.5f;
+                        sliderWPlugTrack[i] = {trackL, trackTop, trackR, trackBot};
+                        aggiungiZona({ra.left, std::max(ra.top, trackCy - 14 * d), ra.right, std::min(ra.bottom, trackCy + 14 * d)}, zid);
+
+                        const double span = (cv.maxNum > cv.minNum) ? (cv.maxNum - cv.minNum) : 1.0;
+                        const float frac = (float)std::clamp((cv.valNum - cv.minNum) / span, 0.0, 1.0);
+                        const float thumbX = trackL + (trackR - trackL) * frac;
+
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.16f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
+                        v.rt->FillRoundedRectangle({{trackL, trackTop, trackR, trackBot}, trackH * 0.5f, trackH * 0.5f}, v.pen);
+                        if (thumbX > trackL + 0.5f) {
+                            v.pen->SetColor(D2D1::ColorF(iosBlu.r, iosBlu.g, iosBlu.b, (float)e));
+                            v.rt->FillRoundedRectangle({{trackL, trackTop, thumbX, trackBot}, trackH * 0.5f, trackH * 0.5f}, v.pen);
+                        }
+
+                        const float thumbR = (dragging ? 10.5f : 9.5f) * d;
+                        v.pen->SetColor(D2D1::ColorF(0, 0, 0, 0.08f * (float)e));
+                        v.rt->FillEllipse({{thumbX, trackCy + 1.5f * d}, thumbR + 3.0f * d, thumbR + 3.0f * d}, v.pen);
+                        v.pen->SetColor(D2D1::ColorF(0, 0, 0, (v.scuro ? 0.34f : 0.18f) * (float)e));
+                        v.rt->FillEllipse({{thumbX, trackCy + 1.5f * d}, thumbR + 1.5f * d, thumbR + 1.5f * d}, v.pen);
+                        v.pen->SetColor(D2D1::ColorF(1, 1, 1, (float)e));
+                        v.rt->FillEllipse({{thumbX, trackCy}, thumbR, thumbR}, v.pen);
+                        v.pen->SetColor(v.scuro ? D2D1::ColorF(1, 1, 1, 0.25f * (float)e) : D2D1::ColorF(0, 0, 0, 0.12f * (float)e));
+                        v.rt->DrawEllipse({{thumbX, trackCy}, thumbR, thumbR}, v.pen, 1.0f);
+
+                        y += cardH + 6 * d;
+                    }
+                }
+                {
+                    const D2D1_RECT_F rbRow = {L, y, R, y + 54 * d};
+                    riquadro(rbRow, false);
+                    const float yb = rbRow.top + 12 * d;
+                    const std::wstring tb1 = testi::t(L"Apri cartella widget", L"Open widgets folder");
+                    const float lw1 = v.larghezza(tb1, fCentro) + 26 * d;
+                    const D2D1_RECT_F rb1 = {rbRow.left + 16 * d, yb, std::min(rbRow.right - 16 * d, rbRow.left + 16 * d + lw1), yb + 30 * d};
+                    pulsantePill(rb1, Z_W_WPLUG_CARTELLA, tb1, false);
+                    if (!wpSub.filePath.empty()) {
+                        const std::wstring tb2 = testi::t(L"Modifica JSON", L"Edit JSON");
+                        const float lw2 = v.larghezza(tb2, fCentro) + 26 * d;
+                        const D2D1_RECT_F rb2 = {rb1.right + 10 * d, yb, std::min(rbRow.right - 16 * d, rb1.right + 10 * d + lw2), yb + 30 * d};
+                        if (rb2.right > rb2.left + 10 * d) pulsantePill(rb2, Z_W_WPLUG_JSON, tb2, true);
+                    }
+                    y += 60 * d;
+                }
+            }
+        } else if (sezione == S_WIDGET) {
+            const D2D1_RECT_F rh = {L, y, R, y + 92 * d};
+            riquadro(rh, false);
+            v.testo(testi::t(L"Widget personalizzati", L"Custom widgets"), fVoce, {rh.left + 16 * d, rh.top + 7 * d, rh.right - 16 * d, rh.top + 29 * d}, inkS);
+            v.testo(L"%LOCALAPPDATA%\\FluidWin\\widgets\\*.json", fSotto, {rh.left + 16 * d, rh.top + 27 * d, rh.right - 16 * d, rh.top + 47 * d}, tenueS);
+            const float yb = rh.top + 52 * d;
+            const std::wstring tb1 = testi::t(L"Apri cartella widget", L"Open widgets folder");
+            const float lw1 = v.larghezza(tb1, fCentro) + 26 * d;
+            const D2D1_RECT_F rb1 = {rh.left + 16 * d, yb, rh.left + 16 * d + lw1, yb + 30 * d};
+            pulsantePill(rb1, Z_WPLUG_CARTELLA, tb1, false);
+
+            const std::wstring tb2 = testi::t(L"Crea widget di esempio", L"Create sample widget");
+            const float lw2 = v.larghezza(tb2, fCentro) + 26 * d;
+            const D2D1_RECT_F rb2 = {rb1.right + 10 * d, yb, std::min(rh.right - 16 * d, rb1.right + 10 * d + lw2), yb + 30 * d};
+            pulsantePill(rb2, Z_WPLUG_ESEMPIO, tb2, true);
+            y += 98 * d;
+
+            const auto wplugs = elencoWPlugin ? elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{};
+            if (wplugs.empty()) {
+                riga(testi::t(L"Nessun widget personalizzato", L"No custom widgets found"),
+                     testi::t(L"Crea un esempio o aggiungi file .json nella cartella widget", L"Create a sample or drop .json files into the widgets folder"));
+            } else {
+                for (int k = 0; k < (int)wplugs.size(); k++) {
+                    const D2D1_RECT_F ra = {L, y, R, y + 54 * d};
+                    const int openId = Z_W_APRI_WPLUG + k;
+                    const int toggleId = Z_WPLUG_APP + k;
+                    const float toggleL = ra.right - 66 * d;
+                    if (k < 30) aggiungiZona({ra.left, ra.top, toggleL, ra.bottom}, openId);
+                    aggiungiZona({k < 30 ? toggleL : ra.left, ra.top, ra.right, ra.bottom}, toggleId);
+                    riquadro(ra, sopra == toggleId || (k < 30 && sopra == openId));
+                    v.testo(wplugs[k].second.first, fVoce, {ra.left + 16 * d, ra.top + 7 * d, ra.right - 94 * d, ra.top + 29 * d}, inkS);
+                    v.testo(wplugs[k].first + L".json", fSotto, {ra.left + 16 * d, ra.top + 28 * d, ra.right - 94 * d, ra.top + 48 * d}, tenueS);
+                    if (k < 30) frecciaWidget(ra.right - 76 * d, (ra.top + ra.bottom) / 2, sopra == openId);
+                    levetta(ra.right - 58 * d, (ra.top + ra.bottom) / 2, wplugs[k].second.second ? 1.0f : 0.0f, (float)e);
                     y += 60 * d;
                 }
             }

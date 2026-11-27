@@ -176,14 +176,14 @@ public:
     // c'e' una notifica in mostra (o in attesa che il mouse lasci il notch)
     bool notificaInCorso() const { return notificaAttiva; }
 
-    // avviso breve (1,6 s, 2,5 per batteria e cuffie): un simbolo (sensori::Simbolo) e un testo, per esempio
+    // avviso breve (1,6 s, 2,5 per batteria e cuffie, 3,2 per AI): un simbolo (sensori::Simbolo) e un testo, per esempio
     // "Sempre in primo piano" o "AirPods · 80%"; valore: la batteria (-1 se non si sa). false se il notch non si vede
     bool avviso(const std::wstring& testo, int simbolo, int valore, bool acceso) {
         if (!visibile) return false;
         testoAvviso = testo; avvisoAcceso = acceso; simboloAvviso = simbolo; valoreAvviso = valore;
         tOnda = adesso();
         larghezzaAvviso = fOra ? larghezza(testo, fPiccolo ? fPiccolo : fOra) : 160 * dpi;
-        fineAvviso = adesso() + (simbolo == sensori::S_PUNTINA ? 1.6 : 2.5);
+        fineAvviso = adesso() + (simbolo == sensori::S_PUNTINA ? 1.6 : simbolo == sensori::S_AI ? 3.2 : 2.5);
         bersagli(); anima();
         return true;
     }
@@ -201,7 +201,7 @@ private:
         if (scena == NOTIFICA) return ECO;
         if (scena == AVVISO) {
             if (simboloAvviso == sensori::S_ALIMENTAZIONE) return avvisoAcceso ? ECO : MAREA;
-            if (simboloAvviso == sensori::S_CUFFIE || simboloAvviso == sensori::S_BATTERIA) return ECO;
+            if (simboloAvviso == sensori::S_CUFFIE || simboloAvviso == sensori::S_BATTERIA || simboloAvviso == sensori::S_AI) return ECO;
         }
         return CLASSICO;
     }
@@ -899,6 +899,7 @@ private:
                 const float cx = x0 + AV_SIMBOLO * d / 2, cy = h / 2;
                 if (simboloAvviso == sensori::S_BATTERIA || simboloAvviso == sensori::S_ALIMENTAZIONE) batteriaSimbolo(cx, cy, a, valoreAvviso, avvisoAcceso);
                 else if (simboloAvviso == sensori::S_CUFFIE) cuffie(cx, cy, a);
+                else if (simboloAvviso == sensori::S_AI) scintillaAI(cx, cy, a, valoreAvviso);
                 else puntina(cx, cy, a, avvisoAcceso);
                 const float xt = x0 + (AV_SIMBOLO + AV_SPAZIO) * d;
                 scrivi(testoAvviso, fPiccolo, {xt, 0, std::min(xt + tw + 4 * d, L + w - AV_MARGINE * d / 2), h}, a);
@@ -1309,6 +1310,29 @@ private:
         if (g) g->Release();
         rt->FillRoundedRectangle({{cx - 8.5f * d, cy + 0.5f * d, cx - 4.5f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pen);
         rt->FillRoundedRectangle({{cx + 4.5f * d, cy + 0.5f * d, cx + 8.5f * d, cy + 7.5f * d}, 1.5f * d, 1.5f * d}, pen);
+    }
+
+    // scintilla AI (stato: 0 fatto, 1 in attesa, 2 errore)
+    void scintillaAI(float cx, float cy, float a, int stato) {
+        const float r = 6.5f * dpi, k = r * 0.22f;
+        const D2D1_COLOR_F col = stato == 1 ? D2D1::ColorF(1.0f, 0.70f, 0.16f, a)
+                               : stato == 2 ? D2D1::ColorF(1.0f, 0.34f, 0.30f, a)
+                                            : D2D1::ColorF(0.22f, 0.84f, 0.42f, a);
+        ID2D1PathGeometry* g = nullptr; ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(fabbriche::d2d()->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            s->BeginFigure({cx, cy - r}, D2D1_FIGURE_BEGIN_FILLED);
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy - k}, {cx + r, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy + k}, {cx, cy + r}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy + k}, {cx - r, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy - k}, {cx, cy - r}));
+            s->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (SUCCEEDED(s->Close())) {
+                pen->SetColor(col);
+                rt->FillGeometry(g, pen);
+            }
+        }
+        if (s) s->Release();
+        if (g) g->Release();
     }
 
     // nota musicale (al posto della copertina che manca)

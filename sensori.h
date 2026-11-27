@@ -28,7 +28,7 @@
 
 namespace sensori {
 
-enum Simbolo { S_PUNTINA, S_BATTERIA, S_CUFFIE, S_ALIMENTAZIONE };
+enum Simbolo { S_PUNTINA, S_BATTERIA, S_CUFFIE, S_ALIMENTAZIONE, S_AI };
 
 class Sensori {
 public:

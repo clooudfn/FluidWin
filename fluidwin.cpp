@@ -4008,8 +4008,8 @@ static std::wstring diagnostica() {
     const impostazioni::Valori& v = impostazioni::valori();
     riga(L"Impostazioni: gelatina %d, genio %d, apertura %d, chiusura %d, onda %d, notifiche %d, volume %d, tasto Win %d, Alt+Tab (panoramica) %d, Win+Tab (ricerca) %d, angolo %d, tasto destro %d, notch %d, ora nel dock %d",
          v.gelatina, v.genio, v.apertura, v.chiusura, v.onda, v.banner, v.volume, v.tastoWin, v.winTab, v.winS, v.angolo, v.menuDestro, v.notch, v.oraDock);
-    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra)", v.dockAuto, v.dockOpacita, v.dockSpazio,
-         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockLato);
+    riga(L"Dock: a scomparsa %d, opacità %d%%, finestre ingrandite sopra %d, icone %d px, distanza %d px, colore %06lx%ls, altri schermi %d, ai %d, logi %d, logiAnim %d, lato %d (0 basso, 1 alto, 2 sinistra, 3 destra)", v.dockAuto, v.dockOpacita, v.dockSpazio,
+         v.dockIcone, v.dockDistanza,(unsigned long)(v.dockColore & 0xFFFFFF), (v.dockColore & impostazioni::COLORE_SCELTO) ? L"" : L" (automatico)", v.dockSchermi, v.dockAI, v.dockLogi, v.logiAnimCarica, v.dockLato);
     // icone fissate del dock (solo conteggi, niente nomi di app): per le segnalazioni di icone doppie, vuote o mancanti
     if (gDockOk) { const auto& f = gDock.diagFissate;
         riga(L"Dock, app fissate: lista di Windows %ls, collegamenti %d, app di pacchetto %d, Squirrel di versioni cancellate %d, senza destinazione %d, file dell'icona mancante %d, doppie %d, scartate %d",
@@ -4063,7 +4063,7 @@ static void applicaImpostazioni() {
         if (gDockOk) gDock.impostaAngoli();
         logf("angoli: %s", v.angoli == 0 ? "arrotondati" : v.angoli == 1 ? "poco arrotondati" : "squadrati");
     }
-    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime);
+    if (gDockOk) { gDock.impostaAutoNascondi(v.dockAuto); gDock.impostaOpacita(v.dockOpacita / 100.0f); gDock.impostaSpazio(v.dockSpazio); gDock.impostaAltriSchermi(v.dockSchermi); gDock.impostaAnteprime(v.dockAnteprime); gDock.impostaAI(v.dockAI); gDock.impostaLogi(v.dockLogi); gDock.impostaLogiAnimCarica(v.logiAnimCarica); gDock.impostaLogiGlowColore(v.logiGlowColore);
                    gDock.impostaLatoIcone(v.dockIcone); gDock.impostaDistanzaIcone(v.dockDistanza); gDock.impostaColore(v.dockColore); }
     // Arabo acceso o spento: i formati di testo prendono la direzione (da destra a sinistra) quando nascono, e molti
     // vivono quanto FluidWin. Riavviare e' il modo sicuro di rifarli tutti
@@ -4631,6 +4631,14 @@ static void unFotogramma() {
 // ---------------------------------------------------------------------------------------------
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
+    {
+        int cliArgc = 0;
+        if (wchar_t** cliArgv = CommandLineToArgvW(GetCommandLineW(), &cliArgc)) {
+            const bool gestito = ai::gestisciHookCli(cliArgc, cliArgv);
+            LocalFree(cliArgv);
+            if (gestito) return 0;
+        }
+    }
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     OleInitialize(nullptr);   // COM a thread singolo + trascinamento OLE (file sul cestino del dock, pila dei Download)   // icone e collegamenti del dock passano dalla shell
     LARGE_INTEGER f; QueryPerformanceFrequency(&f); gFreq = (double)f.QuadPart;
@@ -4728,6 +4736,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     if (gLog) testi::registro() = [](const wchar_t* en) { logf("testo senza traduzione: %ls", en); };
     gDock.altriSchermi = impostazioni::valori().dockSchermi;   // (spento: il dock nasce sul principale)
     gDock.impostaLato(impostazioni::valori().dockLato);   // (prima di inizializza: il dock nasce gia' sul suo lato)
+    gDock.impostaAI(impostazioni::valori().dockAI);
+    gDock.impostaLogi(impostazioni::valori().dockLogi);
+    gDock.impostaLogiAnimCarica(impostazioni::valori().logiAnimCarica);
+    gDock.impostaLogiGlowColore(impostazioni::valori().logiGlowColore);
     gDockOk = gDock.inizializza(inst);
     if (!gDockOk) { gDock.chiudi(); ripristinaBarra(); }
     else { mostraBarreWindows(false); gDock.controllaFinestre(); }
@@ -4802,6 +4814,45 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, PWSTR, int) {
     gImpostazioni.iconaCentro = [] { return gDockOk ? gDock.rettIsolaSchermo() : RECT{}; };
     gImpostazioni.elencoNascoste = [] { return gDockOk ? gDock.elencoNascoste() : std::vector<std::pair<std::wstring, std::wstring>>{}; };
     gImpostazioni.mostraNascosta = [](const std::wstring& c) { if (gDockOk) gDock.mostraAppNascosta(c); };
+    gImpostazioni.elencoWPlugin = [] { return gDockOk ? gDock.elencoWPlugin() : std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>>{}; };
+    gImpostazioni.impostaWPlugin = [](const std::wstring& id, bool si) { if (gDockOk) gDock.impostaWPlugin(id, si); };
+    gImpostazioni.apriCartellaWPlugin = [] { wplugin::apriCartellaWidget(); };
+    gImpostazioni.creaEsempioWPlugin = [] { wplugin::creaEsempio(); if (gDockOk) gDock.ricaricaWPlugin(); };
+    gImpostazioni.leggiAIAvvisi = [] { return gDockOk ? gDock.aiAvvisi : dock::Motore::leggiAIAvvisi(); };
+    gImpostazioni.impostaAIAvvisi = [](bool si) {
+        if (gDockOk) gDock.impostaAIAvvisi(si);
+        else {
+            const DWORD v = si ? 1 : 0;
+            RegSetKeyValueW(HKEY_CURRENT_USER, impostazioni::CHIAVE, L"AIAvvisi", REG_DWORD, &v, sizeof(v));
+        }
+    };
+    gImpostazioni.hookAgyStato = [] { return ai::hookAntigravityInstallati(); };
+    gImpostazioni.hookAgyImposta = [](bool si) { ai::installaHookAntigravity(si); };
+    gImpostazioni.hookClaudeStato = [] { return ai::hookClaudeInstallati(); };
+    gImpostazioni.hookClaudeImposta = [](bool si) { ai::installaHookClaude(si); };
+    gImpostazioni.apriCartellaHookAI = [] {
+        const std::wstring dir = ai::cartellaHook();
+        if (!dir.empty()) {
+            ai::dettagli::creaCartelle(dir);
+            ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+    };
+    gImpostazioni.apriGHub = [] { logitech::apriGHub(); };
+    gImpostazioni.dettagliWPlugin = [](const std::wstring& id, wplugin::Widget& out) {
+        return gDockOk && gDock.widgetWPlugin(id, out);
+    };
+    gImpostazioni.impostaConfigWPluginBool = [](const std::wstring& id, const std::wstring& key, bool val) {
+        if (gDockOk) gDock.impostaConfigWPluginBool(id, key, val);
+        else wplugin::salvaConfigBool(id, key, val);
+    };
+    gImpostazioni.impostaConfigWPluginStr = [](const std::wstring& id, const std::wstring& key, const std::wstring& val) {
+        if (gDockOk) gDock.impostaConfigWPluginStr(id, key, val);
+        else wplugin::salvaConfigStr(id, key, val);
+    };
+    gImpostazioni.impostaConfigWPluginNum = [](const std::wstring& id, const std::wstring& key, double val) {
+        if (gDockOk) gDock.impostaConfigWPluginNum(id, key, val);
+        else wplugin::salvaConfigNum(id, key, val);
+    };
     affianca::registro() = [](const char* s) { logf("%s", s); };   // (prima di applicaImpostazioni, che spegne lo Snap)
     gAffRiquadro.scelto = [](HWND h, const RECT& z, HMONITOR) { logf("affianca %p: casella dal riquadro dei layout", h); affiancaInRett(h, false, z, "riquadro dei layout"); };
     applicaImpostazioni();

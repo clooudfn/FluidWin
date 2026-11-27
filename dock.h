@@ -65,6 +65,9 @@
 #include "mixer.h"
 #include "pila.h"
 #include "appunti.h"
+#include "ai.h"
+#include "logitech.h"
+#include "widget_plugin.h"
 #include <ole2.h>
 #include <knownfolders.h>
 #include "testi.h"
@@ -103,8 +106,14 @@ static const wchar_t* const AVVIO_LAUNCHER = L"*launcher";   // la voce "App" de
 static const wchar_t* const AVVIO_CONTROLLO = L"*controllo";   // l'ultima voce: il centro di controllo
 static const wchar_t* const AVVIO_PILA = L"*pila";             // pila della cartella Download (prima del cestino)
 static const wchar_t* const AVVIO_CESTINO = L"*cestino";       // cestino (prima del centro di controllo)
+static const wchar_t* const AVVIO_AI = L"*ai";                 // monitor AI (tra cestino e centro di controllo)
+static const wchar_t* const AVVIO_LOGI = L"*logitech";         // widget Logitech G HUB (tra monitor AI e centro di controllo)
+static const wchar_t* const AVVIO_WPLUGIN_PREF = L"*wplugin:";
+static bool eWPlugin(const std::wstring& a) { return a.rfind(AVVIO_WPLUGIN_PREF, 0) == 0; }
+static std::wstring idWPlugin(const std::wstring& a) { return eWPlugin(a) ? a.substr(wcslen(AVVIO_WPLUGIN_PREF)) : std::wstring(); }
+static bool eWidgetDock(const std::wstring& a) { return a == AVVIO_AI || a == AVVIO_LOGI || eWPlugin(a); }
 // voci di fondo, sempre in quest'ordine dopo le app aperte, con un separatore prima
-static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || a == AVVIO_CESTINO || a == AVVIO_CONTROLLO; }
+static bool voceDiFondo(const std::wstring& a) { return a == AVVIO_PILA || a == AVVIO_CESTINO || a == AVVIO_AI || a == AVVIO_LOGI || eWPlugin(a) || a == AVVIO_CONTROLLO; }
 
 static std::wstring cartellaDownload() {
     PWSTR p = nullptr; std::wstring r;
@@ -356,6 +365,7 @@ static void tastiWin(WORD vk) {
 
 class Motore {
 public:
+    ~Motore() { aiMon.ferma(); logiMon.ferma(); wplugMon.ferma(); }
     HWND icone = nullptr, vetro = nullptr, vetroStato = nullptr, vetroOra = nullptr;   // vetroOra: la capsula di data e ora
     bool attivo = false;
     long diagMosse = 0, diagFotogrammi = 0;   // diagnostica: movimenti del mouse ricevuti, fotogrammi disegnati
@@ -458,7 +468,9 @@ public:
         CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&audio));
         aggiornaStato(true);
         leggiOrdineFissate();   // (l'ordine scelto trascinando le icone, #23)
+        leggiOrdineWidget();
         caricaNascoste();       // (le app nascoste dal dock, PR #20)
+        aiAvvisi = leggiAIAvvisi();
         aggiornaApp();
         attivo = true;
         ShowWindow(vetro, SW_SHOWNOACTIVATE);
@@ -470,6 +482,9 @@ public:
         dirty = true;
         // comandi delle app (jump list): il thread li legge subito, cosi' sono pronti al primo tasto destro
         if (!jumpList.avvia()) scrivi("dock: thread delle jump list non partito, niente comandi delle app nei menu");
+        if (mostraAI) aiMon.avvia(icone, WM_AI_AGGIORNATO);
+        if (mostraLogi) logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
+        wplugMon.avvia(icone, WM_WPLUGIN_AGGIORNATO);
         return true;
     }
 
@@ -482,7 +497,10 @@ public:
         const bool a = widD.ferma(ms);
         const bool b = jumpList.ferma(ms);
         const bool c = wlan.ferma(ms);   // (anche le reti Wi-Fi: una scansione o un collegamento in corso)
-        return a && b && c;
+        const bool d = aiMon.ferma(ms);
+        const bool e = logiMon.ferma(ms);
+        const bool f = wplugMon.ferma(ms);
+        return a && b && c && d && e && f;
     }
 
     void chiudi() {
@@ -640,6 +658,9 @@ public:
             versioneSensoriCentro = sensori::Sensori::io().versione; versioneTempoCentro = sensori::Sensori::io().versioneTempo; pDirty = true;
             if (!pChiusura) riadattaControllo();   // la batteria puo' comparire o sparire (ripresa dalla sospensione)
         }
+        sincronizzaAI();
+        sincronizzaLogi();
+        sincronizzaWPlugin();
         // poco dopo l'avvio si preparano icone ed elenco delle app dello Store: il primo pannello si apre subito
         if (conteggioTimer == 6) leggiAppSfondo();
         if (conteggioTimer == 12 && tutteApp.empty()) leggiTutteApp();
@@ -839,6 +860,129 @@ public:
         if (!si) { isola = {}; for (auto& r : rettStato) r = {}; statoSopra = statoPremuto = -1; }
         dirty = true;
     }
+    void impostaAI(bool si) {
+        if (si == mostraAI) return;
+        mostraAI = si;
+        if (!si) {
+            usa(0);
+            if (pannelloTipo == P_AI) chiudiPannello();
+            aiMon.ferma();
+        } else if (icone) {
+            aiMon.avvia(icone, WM_AI_AGGIORNATO);
+        }
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        dirty = true;
+    }
+    void impostaLogi(bool si) {
+        if (si == mostraLogi) return;
+        mostraLogi = si;
+        if (!si) {
+            usa(0);
+            if (pannelloTipo == P_LOGI) chiudiPannello();
+            logiMon.ferma();
+        } else if (icone) {
+            logiMon.avvia(icone, WM_LOGI_AGGIORNATO);
+        }
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        dirty = true;
+    }
+    static bool leggiAIAvvisi() {
+        DWORD v = 1, n = sizeof(v);
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
+                         RRF_RT_REG_DWORD, nullptr, &v, &n) == ERROR_SUCCESS) {
+            return v != 0;
+        }
+        return true;
+    }
+    bool aiAvvisi = leggiAIAvvisi();
+    void impostaAIAvvisi(bool si) {
+        if (si == aiAvvisi) return;
+        aiAvvisi = si;
+        const DWORD v = si ? 1 : 0;
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin\\Impostazioni", L"AIAvvisi",
+                        REG_DWORD, &v, sizeof(v));
+    }
+    bool logiAnimCarica = true;
+    void impostaLogiAnimCarica(bool si) {
+        if (si == logiAnimCarica) return;
+        logiAnimCarica = si;
+        dirty = true;
+    }
+    DWORD logiGlowColore = 0;
+    void impostaLogiGlowColore(DWORD rgb) {
+        rgb &= 0xFFFFFFu;
+        if (rgb == logiGlowColore) return;
+        logiGlowColore = rgb;
+        dirty = true;
+    }
+    std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> elencoWPlugin() const {
+        std::vector<std::pair<std::wstring, std::pair<std::wstring, bool>>> r;
+        r.reserve(wplugStato.widgets.size());
+        for (const auto& w : wplugStato.widgets) r.emplace_back(w.id, std::make_pair(w.nome, w.abilitato));
+        return r;
+    }
+    bool widgetWPlugin(const std::wstring& id, wplugin::Widget& out) const {
+        if (const wplugin::Widget* w = trovaWPlugin(wplugin::dettagli::sanificaId(id))) {
+            out = *w;
+            return true;
+        }
+        return false;
+    }
+    void impostaConfigWPluginBool(const std::wstring& id, const std::wstring& key, bool val) {
+        const std::wstring sid = wplugin::dettagli::sanificaId(id);
+        if (!wplugin::salvaConfigBool(sid, key, val)) return;
+        for (auto& w : wplugStato.widgets) {
+            if (w.id != sid) continue;
+            for (auto& cv : w.config) {
+                if (cv.chiave == key && cv.tipo == L"toggle") cv.valBool = val;
+            }
+        }
+        wplugMon.ricaricaOra();
+    }
+    void impostaConfigWPluginStr(const std::wstring& id, const std::wstring& key, const std::wstring& val) {
+        const std::wstring sid = wplugin::dettagli::sanificaId(id);
+        if (!wplugin::salvaConfigStr(sid, key, val)) return;
+        for (auto& w : wplugStato.widgets) {
+            if (w.id != sid) continue;
+            for (auto& cv : w.config) {
+                if (cv.chiave == key && (cv.tipo == L"choice" || cv.tipo == L"color")) cv.valStr = val;
+            }
+        }
+        wplugMon.ricaricaOra();
+    }
+    void impostaConfigWPluginNum(const std::wstring& id, const std::wstring& chiave, double val) {
+        const std::wstring sid = wplugin::dettagli::sanificaId(id);
+        if (!wplugin::salvaConfigNum(sid, chiave, val)) return;
+        for (auto& w : wplugStato.widgets) {
+            if (w.id != sid) continue;
+            for (auto& cv : w.config) {
+                if (cv.chiave == chiave && cv.tipo == L"slider") {
+                    cv.valNum = wplugin::dettagli::snapSlider(val, cv.minNum, cv.maxNum, cv.stepNum);
+                }
+            }
+        }
+        wplugMon.ricaricaOra();
+    }
+    void impostaWPlugin(const std::wstring& id, bool si) {
+        wplugMon.impostaAbilitazione(id, si);
+        for (auto& w : wplugStato.widgets) if (w.id == id) w.abilitato = si;
+        wplugVer = wplugMon.versione.load(std::memory_order_relaxed);
+        if (!si) {
+            const int s = slotCorrente;
+            usa(0);
+            if (pannelloTipo == P_WPLUGIN && wplugIdAperto == id) chiudiPannello();
+            usa(s);
+        }
+        appDaAggiornare = true;
+        if (attivo) aggiornaApp();
+        dirty = true;
+    }
+    void ricaricaWPlugin() {
+        wplugMon.sincronizzaSubito();
+        sincronizzaWPlugin();
+    }
     // impostazioni del dock: a scomparsa (spento: resta su anche sopra le finestre ingrandite, che restano grandi
     // quanto lo schermo; sotto le app a schermo intero e i giochi si toglie comunque) e opacita' del fondo (0.2..1:
     // vetro e velo, le icone restano piene)
@@ -1037,6 +1181,8 @@ private:
     // impostazione: ora e data in fondo al dock, dopo il centro di controllo (larghezzaCoda). Per il mouse fa da
     // "isola": isola e rettStato[ORA] sono il suo posto, cosi' etichetta (data lunga) e clic (notifiche) sono quelli di prima
     bool oraNelDock = false;
+    bool mostraAI = false;
+    bool mostraLogi = false;
     // Testa del dock (1.3.0, notch a scomparsa): all'inizio del dock, speculare a ora e data in fondo, una capsula con la
     // musica (copertina e barrette), il timer in corso (anello e tempo che resta) e i segni di "Tieni sveglio" e "Non
     // disturbare". Col mouse sopra musica e timer mostrano i loro tasti (vedi statoTesta). Con il notch fisso non c'e'
@@ -1135,6 +1281,7 @@ private:
     int trascinata = -1;             // indice della voce trascinata
     float presa = 0.5f;              // dove la si e' presa, 0..1 della larghezza dell'icona
     std::vector<std::wstring> ordineFissate;   // collegamenti delle app aggiunte, nell'ordine scelto (vuoto: quello di Windows)
+    std::vector<std::wstring> ordineWidget;    // ordine scelto trascinando i widget del dock
     RECT rettVetro{}, rettVetroStato{}, rettVetroOra{}, regioneDock{}, regioneIsola{}, regioneEtichetta{};
     D2D1_RECT_F rettEtichetta{};
     // etichetta (una sola, per il dock o per l'isola di stato)
@@ -1584,6 +1731,22 @@ private:
         // in fondo, come su macOS: la pila dei Download, il cestino e per ultimo il centro di controllo (disegnati dal dock)
         { Voce p; p.fissata = true; p.avvio = AVVIO_PILA; p.nome = testi::t(L"Download", L"Downloads"); nuove.push_back(std::move(p)); }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CESTINO; c.nome = testi::t(L"Cestino", L"Recycle Bin"); nuove.push_back(std::move(c)); }
+        {
+            std::vector<Voce> widgets;
+            if (mostraAI) { Voce c; c.fissata = true; c.avvio = AVVIO_AI; c.nome = testi::t(L"Monitor AI", L"AI Monitor"); widgets.push_back(std::move(c)); }
+            if (mostraLogi) { Voce c; c.fissata = true; c.avvio = AVVIO_LOGI; c.nome = L"Logitech"; widgets.push_back(std::move(c)); }
+            for (const auto& w : wplugStato.widgets) {
+                if (!w.abilitato) continue;
+                Voce c; c.fissata = true; c.avvio = AVVIO_WPLUGIN_PREF + w.id; c.nome = w.nome;
+                widgets.push_back(std::move(c));
+            }
+            if (!ordineWidget.empty()) {
+                std::stable_sort(widgets.begin(), widgets.end(), [&](const Voce& a, const Voce& b) {
+                    return std::find(ordineWidget.begin(), ordineWidget.end(), a.avvio) < std::find(ordineWidget.begin(), ordineWidget.end(), b.avvio);
+                });
+            }
+            for (auto& wv : widgets) nuove.push_back(std::move(wv));
+        }
         { Voce c; c.fissata = true; c.avvio = AVVIO_CONTROLLO; c.nome = testi::t(L"Centro di controllo", L"Control Center"); nuove.push_back(std::move(c)); }
         // icone, rimbalzi e dimensioni gia' esistenti si conservano; le voci nuove crescono da zero
         const bool primaVolta = voci.empty();
@@ -1602,11 +1765,13 @@ private:
                     break;
                 }
             }
-            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO) {
+            if (!v.icona && v.avvio != AVVIO_LAUNCHER && v.avvio != AVVIO_CONTROLLO && v.avvio != AVVIO_CESTINO && v.avvio != AVVIO_AI && v.avvio != AVVIO_LOGI && !eWPlugin(v.avvio)) {
                 // all'avvio subito (non c'e' ancora niente da animare); poi dal thread delle icone, senza fermare il dock
                 if (primaVolta) v.icona = caricaIcona(sorgenteIcona(v));
                 else chiediIcona(sorgenteIcona(v), 256);
                 if (!vecchiaTrovata && !primaVolta) v.scala = 0;   // voce nuova: cresce da zero
+            } else if (!vecchiaTrovata && !primaVolta && eWPlugin(v.avvio)) {
+                v.scala = 0;
             }
         }
         // le app chiuse restano al loro posto mentre si restringono
@@ -1646,7 +1811,14 @@ private:
     std::vector<float> posizioniAdesso() const { return disponi(dimensioni(posizioniRiposo())); }
     // gruppo della voce i: [inizio, fine) delle aggiunte alla barra o delle altre aperte (vuoto: non si sposta)
     std::pair<size_t, size_t> gruppo(int i) const {
-        if (i < 1 || i >= (int)primaFine || voci[i].uscente) return {0, 0};
+        if (i < 1 || i >= (int)voci.size() || voci[i].uscente) return {0, 0};
+        if (i >= (int)primaFine) {
+            if (!eWidgetDock(voci[i].avvio)) return {0, 0};
+            size_t a = (size_t)i, b = (size_t)i + 1;
+            while (a > primaFine && !voci[a - 1].uscente && eWidgetDock(voci[a - 1].avvio)) a--;
+            while (b < voci.size() && !voci[b].uscente && eWidgetDock(voci[b].avvio)) b++;
+            return {a, b};
+        }
         return (size_t)i < primaNonFissata ? std::make_pair((size_t)1, primaNonFissata) : std::make_pair(primaNonFissata, primaFine);
     }
     bool trascinabile(int i) const { const auto [a, b] = gruppo(i); return b > a + 1; }
@@ -1703,6 +1875,10 @@ private:
         }
         if (pos == ordineAperte.size()) r.insert(r.end(), g.begin(), g.end());
         ordineAperte = std::move(r);
+        std::vector<std::wstring> w;
+        for (size_t i = primaFine; i < voci.size(); i++) if (!voci[i].uscente && eWidgetDock(voci[i].avvio)) w.push_back(voci[i].avvio);
+        for (const auto& k : ordineWidget) if (std::find(w.begin(), w.end(), k) == w.end()) w.push_back(k);
+        ordineWidget = std::move(w);
     }
 
     // fine: l'icona si posa al suo posto scivolando da dove la si e' lasciata; l'ordine delle aggiunte si salva
@@ -1712,8 +1888,10 @@ private:
         if (trascinata >= 0 && trascinata < (int)voci.size()) {
             voci[trascinata].dx = voci[trascinata].rett.left - posizioniAdesso()[trascinata];   // da dove la si vede
             const bool fissata = (size_t)trascinata < primaNonFissata;
+            const bool widget = eWidgetDock(voci[trascinata].avvio);
             if (registro) { char b[200]; snprintf(b, 200, "dock: %ls posata al posto %d", voci[trascinata].nome.c_str(), trascinata); scrivi(b); }
             if (fissata) salvaOrdineFissate();
+            if (widget) salvaOrdineWidget();
         }
         trascinata = -1; premuta = -1;
         if (GetCapture() == icone) ReleaseCapture();
@@ -1741,6 +1919,21 @@ private:
         DWORD cap = (DWORD)((b.size() - 2) * sizeof(wchar_t));
         if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineFissate", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &cap) != ERROR_SUCCESS) return;
         for (const wchar_t* p = b.data(); p < b.data() + b.size() && *p; p += wcslen(p) + 1) ordineFissate.emplace_back(p);
+    }
+    void salvaOrdineWidget() const {
+        std::wstring s;
+        for (const auto& k : ordineWidget) { s += k; s.push_back(L'\0'); }
+        s.push_back(L'\0');
+        RegSetKeyValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineWidget", REG_MULTI_SZ, s.data(), (DWORD)(s.size() * sizeof(wchar_t)));
+    }
+    void leggiOrdineWidget() {
+        ordineWidget.clear();
+        DWORD n = 0;
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineWidget", RRF_RT_REG_MULTI_SZ, nullptr, nullptr, &n) != ERROR_SUCCESS || n < 4 || n > 256 * 1024) return;
+        std::vector<wchar_t> b(n / sizeof(wchar_t) + 2, L'\0');
+        DWORD cap = (DWORD)((b.size() - 2) * sizeof(wchar_t));
+        if (RegGetValueW(HKEY_CURRENT_USER, L"Software\\FluidWin", L"OrdineWidget", RRF_RT_REG_MULTI_SZ, nullptr, b.data(), &cap) != ERROR_SUCCESS) return;
+        for (const wchar_t* p = b.data(); p < b.data() + b.size() && *p; p += wcslen(p) + 1) ordineWidget.emplace_back(p);
     }
 
     // ---- lato dello schermo (impostazione "Posizione", 1.3.0, Fase 3) ----
@@ -1854,7 +2047,8 @@ private:
         if (!nuovo || nessunaScheda() || pChiusura || adesso() - pT0 < 0.15) return;
         POINT pt; GetCursorPos(&pt);
         RECT rp{}; if (pannello && GetWindowRect(pannello, &rp) && PtInRect(&rp, pt)) return;
-        const RECT is = rettIsolaSchermo(); if (PtInRect(&is, pt)) return;   // l'icona del centro: decide il suo clic
+        const RECT is = rettIsolaSchermo(), ia = rettAISchermo(), il = rettLogiSchermo();
+        if (PtInRect(&is, pt) || PtInRect(&ia, pt) || PtInRect(&il, pt) || suIconaWPluginSchermo(pt)) return;   // l'icona del centro, AI, Logitech o widget: decide il suo clic
         if (schedaFinestra(WindowFromPoint(pt))) return;
         scrivi("centro di controllo: clic fuori, si chiude");
         chiudiTutte();
@@ -2115,6 +2309,23 @@ private:
             if (v.icona) dc->DrawBitmap(v.icona, r, alfa, D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC);
             else if (v.avvio == AVVIO_LAUNCHER) disegnaIconaApp(r, alfa, scuro);
             else if (v.avvio == AVVIO_CONTROLLO) disegnaIconaControllo(r, alfa, scuro);
+            else if (v.avvio == AVVIO_AI) {
+                disegnaIconaAI(r, alfa, scuro);
+                if (aiStato.statoGlobale == ai::Stato::Occupato) movimento = true;
+            }
+            else if (v.avvio == AVVIO_LOGI) {
+                disegnaIconaLogi(r, alfa, scuro);
+                if (logiAnimCarica && logiStato.alcunoInCarica && logiStato.batteriaMin >= 0) movimento = true;
+            }
+            else if (eWPlugin(v.avvio)) {
+                if (const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio))) {
+                    disegnaIconaWPlugin(r, alfa, scuro, *pw);
+                    if (!pw->iconaAnimazione.empty() && pw->iconaAnimazione != L"none") movimento = true;
+                } else {
+                    wplugin::Widget vuoto; vuoto.nome = v.nome; vuoto.id = idWPlugin(v.avvio);
+                    disegnaIconaWPlugin(r, alfa, scuro, vuoto);
+                }
+            }
             else if (v.avvio == AVVIO_CESTINO) disegnaIconaCestino(r, alfa, scuro, dropSopra == (int)i);
             else {
                 pennello->SetColor(D2D1::ColorF(0.5f, 0.5f, 0.55f, 0.9f * alfa));
@@ -2132,8 +2343,17 @@ private:
             }
             piano();
             // pallino delle app aperte: uno per finestra, al massimo tre
-            // (uno anche sotto App e il centro di controllo mentre sono aperti)
-            if (!v.finestre.empty() || (v.avvio == AVVIO_CONTROLLO && !nessunaScheda()) || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
+            // (uno anche sotto App, Monitor AI, Logitech e centro di controllo mentre sono attivi/aperti)
+            const auto schedaAperta = [&](int t) {
+                return (pannelloTipo == t && !pChiusura) || (altra.pannelloTipo == t && !altra.pChiusura);
+            };
+            const bool aiAttivo = v.avvio == AVVIO_AI && (schedaAperta(P_AI) || aiStato.occupati > 0);
+            const bool logiAttivo = v.avvio == AVVIO_LOGI && schedaAperta(P_LOGI);
+            const bool wplugAttivo = eWPlugin(v.avvio) && schedaAperta(P_WPLUGIN) && wplugIdAperto == idWPlugin(v.avvio);
+            const bool ctrlAttivo = v.avvio == AVVIO_CONTROLLO &&
+                ((pannelloTipo != P_NESSUNO && !pChiusura && pannelloTipo != P_AI && pannelloTipo != P_LOGI && pannelloTipo != P_WPLUGIN) ||
+                 (altra.pannelloTipo != P_NESSUNO && !altra.pChiusura && altra.pannelloTipo != P_AI && altra.pannelloTipo != P_LOGI && altra.pannelloTipo != P_WPLUGIN));
+            if (!v.finestre.empty() || ctrlAttivo || aiAttivo || logiAttivo || wplugAttivo || (v.avvio == AVVIO_LAUNCHER && lAperto && !lChiusura)) {
                 pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.85f * sc) : D2D1::ColorF(0, 0, 0, 0.62f * sc));
                 const int punti = (int)std::clamp<size_t>(v.finestre.size(), 1, 3);
                 for (int k = 0; k < punti; k++) {
@@ -2202,7 +2422,49 @@ private:
         // (non con le anteprime aperte: le coprirebbe, e il nome e' gia' nei loro titoli)
         if (sopra >= 0 && premuta < 0 && !trascinando && !ant.aperta()) {
             const Voce& v = voci[sopra];
-            etichettaTesto = v.nome; etichettaCx = (v.rett.left + v.rett.right) / 2; etichettaTop = v.rett.top - 12 * dpi;
+            if (v.avvio == AVVIO_AI) {
+                if (aiStato.occupati > 0) {
+                    wchar_t b[64];
+                    swprintf(b, 64, testi::t(L"Monitor AI · %d attivi", L"AI Monitor · %d busy"), aiStato.occupati);
+                    etichettaTesto = b;
+                } else if (aiStato.inAttesa > 0) {
+                    etichettaTesto = testi::t(L"Monitor AI · In attesa", L"AI Monitor · Needs input");
+                } else if (aiStato.statoGlobale == ai::Stato::Completato && !aiLetto) {
+                    etichettaTesto = testi::t(L"Monitor AI · Fatto", L"AI Monitor · Done");
+                } else {
+                    etichettaTesto = testi::t(L"Monitor AI", L"AI Monitor");
+                }
+            } else if (v.avvio == AVVIO_LOGI) {
+                if (logiStato.batteriaMin >= 0) {
+                    bool chg = logiStato.alcunoInCarica;
+                    for (const auto& dv : logiStato.dispositivi) {
+                        if (dv.stato != logitech::Stato::Disconnesso && dv.batteria == logiStato.batteriaMin && dv.nome == logiStato.nomePrincipale) {
+                            chg = dv.inCarica;
+                            break;
+                        }
+                    }
+                    wchar_t b[128];
+                    const std::wstring& dev = logiStato.nomePrincipale;
+                    if (!dev.empty()) {
+                        swprintf(b, 128, chg ? L"Logitech \u00b7 %ls %d%% \u26a1" : L"Logitech \u00b7 %ls %d%%", dev.c_str(), logiStato.batteriaMin);
+                    } else {
+                        swprintf(b, 128, chg ? L"Logitech \u00b7 %d%% \u26a1" : L"Logitech \u00b7 %d%%", logiStato.batteriaMin);
+                    }
+                    etichettaTesto = b;
+                } else if (logiStato.ghubAttivo) {
+                    wchar_t b[64];
+                    swprintf(b, 64, testi::t(L"Logitech \u00b7 %d connessi", L"Logitech \u00b7 %d connected"), logiStato.connessi);
+                    etichettaTesto = b;
+                } else {
+                    etichettaTesto = L"Logitech";
+                }
+            } else if (eWPlugin(v.avvio)) {
+                const wplugin::Widget* pw = trovaWPlugin(idWPlugin(v.avvio));
+                etichettaTesto = (pw && !pw->tooltip.empty()) ? pw->tooltip : (pw && !pw->nome.empty() ? pw->nome : v.nome);
+            } else {
+                etichettaTesto = v.nome;
+            }
+            etichettaCx = (v.rett.left + v.rett.right) / 2; etichettaTop = v.rett.top - 12 * dpi;
             etichettaVoluta = true;
         } else if (statoSopra >= 0 && statoPremuto < 0 && nessunaScheda()) {   // con un pannello aperto l'etichetta lo coprirebbe
             etichettaTesto = descrizioneStato(statoSopra);
@@ -2931,7 +3193,42 @@ private:
     }
 
     // ---- pannelli in stile iOS (al posto di quelli di Windows, che si agganciano alla barra e la fanno risalire) ----
-    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI };
+    enum { P_NESSUNO, P_SFONDO, P_CONTROLLO, P_NOTIFICHE, P_WIDGET, P_MIXER, P_APPUNTI, P_WIFI, P_AI, P_LOGI, P_WPLUGIN };
+    static const UINT WM_AI_AGGIORNATO = WM_APP + 33;
+    static const UINT WM_LOGI_AGGIORNATO = WM_APP + 52;
+    static const UINT WM_WPLUGIN_AGGIORNATO = WM_APP + 53;
+    ai::Monitor aiMon;
+    ai::Riepilogo aiStato;
+    uint64_t aiVer = 0;
+    bool aiLetto = false;
+    float aiScroll = 0;
+    float aiScrollMax = 0;
+    void sincronizzaAI();
+    float altezzaAI() const;
+    void disegnaAI(bool scuro, D2D1_COLOR_F ink);
+    void focusAgente(const ai::Agente& a);
+    logitech::Monitor logiMon;
+    logitech::Riepilogo logiStato;
+    uint64_t logiVer = 0;
+    float logiScroll = 0;
+    float logiScrollMax = 0;
+    void sincronizzaLogi();
+    float altezzaLogi() const;
+    void disegnaLogi(bool scuro, D2D1_COLOR_F ink);
+    wplugin::Monitor wplugMon;
+    wplugin::Riepilogo wplugStato;
+    uint64_t wplugVer = 0;
+    std::wstring wplugIdAperto;
+    float wplugScroll = 0;
+    float wplugScrollMax = 0;
+    const wplugin::Widget* trovaWPlugin(const std::wstring& id) const {
+        for (const auto& w : wplugStato.widgets) if (w.id == id) return &w;
+        return nullptr;
+    }
+    void sincronizzaWPlugin();
+    float altezzaWPlugin() const;
+    void disegnaWPlugin(bool scuro, D2D1_COLOR_F ink);
+    void apriWPlugin(const std::wstring& id);
     // reti Wi-Fi (vista P_WIFI, wifi.h): ultima copia del thread, per il disegno
     wifi::Wifi wlan;
     std::vector<wifi::Rete> wlReti;
@@ -2956,7 +3253,10 @@ private:
                   A_MIXER_VOL, A_MIXER_MUTO, A_MIXER_PRED, A_ALTRE_USCITE,
                   A_APPUNTI, A_APPUNTI_VOCE, A_APPUNTI_TOGLI, A_APPUNTI_SVUOTA,
                   A_W_CITTA, A_W_LUOGO, A_W_UNITA, A_W_ANNULLA, A_W_FONTE,
-                  A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY };
+                  A_WIFI_RETI, A_WIFI_RETE, A_WIFI_RADIO, A_WIFI_SCOLLEGA, A_WIFI_IMPOSTAZIONI, A_WIFI_PRIVACY,
+                  A_AI_AGENTE, A_AI_PULISCI, A_AI_HOOK_MENU, A_AI_NUOVA_CHAT,
+                  A_LOGI_AGGIORNA, A_LOGI_GHUB,
+                  A_WPLUGIN_TOGGLE, A_WPLUGIN_ITEM, A_WPLUGIN_FOOTER };
     // Ricerca della citta' nella scheda del meteo (widget): aperta o no, avanzamento dell'animazione 0..1 (la scheda si
     // allunga e il contenuto cambia), testo scritto, testo gia' chiesto, istante dell'ultimo tasto (si cerca 0,3 s
     // dopo, non a ogni lettera), luoghi trovati con lo stato della ricerca, riga scelta con le frecce. Stanno fuori
@@ -3522,7 +3822,14 @@ public:
     std::vector<std::pair<std::wstring, std::wstring>> elencoApp();
 
     D2D1_RECT_F rettCentro() const;
+    D2D1_RECT_F rettAI() const;
+    D2D1_RECT_F rettLogi() const;
+    D2D1_RECT_F rettWPlugin(const std::wstring& id) const;
     RECT rettIsolaSchermo() const;
+    RECT rettAISchermo() const;
+    RECT rettLogiSchermo() const;
+    RECT rettWPluginSchermo(const std::wstring& id) const;
+    bool suIconaWPluginSchermo(POINT pt) const;
     bool isolaVisibile() const;
 
     void apriPannelloIsola(int tipo);
@@ -3626,6 +3933,405 @@ private:
         }
     }
 
+    void disegnaArcoAnello(float cx, float cy, float ra, float sw, float a0, float sweep, D2D1_COLOR_F col) {
+        if (sweep >= 2.0f * (float)M_PI - 0.001f) {
+            pennello->SetColor(col);
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            return;
+        }
+        if (sweep <= 0.001f) return;
+        const float a1 = a0 + sweep;
+        ID2D1PathGeometry* gArc = nullptr;
+        ID2D1GeometrySink* sArc = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
+            sArc->BeginFigure({cx + ra * std::cos(a0), cy + ra * std::sin(a0)}, D2D1_FIGURE_BEGIN_HOLLOW);
+            sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(a1), cy + ra * std::sin(a1)}, {ra, ra}, 0,
+                                          D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                          sweep > (float)M_PI ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+            sArc->EndFigure(D2D1_FIGURE_END_OPEN);
+            if (SUCCEEDED(sArc->Close())) {
+                pennello->SetColor(col);
+                dc->DrawGeometry(gArc, pennello, sw, tratto);
+            }
+        }
+        if (sArc) sArc->Release();
+        if (gArc) gArc->Release();
+    }
+
+    void disegnaScintilla(float cx, float cy, float rs, D2D1_COLOR_F col) {
+        const float k = rs * 0.17f;
+        ID2D1PathGeometry* g = nullptr;
+        ID2D1GeometrySink* s = nullptr;
+        if (SUCCEEDED(f2d->CreatePathGeometry(&g)) && SUCCEEDED(g->Open(&s))) {
+            s->BeginFigure({cx, cy - rs}, D2D1_FIGURE_BEGIN_FILLED);
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy - k}, {cx + rs, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx + k, cy + k}, {cx, cy + rs}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy + k}, {cx - rs, cy}));
+            s->AddQuadraticBezier(D2D1::QuadraticBezierSegment({cx - k, cy - k}, {cx, cy - rs}));
+            s->EndFigure(D2D1_FIGURE_END_CLOSED);
+            if (SUCCEEDED(s->Close())) {
+                pennello->SetColor(col);
+                dc->FillGeometry(g, pennello);
+            }
+        }
+        if (s) s->Release();
+        if (g) g->Release();
+    }
+
+    void disegnaIconaAI(const D2D1_RECT_F& r, float alfa, bool scuro) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const ai::Stato st = aiStato.statoGlobale;
+        const bool busy = st == ai::Stato::Occupato;
+
+        if (busy && d > 8.0f) {
+            const float ra = d * 0.34f;
+            const float sw = std::max(1.4f, d * 0.055f);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.12f * alfa) : D2D1::ColorF(0.15f, 0.35f, 0.90f, 0.12f * alfa));
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+
+            const float a0 = (float)std::fmod(ultimoT * 2.8, 2.0 * M_PI);
+            const float pulse = 0.5f + 0.5f * std::sin((float)ultimoT * 3.8f);
+            const D2D1_COLOR_F colArc = D2D1::ColorF(0.16f + 0.38f * pulse, 0.78f - 0.30f * pulse, 1.0f, (0.78f + 0.22f * pulse) * alfa);
+            disegnaArcoAnello(cx, cy, ra, sw, a0, (float)(1.35 * M_PI), colArc);
+        }
+
+        const float rs = d * (busy ? 0.21f : 0.25f);
+        D2D1_COLOR_F colSpark = scuro ? D2D1::ColorF(1, 1, 1, 0.90f * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.85f * alfa);
+        if (busy) colSpark = scuro ? D2D1::ColorF(0.48f, 0.85f, 1.0f, alfa) : D2D1::ColorF(0.22f, 0.42f, 0.98f, alfa);
+        else if (st == ai::Stato::InAttesa) colSpark = D2D1::ColorF(0.96f, 0.62f, 0.10f, alfa);
+        else if (st == ai::Stato::Errore) colSpark = D2D1::ColorF(0.95f, 0.28f, 0.24f, alfa);
+        else if (st == ai::Stato::Completato && !aiLetto) colSpark = D2D1::ColorF(0.20f, 0.78f, 0.36f, alfa);
+        disegnaScintilla(cx, cy, rs, colSpark);
+
+        if (aiStato.occupati > 1 && d > 10.0f) {
+            wchar_t b[12];
+            swprintf(b, 12, L"%d", aiStato.occupati);
+            const float rb = std::max(6.5f * dpi, d * 0.14f);
+            const float lb = std::max(rb * 2.0f, larghezzaTesto(b, fmtNome) + 6.0f * dpi);
+            const float bx = r.right - lb - d * 0.05f, by = r.bottom - 2.0f * rb - d * 0.05f;
+            pennello->SetColor(D2D1::ColorF(0.25f, 0.48f, 0.98f, 0.94f * alfa));
+            dc->FillRoundedRectangle({{bx, by, bx + lb, by + 2.0f * rb}, rb, rb}, pennello);
+            pennello->SetColor(D2D1::ColorF(1, 1, 1, alfa));
+            scrivi(b, fmtNome, {bx, by, bx + lb, by + 2.0f * rb});
+        }
+    }
+
+    void disegnaIconaLogi(const D2D1_RECT_F& r, float alfa, bool scuro) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+        if (d <= 8.0f) return;
+
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const float ra = d * 0.33f;
+        const float sw = std::max(1.8f, d * 0.075f);
+        const int bat = logiStato.batteriaMin;
+        const bool chg = logiStato.alcunoInCarica;
+        const bool animChg = chg && logiAnimCarica && bat >= 0;
+
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
+        dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+
+        const float pulse = animChg ? (0.5f + 0.5f * std::sin((float)ultimoT * 3.2f)) : 0.0f;
+        const bool customGlow = animChg && logiGlowColore != 0;
+        const float gr = customGlow ? (((logiGlowColore >> 16) & 255) / 255.0f) : 0.20f;
+        const float gg = customGlow ? (((logiGlowColore >> 8) & 255) / 255.0f) : 0.90f;
+        const float gb = customGlow ? ((logiGlowColore & 255) / 255.0f) : 1.0f;
+        const D2D1_COLOR_F colRing = chg ? D2D1::ColorF(0.16f + 0.10f * pulse, 0.80f + 0.10f * pulse, 0.98f, alfa)
+            : bat > 30 ? D2D1::ColorF(0.20f, 0.80f, 0.38f, alfa)
+            : bat >= 16 ? D2D1::ColorF(0.98f, 0.65f, 0.12f, alfa)
+            : D2D1::ColorF(0.95f, 0.28f, 0.25f, alfa);
+        auto disegnaArcoLogi = [&](float aStart, float aSweep, float width, D2D1_COLOR_F col) {
+            if (aSweep <= 0.004f) return;
+            if (aSweep >= 2.0f * (float)M_PI - 0.01f) {
+                pennello->SetColor(col);
+                dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, width);
+                return;
+            }
+            const float aEnd = aStart + aSweep;
+            ID2D1PathGeometry* gArc = nullptr;
+            ID2D1GeometrySink* sArc = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&gArc)) && SUCCEEDED(gArc->Open(&sArc))) {
+                sArc->BeginFigure({cx + ra * std::cos(aStart), cy + ra * std::sin(aStart)}, D2D1_FIGURE_BEGIN_HOLLOW);
+                sArc->AddArc(D2D1::ArcSegment({cx + ra * std::cos(aEnd), cy + ra * std::sin(aEnd)}, {ra, ra}, 0,
+                                              D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                                              aSweep > (float)M_PI ? D2D1_ARC_SIZE_LARGE : D2D1_ARC_SIZE_SMALL));
+                sArc->EndFigure(D2D1_FIGURE_END_OPEN);
+                if (SUCCEEDED(sArc->Close())) {
+                    pennello->SetColor(col);
+                    dc->DrawGeometry(gArc, pennello, width, tratto);
+                }
+            }
+            if (sArc) sArc->Release();
+            if (gArc) gArc->Release();
+        };
+        if (bat >= 0) {
+            const float a0 = -(float)M_PI / 2.0f;
+            const float sweep = (bat >= 100) ? (2.0f * (float)M_PI) : (2.0f * (float)M_PI * (bat / 100.0f));
+            if (animChg && bat > 0) {
+                disegnaArcoLogi(a0, sweep, sw * 2.2f, D2D1::ColorF(gr, gg, gb, (0.14f + 0.14f * pulse) * alfa));
+            }
+            disegnaArcoLogi(a0, sweep, sw, colRing);
+            if (animChg && sweep > 0.18f) {
+                const float phase = (float)std::fmod(ultimoT * 0.55, 1.0);
+                const float fadeIn = std::clamp(phase / 0.14f, 0.0f, 1.0f);
+                const float fadeOut = std::clamp((1.0f - phase) / 0.16f, 0.0f, 1.0f);
+                const float env = fadeIn * fadeOut;
+                const float tailLen = std::min(sweep * 0.45f, 0.52f);
+                const float headA = a0 + sweep * phase;
+                const float tailStart = std::max(a0, headA - tailLen);
+                const float tailSweep = headA - tailStart;
+                if (tailSweep > 0.02f) {
+                    const D2D1_COLOR_F trailCol = customGlow
+                        ? D2D1::ColorF(gr + (1.0f - gr) * 0.45f, gg + (1.0f - gg) * 0.45f, gb + (1.0f - gb) * 0.45f, 0.68f * env * alfa)
+                        : D2D1::ColorF(0.75f, 0.96f, 1.0f, 0.65f * env * alfa);
+                    disegnaArcoLogi(tailStart, tailSweep, sw * 1.15f, trailCol);
+                    const float tipLen = std::min(tailSweep, 0.14f);
+                    disegnaArcoLogi(headA - tipLen, tipLen, sw * 1.25f, D2D1::ColorF(1.0f, 1.0f, 1.0f, 0.92f * env * alfa));
+                }
+            }
+        }
+        auto disegnaLogoG = [&](float gcx, float gcy, float R, D2D1_COLOR_F col) {
+            const float rIn = R * 0.55f;
+            const float t = R - rIn;
+            pennello->SetColor(col);
+            ID2D1PathGeometry* gArcG = nullptr;
+            ID2D1GeometrySink* sArcG = nullptr;
+            if (SUCCEEDED(f2d->CreatePathGeometry(&gArcG)) && SUCCEEDED(gArcG->Open(&sArcG))) {
+                sArcG->BeginFigure({gcx, gcy - R}, D2D1_FIGURE_BEGIN_FILLED);
+                sArcG->AddArc(D2D1::ArcSegment({gcx, gcy + R}, {R, R}, 0,
+                                               D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sArcG->AddLine({gcx, gcy + rIn});
+                sArcG->AddArc(D2D1::ArcSegment({gcx, gcy - rIn}, {rIn, rIn}, 0,
+                                               D2D1_SWEEP_DIRECTION_CLOCKWISE, D2D1_ARC_SIZE_SMALL));
+                sArcG->EndFigure(D2D1_FIGURE_END_CLOSED);
+                if (SUCCEEDED(sArcG->Close())) dc->FillGeometry(gArcG, pennello);
+            }
+            if (sArcG) sArcG->Release();
+            if (gArcG) gArcG->Release();
+            const float rx = gcx + R * 0.92f;
+            const float ty = gcy - t * 0.35f;
+            const float by = gcy + R * 0.78f;
+            dc->FillRectangle({gcx, ty, rx, ty + t}, pennello);
+            dc->FillRectangle({rx - t, ty, rx, by}, pennello);
+        };
+
+        const float gR = d * 0.165f;
+        const float inkA = (bat >= 0 || logiStato.ghubAttivo) ? 0.92f : 0.45f;
+        const float sh = 0.32f + 0.28f * pulse;
+        const D2D1_COLOR_F colG = animChg
+            ? (customGlow
+                ? (scuro
+                    ? D2D1::ColorF(0.88f + (gr - 0.88f) * sh, 0.90f + (gg - 0.90f) * sh, 0.93f + (gb - 0.93f) * sh, inkA * alfa)
+                    : D2D1::ColorF(0.14f + (gr * 0.85f - 0.14f) * sh, 0.16f + (gg * 0.85f - 0.16f) * sh, 0.20f + (gb * 0.85f - 0.20f) * sh, inkA * alfa))
+                : (scuro ? D2D1::ColorF(0.76f + 0.18f * pulse, 0.94f + 0.06f * pulse, 1.0f, inkA * alfa)
+                         : D2D1::ColorF(0.06f, 0.48f + 0.10f * pulse, 0.82f + 0.12f * pulse, inkA * alfa)))
+            : (scuro ? D2D1::ColorF(0.88f, 0.90f, 0.93f, inkA * alfa)
+                     : D2D1::ColorF(0.14f, 0.16f, 0.20f, inkA * alfa));
+        disegnaLogoG(cx - d * 0.01f, cy, gR, colG);
+    }
+
+    void disegnaIconaWPlugin(const D2D1_RECT_F& r, float alfa, bool scuro, const wplugin::Widget& w) {
+        const float d = r.right - r.left;
+        pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.16f * alfa) : D2D1::ColorF(1, 1, 1, 0.82f * alfa));
+        dc->FillRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello);
+        pennello->SetColor(D2D1::ColorF(0, 0, 0, (scuro ? 0.3f : 0.08f) * alfa));
+        dc->DrawRoundedRectangle({r, d * 0.24f, d * 0.24f}, pennello, 1.0f);
+        if (d <= 8.0f) return;
+
+        const float cx = (r.left + r.right) / 2, cy = (r.top + r.bottom) / 2;
+        const bool animPulse = (w.iconaAnimazione == L"pulse" || w.iconaAnimazione == L"breathe");
+        const bool animWave = (w.iconaAnimazione == L"wave");
+        const bool animSpin = (w.iconaAnimazione == L"spin");
+        const double sec = (animPulse || animWave || animSpin) ? (vetro::ms() / 1000.0) : 0.0;
+        const float pulse = animPulse ? (0.5f + 0.5f * (float)std::sin(sec * 2.4)) : 0.0f;
+
+        auto lerpCol = [](D2D1_COLOR_F a, D2D1_COLOR_F b, float t) -> D2D1_COLOR_F {
+            return D2D1::ColorF(a.r + (b.r - a.r) * t, a.g + (b.g - a.g) * t, a.b + (b.b - a.b) * t, a.a + (b.a - a.a) * t);
+        };
+        const D2D1_COLOR_F baseAcc = w.iconaColore.valido
+            ? D2D1::ColorF(w.iconaColore.r, w.iconaColore.g, w.iconaColore.b, alfa)
+            : (scuro ? D2D1::ColorF(0.28f, 0.74f, 1.0f, alfa) : D2D1::ColorF(0.04f, 0.48f, 0.96f, alfa));
+        const float waveGeneric = (animWave && w.iconaGlyph != L"tailscale") ? (0.5f + 0.5f * (float)std::sin(sec * 2.8)) : 0.0f;
+        const D2D1_COLOR_F acc = animPulse
+            ? lerpCol(baseAcc, D2D1::ColorF(1, 1, 1, alfa), 0.18f * pulse)
+            : (waveGeneric > 0.0f ? lerpCol(baseAcc, D2D1::ColorF(1, 1, 1, alfa), 0.22f * waveGeneric) : baseAcc);
+        const D2D1_COLOR_F glowAcc = w.iconaGlow.valido
+            ? D2D1::ColorF(w.iconaGlow.r, w.iconaGlow.g, w.iconaGlow.b, alfa)
+            : acc;
+        const D2D1_COLOR_F ink = scuro ? D2D1::ColorF(1, 1, 1, 0.90f * alfa) : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.86f * alfa);
+        const bool haAnello = w.iconaAnello >= 0;
+
+        if (animPulse) {
+            const float haloA = (0.10f + 0.12f * pulse) * alfa;
+            pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, haloA * 0.22f));
+            dc->FillEllipse({{cx, cy}, d * (0.37f + 0.035f * pulse), d * (0.37f + 0.035f * pulse)}, pennello);
+            pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, haloA * 0.34f));
+            dc->FillEllipse({{cx, cy}, d * (0.28f + 0.025f * pulse), d * (0.28f + 0.025f * pulse)}, pennello);
+            pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, haloA * 0.48f));
+            dc->FillEllipse({{cx, cy}, d * (0.19f + 0.015f * pulse), d * (0.19f + 0.015f * pulse)}, pennello);
+        }
+
+        if (haAnello) {
+            const float ra = d * 0.33f;
+            const float sw = std::max(1.8f, d * 0.075f);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            const float sweep = 2.0f * (float)M_PI * (std::clamp(w.iconaAnello, 0, 100) / 100.0f);
+            disegnaArcoAnello(cx, cy, ra, sw, -(float)M_PI / 2.0f, sweep, acc);
+        }
+
+        if (!w.iconaTesto.empty()) {
+            IDWriteTextLayout* lay = nullptr;
+            if (SUCCEEDED(fdw->CreateTextLayout(w.iconaTesto.c_str(), (UINT32)w.iconaTesto.size(), fmtVoce, 400, 100, &lay))) {
+                lay->SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+                lay->SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+                lay->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                DWRITE_TEXT_METRICS tm{};
+                lay->GetMetrics(&tm);
+                const float maxW = d * (haAnello ? 0.44f : 0.72f);
+                const float maxH = d * (haAnello ? 0.40f : 0.56f);
+                const float scT = std::min(maxW / std::max(1.0f, tm.widthIncludingTrailingWhitespace),
+                                           maxH / std::max(1.0f, tm.height)) * (animPulse ? (1.0f + 0.05f * pulse) : 1.0f);
+                D2D1_MATRIX_3X2_F orig{};
+                dc->GetTransform(&orig);
+                D2D1::Matrix3x2F mText = D2D1::Matrix3x2F::Scale(scT, scT, {cx, cy});
+                if (animSpin) mText = mText * D2D1::Matrix3x2F::Rotation((float)std::fmod(sec * 75.0, 360.0), {cx, cy});
+                dc->SetTransform(mText * orig);
+                pennello->SetColor((haAnello || !w.iconaColore.valido) ? ink : acc);
+                lay->SetMaxWidth(400);
+                lay->SetMaxHeight(100);
+                dc->DrawTextLayout({cx - 200.0f, cy - 50.0f}, lay, pennello);
+                dc->SetTransform(orig);
+                lay->Release();
+            }
+            return;
+        }
+
+        D2D1_MATRIX_3X2_F orig{};
+        const bool haTrasfGlyph = animPulse || animSpin;
+        if (haTrasfGlyph) {
+            dc->GetTransform(&orig);
+            D2D1::Matrix3x2F xf = D2D1::Matrix3x2F::Identity();
+            if (animPulse) {
+                const float scP = 1.0f + 0.05f * pulse;
+                xf = xf * D2D1::Matrix3x2F::Scale(scP, scP, {cx, cy});
+            }
+            if (animSpin) {
+                xf = xf * D2D1::Matrix3x2F::Rotation((float)std::fmod(sec * 75.0, 360.0), {cx, cy});
+            }
+            dc->SetTransform(xf * orig);
+        }
+
+        const float s = haAnello ? 0.68f : 1.0f;
+        if (w.iconaGlyph == L"spark") {
+            disegnaScintilla(cx, cy, d * (haAnello ? 0.19f : 0.25f), acc);
+        } else if (w.iconaGlyph == L"battery") {
+            const float bw = d * 0.42f * s, bh = d * 0.24f * s, swB = std::max(1.2f, d * 0.045f * s);
+            const D2D1_RECT_F rb = {cx - bw * 0.5f - d * 0.02f * s, cy - bh * 0.5f, cx + bw * 0.5f - d * 0.02f * s, cy + bh * 0.5f};
+            pennello->SetColor(haAnello ? ink : acc);
+            dc->DrawRoundedRectangle({rb, bh * 0.22f, bh * 0.22f}, pennello, swB);
+            dc->FillRoundedRectangle({{rb.right + swB * 0.5f, cy - bh * 0.22f, rb.right + swB * 0.5f + d * 0.045f * s, cy + bh * 0.22f},
+                                      1.0f * dpi, 1.0f * dpi}, pennello);
+            const float pad = swB * 1.15f;
+            const float lvl = (haAnello ? std::clamp(w.iconaAnello, 0, 100) : 75) / 100.0f;
+            const float fw = std::max(0.0f, (rb.right - rb.left - 2.0f * pad) * lvl);
+            if (fw > 0.5f) {
+                pennello->SetColor(acc);
+                dc->FillRoundedRectangle({{rb.left + pad, rb.top + pad, rb.left + pad + fw, rb.bottom - pad},
+                                          bh * 0.10f, bh * 0.10f}, pennello);
+            }
+        } else if (w.iconaGlyph == L"thermometer") {
+            const float swT = std::max(1.2f, d * 0.042f * s), stemW = d * 0.11f * s;
+            const float topY = cy - d * 0.24f * s, bulbY = cy + d * 0.15f * s, bulbR = d * 0.105f * s;
+            pennello->SetColor(haAnello ? ink : acc);
+            dc->DrawRoundedRectangle({{cx - stemW * 0.5f, topY, cx + stemW * 0.5f, bulbY}, stemW * 0.5f, stemW * 0.5f}, pennello, swT);
+            dc->DrawEllipse({{cx, bulbY}, bulbR, bulbR}, pennello, swT);
+            pennello->SetColor(acc);
+            dc->FillEllipse({{cx, bulbY}, bulbR * 0.68f, bulbR * 0.68f}, pennello);
+            const float fillFrac = (haAnello ? std::clamp(w.iconaAnello, 15, 100) : 65) / 100.0f;
+            const float mercTop = bulbY - (bulbY - topY - stemW * 0.4f) * fillFrac;
+            dc->DrawLine({cx, bulbY}, {cx, mercTop}, pennello, std::max(1.2f, stemW * 0.48f), tratto);
+        } else if (w.iconaGlyph == L"cpu") {
+            const float hw = d * 0.18f * s, swC = std::max(1.2f, d * 0.042f * s), pinL = d * 0.075f * s;
+            pennello->SetColor(haAnello ? ink : acc);
+            dc->DrawRoundedRectangle({{cx - hw, cy - hw, cx + hw, cy + hw}, d * 0.045f * s, d * 0.045f * s}, pennello, swC);
+            for (int k : {-1, 1}) {
+                const float off = k * hw * 0.48f;
+                dc->DrawLine({cx + off, cy - hw}, {cx + off, cy - hw - pinL}, pennello, swC, tratto);
+                dc->DrawLine({cx + off, cy + hw}, {cx + off, cy + hw + pinL}, pennello, swC, tratto);
+                dc->DrawLine({cx - hw, cy + off}, {cx - hw - pinL, cy + off}, pennello, swC, tratto);
+                dc->DrawLine({cx + hw, cy + off}, {cx + hw + pinL, cy + off}, pennello, swC, tratto);
+            }
+            pennello->SetColor(acc);
+            dc->FillRoundedRectangle({{cx - hw * 0.46f, cy - hw * 0.46f, cx + hw * 0.46f, cy + hw * 0.46f},
+                                      d * 0.02f * s, d * 0.02f * s}, pennello);
+        } else if (w.iconaGlyph == L"ring" && !haAnello) {
+            const float ra = d * 0.28f, sw = std::max(1.8f, d * 0.07f);
+            pennello->SetColor(scuro ? D2D1::ColorF(1, 1, 1, 0.15f * alfa) : D2D1::ColorF(0, 0, 0, 0.10f * alfa));
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            pennello->SetColor(acc);
+            dc->DrawEllipse({{cx, cy}, ra, ra}, pennello, sw);
+            dc->FillEllipse({{cx, cy}, d * 0.08f, d * 0.08f}, pennello);
+        } else if (w.iconaGlyph == L"tailscale") {
+            const float step = d * 0.175f * s;
+            const float dotR = d * 0.058f * s;
+            const D2D1_COLOR_F muted = scuro ? D2D1::ColorF(1, 1, 1, 0.22f * alfa)
+                                             : D2D1::ColorF(0.14f, 0.16f, 0.22f, 0.18f * alfa);
+            const D2D1_COLOR_F white = D2D1::ColorF(1, 1, 1, alfa);
+            for (int row = 0; row < 3; row++) {
+                for (int col = 0; col < 3; col++) {
+                    const float px = cx + (col - 1) * step;
+                    const float py = cy + (row - 1) * step;
+                    const bool active = (row == 1) || (row == 2 && col == 1);
+                    if (!active) {
+                        pennello->SetColor(muted);
+                        dc->FillEllipse({{px, py}, dotR, dotR}, pennello);
+                        continue;
+                    }
+                    if (animWave) {
+                        const int idx = (row == 1) ? col : 3;
+                        const double phase = sec * 2.8 - idx * 0.65;
+                        const float wv = 0.5f + 0.5f * (float)std::sin(phase);
+                        const float glowR = dotR * (1.55f + 0.45f * wv);
+                        pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, (0.14f + 0.22f * wv) * alfa));
+                        dc->FillEllipse({{px, py}, glowR, glowR}, pennello);
+                        const float rDot = dotR * (1.0f + 0.12f * wv);
+                        const D2D1_COLOR_F crest = w.iconaGlow.valido ? lerpCol(glowAcc, white, 0.22f) : white;
+                        pennello->SetColor(lerpCol(acc, crest, (w.iconaGlow.valido ? 0.50f : 0.35f) * wv));
+                        dc->FillEllipse({{px, py}, rDot, rDot}, pennello);
+                    } else if (animPulse) {
+                        const float glowR = dotR * (1.55f + 0.35f * pulse);
+                        pennello->SetColor(D2D1::ColorF(glowAcc.r, glowAcc.g, glowAcc.b, (0.12f + 0.16f * pulse) * alfa));
+                        dc->FillEllipse({{px, py}, glowR, glowR}, pennello);
+                        pennello->SetColor(acc);
+                        dc->FillEllipse({{px, py}, dotR, dotR}, pennello);
+                    } else {
+                        pennello->SetColor(acc);
+                        dc->FillEllipse({{px, py}, dotR, dotR}, pennello);
+                    }
+                }
+            }
+        } else {
+            if (!haAnello) {
+                pennello->SetColor(D2D1::ColorF(acc.r, acc.g, acc.b, 0.22f * alfa));
+                dc->FillEllipse({{cx, cy}, d * 0.24f, d * 0.24f}, pennello);
+            }
+            pennello->SetColor(acc);
+            dc->FillEllipse({{cx, cy}, d * (haAnello ? 0.12f : 0.16f), d * (haAnello ? 0.12f : 0.16f)}, pennello);
+        }
+
+        if (haTrasfGlyph) dc->SetTransform(orig);
+    }
+
     bool renderLauncher();
 
     static LRESULT CALLBACK procLauncher(HWND h, UINT m, WPARAM w, LPARAM l);
@@ -3687,6 +4393,9 @@ private:
         Voce& v = voci[i];
         if (v.avvio == AVVIO_LAUNCHER) { apriLauncher(); return; }
         if (v.avvio == AVVIO_CONTROLLO) { apriCentro(P_CONTROLLO); return; }
+        if (v.avvio == AVVIO_AI) { aiLetto = true; dirty = true; apriCentro(P_AI); return; }
+        if (v.avvio == AVVIO_LOGI) { apriCentro(P_LOGI); return; }
+        if (eWPlugin(v.avvio)) { apriWPlugin(idWPlugin(v.avvio)); return; }
         if (v.avvio == AVVIO_PILA) { apriPila(v); return; }
         if (v.avvio == AVVIO_CESTINO) { ShellExecuteW(nullptr, L"open", L"shell:RecycleBinFolder", nullptr, nullptr, SW_SHOWNORMAL); return; }
         if (v.finestre.empty()) {
@@ -3864,7 +4573,7 @@ private:
         const bool libero = premuta < 0 && !trascinando && menu::aperti == 0 && !lAperto && nessunaScheda() && attivo;
         const int s = (mouseDentro && mouseSulDock && libero) ? sopra : -1;
         const bool conFinestre = s >= 0 && s < (int)voci.size() && !voci[s].uscente && !voci[s].finestre.empty() &&
-                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_CONTROLLO;
+                                 voci[s].avvio != AVVIO_LAUNCHER && voci[s].avvio != AVVIO_CONTROLLO && voci[s].avvio != AVVIO_AI && voci[s].avvio != AVVIO_LOGI && !eWPlugin(voci[s].avvio);
         if (s != antCandidata) { antCandidata = s; antSopraT = ora; }
         if (ant.aperta()) {
             ant.riconcilia();   // (via le schede delle finestre chiuse, anche con il mouse sopra)
@@ -3993,6 +4702,90 @@ private:
         // copia: mentre il menu e' aperto (ha un suo ciclo dei messaggi) l'elenco delle app puo' essere rifatto da
         // capo, e un riferimento a voci[i] resterebbe a puntare a memoria liberata
         const Voce v = voci[i];
+        if (v.avvio == AVVIO_AI) {
+            const auto avviabili = ai::elencoAvviabili();
+            const ai::Avviabile* cli = ai::primoTerminale(avviabili);
+            std::vector<menu::Voce> vv = {
+                menu::titolo(testi::t(L"Monitor AI", L"AI Monitor")),
+                menu::voce(testi::t(L"Apri Monitor AI", L"Open AI Monitor"), 1),
+            };
+            auto nc = menu::voce(testi::t(L"Nuova chat", L"New chat"), 7);
+            nc.disattivata = (cli == nullptr);
+            vv.push_back(nc);
+            const bool haCompletati = std::any_of(aiStato.agenti.begin(), aiStato.agenti.end(), [](const ai::Agente& a) {
+                return a.stato == ai::Stato::Completato || a.stato == ai::Stato::Errore;
+            });
+            auto pc = menu::voce(testi::t(L"Pulisci completati", L"Clear completed"), 2);
+            pc.disattivata = !haCompletati;
+            vv.push_back(pc);
+            vv.push_back(menu::separatore());
+            auto ha = menu::voce(testi::t(L"Hook Antigravity CLI", L"Antigravity CLI hooks"), 3);
+            ha.spuntata = ai::hookAntigravityInstallati();
+            vv.push_back(ha);
+            auto hc = menu::voce(testi::t(L"Hook Claude Code", L"Claude Code hooks"), 4);
+            hc.spuntata = ai::hookClaudeInstallati();
+            vv.push_back(hc);
+            vv.push_back(menu::separatore());
+            auto av = menu::voce(testi::t(L"Avvisi nel notch", L"Notch alerts"), 6);
+            av.spuntata = aiAvvisi;
+            vv.push_back(av);
+            vv.push_back(menu::separatore());
+            vv.push_back(menu::voce(testi::t(L"Apri cartella hook", L"Open hooks folder"), 5));
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) { aiLetto = true; dirty = true; apriCentro(P_AI); }
+            else if (s == 7 && cli) ai::avviaNuovaChat(*cli, ai::cartellaPredefinita(aiStato));
+            else if (s == 2) {
+                aiMon.pulisciCompletati();
+                sincronizzaAI();
+            }
+            else if (s == 3) ai::installaHookAntigravity(!ai::hookAntigravityInstallati());
+            else if (s == 4) ai::installaHookClaude(!ai::hookClaudeInstallati());
+            else if (s == 5) {
+                const std::wstring dir = ai::cartellaHook();
+                if (!dir.empty()) {
+                    ai::dettagli::creaCartelle(dir);
+                    ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+                }
+            }
+            else if (s == 6) impostaAIAvvisi(!aiAvvisi);
+            return;
+        }
+        if (v.avvio == AVVIO_LOGI) {
+            std::vector<menu::Voce> vv = {
+                menu::titolo(L"Logitech"),
+                menu::voce(testi::t(L"Apri Logitech", L"Open Logitech"), 1),
+                menu::voce(testi::t(L"Aggiorna", L"Refresh"), 2),
+                menu::separatore(),
+                menu::voce(testi::t(L"Apri Logitech G HUB", L"Open Logitech G HUB"), 3),
+            };
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) apriCentro(P_LOGI);
+            else if (s == 2) logiMon.aggiornaOra();
+            else if (s == 3) logitech::apriGHub();
+            return;
+        }
+        if (eWPlugin(v.avvio)) {
+            const std::wstring id = idWPlugin(v.avvio);
+            const std::wstring nome = v.nome;
+            std::vector<menu::Voce> vv = {
+                menu::titolo(nome),
+                menu::voce(testi::t(L"Apri ", L"Open ") + nome, 1),
+                menu::voce(testi::t(L"Nascondi widget", L"Hide widget"), 2),
+                menu::separatore(),
+                menu::voce(testi::t(L"Apri cartella widget", L"Open widgets folder"), 3),
+            };
+            SetForegroundWindow(icone);
+            const int s = (int)menu::mostra(vv, puntoMenu(pt), icone, lato == 0);
+            if (s == 1) {
+                usa(0);
+                if (!(pannelloTipo == P_WPLUGIN && !pChiusura && wplugIdAperto == id)) apriWPlugin(id);
+            }
+            else if (s == 2) impostaWPlugin(id, false);
+            else if (s == 3) wplugin::apriCartellaWidget();
+            return;
+        }
         if (v.avvio == AVVIO_CESTINO || v.avvio == AVVIO_PILA) {   // cestino e pila: menu loro
             const bool c = v.avvio == AVVIO_CESTINO;
             std::vector<menu::Voce> vv = {menu::titolo(v.nome), menu::voce(c ? testi::t(L"Apri", L"Open") : testi::t(L"Apri la cartella", L"Open folder"), 1)};
@@ -4240,6 +5033,9 @@ private:
             case WM_CLOSE: return 0;   // (le finestre del dock restano)
             case WM_ICONA_PRONTA: d->raccogliIcone(); return 0;
             case WM_NOTIFICHE_LETTE: d->notificheLette(); return 0;
+            case WM_AI_AGGIORNATO: d->sincronizzaAI(); return 0;
+            case WM_LOGI_AGGIORNATO: d->sincronizzaLogi(); return 0;
+            case WM_WPLUGIN_AGGIORNATO: d->sincronizzaWPlugin(); return 0;
             case WM_APPBAR: if (w == ABN_POSCHANGED && d->appbarOk) d->aggiornaAppbar(); return 0;   // un'altra appbar si e' spostata
             case WM_LAVORO_FATTO: { if (!consegna::riprendi(h, m, (const void*)l)) return 0; Sottofondo* s = (Sottofondo*)l; s->applica(); delete s; return 0; }
             case WM_DISPLAYCHANGE: d->cambiaSchermo(); return 0;
